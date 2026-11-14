@@ -13,9 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from ...contracts.contigs import AnalysisContigs
 from ...contracts.evidence import ContigEvidence
-from ...contracts.payload import from_payload
 from ...contracts.pedigree import (
     ChromosomeScores,
     ChromosomeSummaryView,
@@ -41,7 +39,7 @@ from ...science.pedigree import run as science
 from ...science.pedigree.parameters import ExclusionParameters, PedigreeParameters
 from ...science.pedigree.resampling import FitResult
 from ...store.container import CheckpointFile
-from ...store.protocol import NumericalPolicy, claim, read_items
+from ...store.protocol import NumericalPolicy, claim
 from ...store.store import CheckpointStore
 from ..evidence import records as evidence_records
 from ..framework import (
@@ -223,20 +221,10 @@ def _resumed(
 
 
 def _classification(inputs: DecisionStageInputs, parameters: PedigreeParameters) -> regimes.Regime:
-    """Recompute the branch from resident layouts or the same small stored headers."""
-    layouts = []
-    for value in inputs.prepared:
-        if isinstance(value, PreparedChromosome):
-            if value.omitted_reason is None:
-                layouts.append(regimes.layout(value, parameters))
-        else:
-            stored = read_items(value.file, prepare.KEY, value.identity,
-                ("schema", "contig", "component_count", "omitted_reason", "layout"))
-            if stored is None:
-                raise InvariantError("pedigree requires its complete prepared layout")
-            if stored.payload["omitted_reason"] is None:
-                layouts.append(prepare.layout_summary(stored.payload, parameters)[0])
-    return regimes.classify(tuple(layouts), parameters)
+    """The branch from the genome's material U (the stacking read it from the same prepared layouts as the
+    barrier and the bound-input reader, regimes.axis)."""
+    genome = inputs.genome
+    return regimes.classify(genome.material_morgans, len(genome.contigs), parameters)
 
 
 def finish_not_assessable(
@@ -271,7 +259,7 @@ def run(
     With ``receipt`` (the stored route) the final reply is the published record's
     key and identity rather than the product; it requires the run ``file``.
     """
-    precheck(len(inputs.genome.sample_ids), len(inputs.contigs), parameters, basis="configured")
+    precheck(len(inputs.genome.sample_ids), basis="configured")
     if tuple(p.contig for p in inputs.prepared) != inputs.contigs:
         raise InputError("prepared inputs do not follow configured contig order")
     if receipt and file is None:
@@ -286,10 +274,9 @@ def run(
             tuple(_summary(p) for p in inputs.prepared), classification, parameters,
             replace(inputs.identities, panel="", relatedness_families="", floored_scores=(), regime=classification.name),
             file=file, numerical_policy=numerical_policy, receipt=receipt)
-    if classification is not None:
-        if classification.name == "low_material" and inputs.genome.regime != "low_material":
-            raise InputError("prepared low-material layout requires block-complete scores")
-        inputs = replace(inputs, identities=replace(inputs.identities, regime=classification.name))
+    if classification.name != inputs.genome.regime:
+        raise InputError("unit scores' regime differs from their material")
+    inputs = replace(inputs, identities=replace(inputs.identities, regime=classification.name))
     state = science.start_full_fit(inputs.genome, parameters)
     if isinstance(state, Pedigree):
         raise InputError("score block axis differs from its prepared layout")
@@ -361,29 +348,26 @@ def _requested(
     receipt: bool = False,
 ) -> Expansion:
     """Freeze the exclusion request, then expose independent per-contig exclusion work."""
-    request = science.exclusion_request(decided, inputs.contigs, inputs.relatedness, parameters)
+    request = science.exclusion_request(decided, inputs.contigs, inputs.relatedness, parameters,
+                                        tuple(_summary(p).configured_morgans for p in inputs.prepared))
     identities = _dependencies(inputs, request, parameters, numerical_policy)
     if file is not None:
         publish_product(
             file, REQUEST, _request_identity(inputs, parameters, numerical_policy), request, RequestAdapter()
         )
-    parts = (
-        tuple(
-            _exclusion_task(
-                c,
-                inputs.evidence[c],
-                request.dyads,
-                parameters.exclusion,
-                len(inputs.contigs),
-                len(inputs.genome.sample_ids),
-                cores=workers,
-                file=None if contig_files is None else contig_files[c],
-                identity=None if contig_files is None else dict(identities.exclusion)[c],
-            )
-            for c in inputs.contigs
+    parts = tuple(
+        _exclusion_task(
+            c,
+            inputs.evidence[c],
+            request.dyads,
+            parameters.exclusion,
+            log_weight,
+            len(inputs.genome.sample_ids),
+            cores=workers,
+            file=None if contig_files is None else contig_files[c],
+            identity=None if contig_files is None else dict(identities.exclusion)[c],
         )
-        if len(request.dyads)
-        else ()
+        for c, log_weight in science.exclusion_contigs(request)
     )
     relationship_parts = (
         tuple(
@@ -455,7 +439,7 @@ def _release(
     numerical_policy: NumericalPolicy | None = None,
     receipt: bool = False,
 ) -> Expansion:
-    count_parts = len(inputs.contigs) if len(request.dyads) else 0
+    count_parts = len(science.exclusion_contigs(request))
     count_evidence = tuple(x for x in evidence[:count_parts] if isinstance(x, ExclusionEvidence))
     relationship_evidence = tuple(x for x in evidence[count_parts:] if isinstance(x, RelationshipEvidence))
     if len(count_evidence) != count_parts or len(relationship_evidence) != len(evidence) - count_parts:
@@ -572,7 +556,7 @@ def _exclusion_stored(
     reference: StoredEvidence,
     dyads: np.ndarray,
     parameters: ExclusionParameters,
-    configured_contigs: int,
+    log_weight: float,
     sample_count: int,
     *,
     threads: int = 1,
@@ -585,7 +569,7 @@ def _exclusion_stored(
         evidence,
         dyads,
         parameters,
-        configured_contigs,
+        log_weight,
         sample_count,
         threads=threads,
         file=file,
@@ -598,7 +582,7 @@ def _exclusion_task(
     evidence: ContigEvidence | StoredEvidence,
     dyads: np.ndarray,
     parameters: ExclusionParameters,
-    configured_contigs: int,
+    log_weight: float,
     sample_count: int,
     *,
     cores: int,
@@ -611,7 +595,7 @@ def _exclusion_task(
             evidence,
             dyads,
             parameters,
-            configured_contigs,
+            log_weight,
             sample_count,
             cores=cores,
             file=file,
@@ -620,7 +604,7 @@ def _exclusion_task(
     return Task(
         TaskKey("pedigree", "exclusion", contig),
         _exclusion_stored,
-        args=(contig, evidence, dyads, parameters, configured_contigs, sample_count),
+        args=(contig, evidence, dyads, parameters, log_weight, sample_count),
         kwargs=dict(file=file, identity=identity),
         inputs=(RecordKey(contig, "evidence"),),
         outputs=(RecordKey(contig, exclusion.KEY),),
@@ -725,9 +709,7 @@ def run_stored(
     manifest = store.manifest("run") if manifest is None else manifest
     if manifest is None:
         raise InputError("pedigree requires the bound run manifest")
-    configured_parameters = from_payload(PedigreeParameters, manifest["parameters"]["pedigree"])
-    precheck(len(manifest["sample_ids"]), len(AnalysisContigs.from_manifest(manifest).included),
-             configured_parameters, basis="configured")
+    precheck(len(manifest["sample_ids"]), basis="configured")
     reader = result_reader(store, manifest, product="pedigree")
     if reader is not None:
         cached = load_product(store.run, PRODUCT, reader.identity, PedigreeAdapter())
@@ -740,8 +722,7 @@ def run_stored(
             parameters, bound.dependencies, file=store.run, numerical_policy=bound.policy, receipt=True)
         assert isinstance(completed_receipt, dict)
         return completed_receipt
-    precheck(len(bound.sample_ids), len(bound.contigs), parameters, basis="configured")
-    precheck(len(bound.sample_ids), len(bound.informative_contigs), parameters, basis="informative")
+    precheck(len(bound.sample_ids), basis="informative")
 
     def chromosome_scores() -> Iterator[ChromosomeScores]:
         for c, identity in bound.dependencies.floored_scores:
@@ -752,8 +733,10 @@ def run_stored(
             del value
 
     assert bound.panel is not None
-    genome = stacking.stack(bound.sample_ids, bound.panel, chromosome_scores(), bound.eligibility,
-                            regime=bound.dependencies.regime)
+    genome = stacking.stack(bound.sample_ids, bound.panel, chromosome_scores(), bound.eligibility, parameters,
+                            axis=bound.axis, summary=bound.summary)
+    if genome.regime != bound.dependencies.regime:
+        raise InvariantError("stacked material differs from the prepared layouts' regime")
     family = families_records.load(store.run, bound.dependencies.relatedness_families)
     if family is None or family.sample_ids != bound.sample_ids:
         raise InputError("relatedness/families sample axis differs from the pedigree")

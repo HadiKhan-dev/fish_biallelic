@@ -94,17 +94,18 @@ class FamilyParameters:
         default=1.0,
         metadata={
             "provenance": (
-                "Target genetic length of support units (Morgans); partitions chromosomes for "
-                "member and parent stability summaries."
+                "Length of the support units (Morgans of the configured working map, DESIGN_417 D5): the family "
+                "sites' axis pooled over contigs in configured order is cut into consecutive units of this "
+                "length, each weighted by its Morgans in the member and parent support shares."
             ),
         },
     )
-    rate_is_measured: bool = field(
-        default=False,
+    support_tail_morgans: float = field(
+        default=0.5,
         metadata={
             "provenance": (
-                "Treat fallback map rates as measured support distance (boolean); otherwise clip "
-                "to measured map bounds and use zero length when no map exists."
+                "Final-piece length (Morgans) below which the last piece of the pooled support axis joins the "
+                "unit before it (DESIGN_417 D5, the pedigree material rule)."
             ),
         },
     )

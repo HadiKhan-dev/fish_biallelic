@@ -1,6 +1,6 @@
 """Preserve one cumulative map and its forward/inverse coordinate conventions (EC27).
 
-Owns ChromosomeGeneticMap, GeneticMapSet and measured_coordinates; no I/O, engine
+Owns ChromosomeGeneticMap and GeneticMapSet; no I/O, engine
 or science imports. Inverse plateaus select the leftmost knot at equality and
 start strictly higher coordinates after the plateau's right edge. Tails use the
 same fallback slope in both directions; zero slope refuses unattainable values.
@@ -24,7 +24,6 @@ __all__ = [
     "ChromosomeGeneticMap",
     "GeneticMap",
     "GeneticMapSet",
-    "measured_coordinates",
     "DEFAULT_RATE_CM_PER_MB",
     "MAP_FORMAT",
 ]
@@ -196,21 +195,3 @@ class GeneticMapSet:
 
 # Both public names identify the same constant-rate map type.
 GeneticMap = ChromosomeGeneticMap
-
-
-def measured_coordinates(
-    genetic_map: ChromosomeGeneticMap, positions: ArrayLike, rate_is_measured: bool
-) -> NDArray[np.float64]:
-    """Return measured Morgans at bp positions, clipping unmeasured map tails.
-
-    With rate_is_measured, the supplied fallback measures tails and absent maps;
-    otherwise an absent map measures zeros. Input vectors are never mutated.
-    Carried from relatedness/stage.py:61 and pedigree/prepare.py:118 (EC27).
-    """
-    positions = np.asarray(positions, dtype=np.float64)
-    if rate_is_measured:
-        return np.asarray(genetic_map.cumulative_morgans(positions), dtype=np.float64)
-    if not genetic_map.has_map:
-        return np.zeros(len(positions))
-    knots = genetic_map.positions_bp
-    return np.asarray(genetic_map.cumulative_morgans(np.clip(positions, knots[0], knots[-1])), dtype=np.float64)

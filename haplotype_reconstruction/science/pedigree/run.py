@@ -9,7 +9,6 @@ must agree; slots are filtered rather than reassigned after withdrawal.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 
 import numpy as np
@@ -41,9 +40,9 @@ from ...core.errors import InputError, InvariantError
 from . import api, count, decision, exclusion, guard, regimes
 from .eligibility import ParentEligibility
 from .parameters import PedigreeParameters
-from .resampling import minimum_contigs_for_tier
 
 __all__ = [
+    "exclusion_contigs",
     "precheck",
     "start_full_fit",
     "complete_decision",
@@ -53,43 +52,27 @@ __all__ = [
 ]
 
 
-def precheck(
-    n_samples: int, contigs: int, parameters: PedigreeParameters, *, basis: str = "informative"
-) -> PedigreePrecheck:
-    """Reject N<3; report chromosome eligibility and the configured reach warning.
-
-    Workflow callers apply the configured check only when they will reach pedigree;
-    start_full_fit applies the informative check after preparation omits uninformative contigs.
-    """
+def precheck(n_samples: int, *, basis: str = "informative") -> PedigreePrecheck:
+    """Reject N < 3. Material (never a count of contigs) is stated by the run's TierReach."""
     if n_samples < 3:
         raise InputError(f"pedigree requires at least 3 samples; received {n_samples}")
-    minimum = int(math.ceil(parameters.exposure.minimum_exposed_units))
-    tier_minimum = minimum_contigs_for_tier(parameters.release.tier_b, minimum)
-    return PedigreePrecheck(n_samples, contigs, minimum, tier_minimum, contigs < tier_minimum, basis)
+    return PedigreePrecheck(n_samples, basis)
 
 
-def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters, *, prepared=None) -> decision.FullFit | Pedigree:
-    """Fit the supplied composite evidence after checking the informative contig axis."""
-    precheck(len(scores.sample_ids), len(scores.contigs), parameters)
-    if prepared is not None:
+def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters) -> decision.FullFit | Pedigree:
+    """Fit the supplied unit evidence; a run below the assessable material gets the completed unresolved product."""
+    precheck(len(scores.sample_ids))
+    classified = regimes.classify(scores.material_morgans, len(scores.contigs), parameters)
+    if classified.name != scores.regime:
+        raise InputError("unit scores' regime differs from their material")
+    if classified.name == "not_assessable":
         from . import not_assessable
-        from ...contracts.pedigree import ChromosomeSummaryView
-        classified = regimes.classify(tuple(regimes.layout(p, parameters) for p in prepared
-                                            if p.omitted_reason is None), parameters)
-        if classified.name == "not_assessable":
-            summary = tuple(ChromosomeSummaryView(p.contig, p.component_count, len(p.components),
-                                                 p.informative_markers, p.omitted_reason) for p in prepared)
-            return not_assessable.product(scores.sample_ids, tuple(p.contig for p in prepared),
-                                          summary, classified.reach, parameters)
-    if scores.regime in ("low_material", "not_assessable"):
-        classified = regimes.for_blocks(len(scores.contigs), parameters)
-        if classified.name == "not_assessable":
-            from . import not_assessable
-            if not scores.chromosome_summary and scores.informative_contigs:
-                raise InputError("not-assessable scored inputs require their prepared chromosome summaries")
-            return not_assessable.product(scores.sample_ids, scores.informative_contigs,
-                                          scores.chromosome_summary, classified.reach, parameters)
-    return decision.start_fit(scores, ParentEligibility.unrestricted(scores.sample_ids), regimes.effective(parameters, scores.regime))
+        if not scores.chromosome_summary and scores.informative_contigs:
+            raise InputError("not-assessable scored inputs require their prepared chromosome summaries")
+        return not_assessable.product(scores.sample_ids, scores.informative_contigs,
+                                      scores.chromosome_summary, classified.reach, parameters)
+    return decision.start_fit(scores, ParentEligibility.unrestricted(scores.sample_ids),
+                              regimes.effective(parameters, scores.regime))
 
 
 def complete_decision(state: decision.FullFit, resampled: Resampling, parameters: PedigreeParameters) -> Decision:
@@ -98,9 +81,11 @@ def complete_decision(state: decision.FullFit, resampled: Resampling, parameters
 
 
 def exclusion_request(
-    decided: Decision, contigs: tuple[str, ...], relatedness: GuardRelatedness, parameters: PedigreeParameters
+    decided: Decision, contigs: tuple[str, ...], relatedness: GuardRelatedness, parameters: PedigreeParameters,
+    configured_morgans: Sequence[float],
 ) -> ExclusionRequest:
-    """Freeze independent count-exclusion and painting-relationship queries."""
+    """Freeze independent count-exclusion and painting-relationship queries; ``configured_morgans``: each
+    configured contig's material (the fixed exclusion weights, DESIGN_417 D9)."""
     parameters = regimes.effective(parameters, decided.scores.regime)
     sample_ids, rows = decided.scores.sample_ids, decided.alternatives.rows
     dyads = count.target_dyads(decided.tier_b, rows, decided.eligibility).reshape(-1, 2)
@@ -108,7 +93,11 @@ def exclusion_request(
     families = guard.edge_families(sample_ids, before.parents, before.children, relatedness, parameters)
     relationship = guard.relationship_request(families, sample_ids, contigs, parameters)
     dyads.setflags(write=False)
-    return ExclusionRequest(sample_ids, tuple(contigs), dyads, len(dyads), before, relationship)
+    if len(configured_morgans) != len(contigs):
+        raise InputError("exclusion weights must follow the configured contig axis")
+    log_weights = exclusion.contig_log_weights(configured_morgans) if len(dyads) else ()
+    return ExclusionRequest(sample_ids, tuple(contigs), dyads, len(dyads), before, relationship,
+                            log_weights=log_weights)
 
 
 def release_decision(
@@ -132,22 +121,26 @@ def release_decision(
     targets = request.target_count
     dyads = scored[:targets]
     edge_set = set(zip(before.parents.tolist(), before.children.tolist(), strict=True))
-    chromosomes: list[dict[str, str | int]] | None = None
+    chromosomes: list[dict[str, str | int | float]] | None = None
     exclusion_status = "no_unresolved_candidates"
     lower, upper, observed = np.empty(0), None, np.empty(0, dtype=np.int64)
     if len(scored):
-        if len(evidence) != len(request.contigs):
-            raise InvariantError(f"decision requires {len(scored)} exclusion dyads on every configured contig")
-        for contig, value in zip(request.contigs, evidence, strict=True):
+        weighted = exclusion_contigs(request)
+        if len(evidence) != len(weighted):
+            raise InvariantError(f"decision requires {len(scored)} exclusion dyads on every contig with material")
+        for (contig, log_weight), value in zip(weighted, evidence, strict=True):
             if value.contig != contig or not np.array_equal(value.dyads, scored):
                 raise InvariantError(f"decision exclusion dyads differ from supplied evidence on {contig}")
+            if value.log_weight != log_weight:
+                raise InvariantError(f"exclusion evidence on {contig} carries another weight than the request")
             if value.log_e.shape != (len(scored),) or value.observed_sites.shape != (len(scored),):
                 raise InvariantError(f"exclusion evidence axes differ on {contig}")
             if value.log_e_upper is not None and value.log_e_upper.shape != (len(scored),):
                 raise InvariantError(f"exclusion upper endpoint axis differs on {contig}")
         lower, upper, observed = exclusion.combine(evidence)
         chromosomes = [
-            dict(contig=value.contig, markers=value.markers, pattern_fallback_samples=value.pattern_fallback_samples)
+            dict(contig=value.contig, markers=value.markers, pattern_fallback_samples=value.pattern_fallback_samples,
+                 weight=float(np.exp(value.log_weight)))
             for value in evidence
         ]
         if targets:
@@ -183,13 +176,13 @@ def release_decision(
         sample_ids,
         [
             api.calls(released.tier_b, rows).parents,
-            *([api.calls(decided.tier_a, rows).parents] if decided.scores.regime == "standard" else []),
+            *([api.calls(decided.tier_a, rows).parents] if decided.tier_a_assessed else []),
             api.calls(decided.complete, rows).parents,
             decided.candidates.parents,
             np.where(released.partial_b.supported, released.partial_b.parents, NO_PARENT),
             np.where(decided.partial_b.supported, decided.partial_b.parents, NO_PARENT),
             *([np.where(decided.partial_a.supported, decided.partial_a.parents, NO_PARENT)]
-              if decided.scores.regime == "standard" else []),
+              if decided.tier_a_assessed else []),
         ],
         reverse=parameters.reverse_conventions,
     )
@@ -247,18 +240,21 @@ def assemble(
         reports,
         parameters,
     )
-    if decided.scores.regime == "low_material":
-        from .low_labels import label_views
-        numeric = label_views(numeric, released)
-        from dataclasses import replace
-        from ...contracts.pedigree import BlockSummaryView
-        scores = decided.scores
-        assert scores.block_chromosome is not None
-        numeric = replace(numeric, regime="low_material", block_summary=tuple(
-            BlockSummaryView(scores.real_contigs[int(scores.block_chromosome[i])], i, d.component,
-                d.first_bin, d.stop_bin - 1, d.nominal_index, d.working_morgans,
-                int(scores.total_bins[i]), int(scores.informative_markers[i]))
-            for i, d in enumerate(scores.block_descriptors)))
+    from dataclasses import replace
+    from ...contracts.pedigree import BlockSummaryView
+    from .low_labels import label_views
+    numeric = label_views(numeric, released, low_material=decided.scores.regime == "low_material",
+                          tier_a=decided.tier_a_assessed)
+    scores = decided.scores
+    if scores.piece_contig is not None and scores.piece_unit is not None:
+        assert scores.piece_bins is not None and scores.piece_markers is not None
+        numeric = replace(numeric, regime=scores.regime, block_summary=tuple(
+            BlockSummaryView(scores.real_contigs[int(scores.piece_contig[i])], int(scores.piece_unit[i]),
+                d.component, d.first_bin, d.stop_bin - 1, d.nominal_index, d.working_morgans,
+                int(scores.piece_bins[i]), int(scores.piece_markers[i]))
+            for i, d in enumerate(scores.pieces)))
+    else:
+        numeric = replace(numeric, regime=scores.regime)
     product = Pedigree(
         decided.scores.sample_ids,
         released.request.contigs,
@@ -282,6 +278,15 @@ def assemble(
         regime=decided.scores.regime,
     )
     return PedigreeResult(product, decided, released.count_release, released.orientation_ranks, released.exclusion)
+
+
+def exclusion_contigs(request: ExclusionRequest) -> tuple[tuple[str, float], ...]:
+    """(contig, log weight) of the configured contigs that carry material and so get an exclusion task."""
+    if not len(request.dyads):
+        return ()
+    if len(request.log_weights) != len(request.contigs):
+        raise InvariantError("exclusion request weights do not follow its contigs")
+    return tuple((c, w) for c, w in zip(request.contigs, request.log_weights, strict=True) if np.isfinite(w))
 
 
 def relative_request(released: ReleasedDecision) -> RelativeRequest:

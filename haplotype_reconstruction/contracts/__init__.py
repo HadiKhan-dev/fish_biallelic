@@ -14,7 +14,7 @@ inputs. Source and stage modules define their own records; this initializer
 exposes only the shared boundaries and never imports science or storage.
 """
 
-from .genetic_map import ChromosomeGeneticMap, GeneticMap, GeneticMapSet, measured_coordinates
+from .genetic_map import ChromosomeGeneticMap, GeneticMap, GeneticMapSet
 from .panels import (
     ComponentPanel,
     CountCall,
@@ -36,7 +36,6 @@ __all__ = [
     "ChromosomeGeneticMap",
     "GeneticMap",
     "GeneticMapSet",
-    "measured_coordinates",
     "ComponentPanel",
     "CountCall",
     "CountStepDecision",

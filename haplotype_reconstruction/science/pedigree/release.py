@@ -1,7 +1,7 @@
 """Release rules: Tier A / Tier B configuration calls, marginal parent edges and candidate sets.
 
-A tier releases a child's marginal parent state when its informative chromosomes hold enough map units, the state
-survives the bootstrap and leave-one-chromosome-out (LOCO) cut-offs and, for M0, every alternative
+A tier releases a child's marginal parent state when enough material units carry its own unique state evidence, the
+state survives the unit-bootstrap and leave-one-unit-out (LOBO) cut-offs and, for M0, every alternative
 prior, and, for M1 and M2, some parent of the local configuration is stable; it releases the exact
 configuration when the local configuration is also the graph's choice,
 is resampling-stable as local and graph configuration, each named parent is stable, and every
@@ -175,14 +175,14 @@ def tier_calls(
             state != UNRESOLVED
             and evidence.informative_units[child] >= minimum_units
             and evidence.state_bootstrap[child] >= thresholds.configuration_bootstrap
-            and evidence.state_loco[child] >= thresholds.loco_fraction
+            and evidence.state_loco[child] >= thresholds.lobo_fraction
             and evidence.m0_state_agreement[child]
         )
         named = [slot for slot in range(2) if evidence.local_parents[child, slot] >= 0]
         identified = [
             bool(
                 evidence.parent_bootstrap[child, slot] >= thresholds.parent_bootstrap
-                and evidence.parent_loco[child, slot] >= thresholds.loco_fraction
+                and evidence.parent_loco[child, slot] >= thresholds.lobo_fraction
             )
             for slot in named
         ]
@@ -203,8 +203,8 @@ def tier_calls(
             and not full.tie_conflict[child]
             and evidence.configuration_bootstrap[child] >= thresholds.configuration_bootstrap
             and evidence.configuration_graph_bootstrap[child] >= thresholds.configuration_bootstrap
-            and evidence.configuration_loco[child] >= thresholds.loco_fraction
-            and evidence.configuration_graph_loco[child] >= thresholds.loco_fraction
+            and evidence.configuration_loco[child] >= thresholds.lobo_fraction
+            and evidence.configuration_graph_loco[child] >= thresholds.lobo_fraction
             and evidence.m0_graph_agreement[child]
         )
         exact = bool(configuration and all(oriented))
@@ -285,7 +285,7 @@ def partial_edges(
     """Release stable parent edges of the full-data DAG one by one where the configuration is not.
 
     Edges come only from children whose local configuration is the graph's (no conflict) and
-    with enough informative chromosomes; a stable edge with an unresolved orientation is withheld.
+    with enough informative units; a stable edge with an unresolved orientation is withheld.
     """
     n = len(calls.state)
     parents = np.full((n, 2), NO_PARENT, dtype=np.int64)
@@ -319,9 +319,9 @@ def partial_edges(
             )
             cutoffs = (
                 thresholds.parent_bootstrap,
-                thresholds.loco_fraction,
+                thresholds.lobo_fraction,
                 thresholds.parent_bootstrap,
-                thresholds.loco_fraction,
+                thresholds.lobo_fraction,
             )
             if np.all(np.isfinite(support)) and np.all(support >= cutoffs):
                 if not evidence.orientation_resolved[child, slot]:
@@ -343,7 +343,7 @@ def partial_edges(
         count_maximum,
         calls.state.copy(),
         tuple(status),
-        ("chromosome_resampling",) * n,
+        ("unit_resampling",) * n,
     )
 
 
@@ -461,7 +461,7 @@ def candidate_sets(
             parent = int(side[0])
             if (
                 boot.fraction(boot.local_parent[child, parent]) >= thresholds.parent_bootstrap
-                and loco.fraction(loco.local_parent[child, parent]) >= thresholds.loco_fraction
+                and loco.fraction(loco.local_parent[child, parent]) >= thresholds.lobo_fraction
                 and orientation_log_odds[child, parent] >= cutoff
             ):
                 parents[child, slot] = parent

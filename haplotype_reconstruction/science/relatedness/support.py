@@ -1,4 +1,7 @@
-"""Measure member and parent support on map units.
+"""Measure member and parent support on pooled Morgan-weighted material units (DESIGN_417 D5).
+
+The units are consecutive 1-Morgan pieces of the family sites' working-map axis pooled over the contigs in
+configured order (run.concatenate_terms); each unit's hit counts its working Morgans.
 
 Method: docs/methods/relatedness.md.
 """
@@ -12,25 +15,15 @@ from .family_kernels import family_logliks, latent_alternatives, unit_terms
 from .partition import _Partition
 
 
-def support_units(morgans: np.ndarray, unit_morgans: float) -> np.ndarray:
-    """int64 [k + 1]: boundaries (site offsets) of a chromosome's support units: max(1, floor(length / unit))
-    consecutive pieces of equal measured map length over its family sites (``morgans``: their measured map
-    coordinates, nondecreasing; one piece without a measured length)."""
-    n_sites = len(morgans)
-    if n_sites == 0:
-        return np.asarray([0, 0], dtype=np.int64)
-    length = float(morgans[-1] - morgans[0])
-    pieces = max(1, int(np.floor(length / unit_morgans)))
-    cuts = morgans[0] + length * np.arange(1, pieces) / pieces
-    return np.concatenate(([0], np.searchsorted(morgans, cuts, side="left"), [n_sites])).astype(np.int64)
-
-
-def _support(part: _Partition, ranges):
-    """Per chromosome (with family sites): whether each member's family is its best placement, and whether each
-    sequenced parent beats a latent one. A margin within the tolerance is a tie, not a win: a latent
+def _support(part: _Partition, ranges, weights=None):
+    """Per support unit (site range ``ranges[u]``, weight ``weights[u]`` its working Morgans): whether each member's
+    family is its best placement, and whether each sequenced parent beats a latent one; the shares are the
+    Morgan-weighted means over the units. A margin within the tolerance is a tie, not a win: a latent
     one-member family is exactly its member alone, and a parent without reads on a unit exactly a latent one, so
     float noise must not decide those (it follows the sample order)."""
-    ranges = [(lo, hi) for lo, hi in ranges if hi > lo]
+    weights = [1.0] * len(ranges) if weights is None else weights
+    kept = [(lo, hi, float(w)) for (lo, hi), w in zip(ranges, weights, strict=True) if hi > lo]
+    total = sum(w for _, _, w in kept)
     live = part.live()
     N, F = part.N, len(live)
     hits = np.zeros(N)
@@ -49,7 +42,7 @@ def _support(part: _Partition, ranges):
     excluded_rows, excluded_cols = np.concatenate(row_parts), np.concatenate(col_parts)
     named = part.slots[live] >= 0
     joins, rest, alone, latent = np.empty((F, N)), np.empty(N), np.empty(N), np.empty((F, 2))
-    for lo, hi in ranges:
+    for lo, hi, weight in kept:
         thread_count(part.threads)
         llk = np.empty(F)
         family_logliks(part.S, part.slots, live, part.logpi, part.logpost, lo, hi, llk)
@@ -60,10 +53,11 @@ def _support(part: _Partition, ranges):
         stay = llk[family_of] - rest
         joins[excluded_rows, excluded_cols] = -np.inf
         elsewhere = np.maximum(joins.max(axis=0) if F else np.full(N, -np.inf), alone)
-        hits += stay > elsewhere + part.parameters.gain_tolerance
+        hits += weight * (stay > elsewhere + part.parameters.gain_tolerance)
         latent_alternatives(part.S, part.slots, live, part.logpi, part.logpost, lo, hi, latent)
-        parent_hits[live] += named & (llk[:, None] > latent + part.parameters.gain_tolerance)
-    return hits / max(len(ranges), 1), parent_hits / max(len(ranges), 1)
+        parent_hits[live] += weight * (named & (llk[:, None] > latent + part.parameters.gain_tolerance))
+    total = total if total > 0 else 1.0
+    return hits / total, parent_hits / total
 
 
-__all__ = ["support_units"]
+__all__: list[str] = []

@@ -680,18 +680,6 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `label_continuity_maximum_loser_ratio` | `0.1` | share | Maximum switch-loser to switch-winner sample ratio (dimensionless); protects shared recombinant lineages during row relabelling. |
 | `label_continuity_check_budget` | `64` | count | Maximum charged candidate checks per search iteration, including tie peers (candidates). An unresolved class withholds its repair and ends the search with check_budget_reached; capability rejections need no decode or charge. Bounds trial work at large founder counts. |
 | `viterbi_tie` | `VITERBI_TIE` | nats | Viterbi predecessor tie quantum (nats); noise_quantum(1.9e-6) places the preference for fewer track changes above the measured score-gap noise scale. |
-## science.pedigree.parameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `LOW_MATERIAL_BLOCK_MORGANS` | `1.0` | See model | Frozen low-material regime (DESIGN_4154 revision 3, A1–A4). Distances are configured Morgans. |
-| `LOW_MATERIAL_TAIL_MORGANS` | `0.5` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `LOW_MATERIAL_SWITCH_CLIP` | `0.499999` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `LOW_MATERIAL_MINIMUM_BLOCKS` | `4` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `LOW_MATERIAL_BOOTSTRAP` | `0.95` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `LOW_MATERIAL_LEAVE_ONE_OUT` | `1.0` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 ## science.pedigree.parameters — WinnerNumerics
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -749,10 +737,8 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 |---|---|---|---|
 | `minimum_edge_exposed_bins` | `1.0` | See model | PD05; require at least 1 posterior-expected exposed painting bin for an edge. |
 | `minimum_pair_exposed_bins` | `1.0` | See model | PD05; require at least 1 posterior-expected exposed painting bin for a parent pair. |
-| `minimum_exposed_fraction` | `0.1` | See model | PD05; require an exposed-bin fraction of at least 0.1 across selected chromosomes. |
-| `minimum_exposed_units` | `3.0` | See model | PD05; require 3 working map units of exposed chromosomes; each distinct chromosome supplies at least one unit. |
-| `unit_morgans` | `1.0` | See model | PD05; 1 Morgan per working map unit measures approximately independent transmission stretches. |
-| `rate_is_measured` | `False` | See model | PD05; boolean false leaves fallback genetic-map distances unmeasured for exposure units. |
+| `minimum_exposed_fraction` | `0.1` | See model | PD05; require an exposed-bin fraction of at least 0.1 across the fit's units. |
+| `minimum_exposed_units` | `3.0` | See model | PD05 / DESIGN_417 D2; require 3 exposed material units (1-Morgan units of the working map) in the standard regime; 1 in the low-material band. |
 | `report_edge_coverage` | `0.95` | See model | PD05; fraction 0.95 labels the edge-coverage diagnostic; does not gate decisions. |
 | `report_pair_explainability` | `0.95` | See model | PD05; fraction 0.95 labels the pair-explainability diagnostic; does not gate decisions. |
 ## science.pedigree.parameters — DirectionParameters
@@ -762,7 +748,8 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `mismatch_probability` | `0.01` | See model | PS19/PD06; dimensionless per-bin probability 0.01 that a meiotic copy has a different painted local class. Allows painting disagreement without making a direction impossible. Decision replays at 0.001, 0.01 and 0.1 agreed at Tier B for a real multi-generation cross, the TroMau cross and large known-truth simulations; 0.1 added false full-fit edges in a 30-founder known-truth simulation. |
-| `chromosome_error_probability` | `0.05` | See model | PD06/PD08/PD09/PD10; probability 0.05 of painting failure in a chromosome junction comparison. |
+| `window_morgans` | `0.0` | Morgan | DESIGN_417 rev 4; width W of the direction windows (consecutive windows of W working Morgans of the unit axis) whose summed direction log odds are capped at window_cap; 0 (default) turns the cap off. A count-free bound on a long (chromosome-wide) painting failure's votes, measured in V5 with a positive control before the owner chooses W. |
+| `window_cap` | `float(np.log(39.0))` | nats | DESIGN_417 rev 4; ln 39 = 3.66 nats, 4.16.1's per-chromosome cap (failure probability 0.05), below the release cut-off ln 49, so one window cannot orient an edge alone. |
 | `pair_failure_probability` | `0.02` | See model | PD06/PD08/PD09/PD10; pair-level failure probability 0.02 bounds the orientation correction. |
 | `message_passes` | `4` | See model | PD06/PD08/PD09/PD10; 4 synchronous cavity passes prepare the frozen short-ancestry factor. |
 | `final_max_iterations` | `8192` | See model | PD06/PD08/PD09/PD10; budget of 8192 iterations for the undamped reciprocal solve. |
@@ -788,15 +775,15 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `bootstrap_replicates` | `1000` | See model | PD16; 1000 chromosome-bootstrap draws for configuration and parent support fractions. |
-| `bootstrap_seed` | `20260725` | See model | PD16; integer seed 20260725 fixes the chromosome-bootstrap random stream. |
+| `bootstrap_replicates` | `1000` | See model | PD16; 1000 unit-bootstrap draws for configuration and parent support fractions. |
+| `bootstrap_seed` | `20260725` | See model | PD16; integer seed 20260725 fixes the unit-bootstrap random stream. |
 ## science.pedigree.parameters — ReleaseParameters
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `minimum_informative_units` | `3.0` | See model | PD18/PD20/PD21; require 3 map units of chromosomes with a unique child-evidence state winner. |
+| `minimum_informative_units` | `3.0` | See model | PD18/PD20/PD21 / DESIGN_417 D2; require 3 material units with a unique child-evidence state winner. |
 | `tier_a` | `(lambda: TierThresholds(0.95, 0.95, 0.95))()` | See model | PD18/PD20/PD21; dimensionless configuration-bootstrap, parent-bootstrap and leave-one-out cutoffs (0.95, 0.95, 0.95). |
 | `tier_b` | `(lambda: TierThresholds(0.7, 0.7, 0.8))()` | See model | PD18/PD20/PD21; primary dimensionless configuration-bootstrap, parent-bootstrap and leave-one-out cutoffs (0.7, 0.7, 0.8). |
 | `orientation_reversal_probability` | `0.02` | See model | PD18/PD20/PD21; reversal probability 0.02 gives the edge orientation cutoff log((1-p)/p) in nats. |
@@ -820,11 +807,25 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `failure_region_rate` | `0.1` | 1/Morgan | PD28; one observed painting failure in fourteen Morgans motivates 0.1 regions per Morgan. |
 | `failure_region_length` | `0.05` | Morgan | PD28; observed painting failures span 4–8 cM, shorter than full-sib IBD0 segments. |
 | `isolated_error` | `0.001` | probability/bin | PD28; scale 1-q per bin; at most 0.03% wrong bins; no uninformative-bin penalty. |
-| `withholding_score` | `float(np.log(1000.0))` | nats | PD23; log(1000) survives higher-prior sensitivity; two top-band witnesses suffice. |
-| `sibship_prior` | `(0.46, 0.87, 0.98)` | probability | PD28; measured full-sib shares among 3556 same-family pairs in three support bands. |
-| `support_bounds` | `(0.5, 0.75)` | share | PD28; support bands of the measured same-family sibship calibration. |
+| `withholding_score` | `float(np.log(1000.0))` | nats | PD23; log(1000) survives higher-prior sensitivity; with the 4.18 priors one top-band witness withholds only with a pair margin below -2.31 nats. |
+| `sibship_prior` | `(0.67, 0.96, 0.99)` | probability | PD28 / DESIGN_417 D5; full-sib shares of the guard's witness occurrences in three support bands, support on pooled Morgan-weighted 1-M units, pooled over three known-truth sets (4,159 occurrences, 73 runs; run-bootstrap intervals 0.54-0.79, 0.91-0.98, 0.97-1.00); every held-out fit changed no guard decision (RELCAL). |
+| `support_bounds` | `(0.5, 0.75)` | share | PD28; support bands of the sibship calibration, unchanged in 4.18 (DESIGN_417 D5). |
 | `sibship_check_partners` | `16` | count | PD28; bounded ring check; 8 and 16 partners match all-partner validation scores. |
 | `reference_triples` | `400` | count | PD28; 400 reference triples give about 0.02 sampling error in bin infeasibility. |
+## science.pedigree.parameters — MaterialParameters
+
+Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `unit_morgans` | `1.0` | Morgan | DESIGN_417 D1; one unit per working Morgan, about one meiosis's correlation length (Haldane exp(-2d) = 0.14 at 1 M); adjacent 1-M units correlate 0.12-0.22 for relatives on one chromosome, lag 2 at most 0.04 (CALIB2 section 5). |
+| `tail_morgans` | `0.5` | Morgan | DESIGN_4154 A2 / DESIGN_417 D1; a final piece shorter than half a unit joins the unit before it. |
+| `switch_clip` | `0.499999` | probability | DESIGN_4154 A2; switch probabilities are clipped below 1/2 before the Haldane distance. |
+| `assessable_morgans` | `5.0` | Morgan | MCAL section 4.1 (60 simulated genomes, configured map = generating map, so U in true Morgans; single chromosomes 0.5-15 M; pre-registered one-sided exact tests, clustered by genome); below 5 Morgans nothing is assessed: the low-material rule released non-parents in mixed-family designs at 3.5-5 M (12 of 971 against 0 of 600 at 5-7 M) and in small families; from 5 M every design passes the tested criterion (8 M on its literal point reading). V5 (64 end-to-end cells, g4c5_12): no hold criterion fires below 12 M. Replaces DESIGN_417 rev 3's 3.5 (MCAL: 3.5-5 M in excess). |
+| `standard_morgans` | `12.0` | Morgan | MCAL section 4.2; the released Tier B thresholds apply from 12 working Morgans: below it they released more non-parents than their own reference (multi-chromosome genomes of >= 15 M) in small families (11-12 M: 10 of 486 against 10 of 1,379, p = 0.035) and in parent-free sib-rich designs (10-11 M: 10 releases per 3,808 parentless children against 2 per 6,720, p = 0.008); from 12 M no excess in any design (10 M on the cumulative test; per-design power 0.1-0.4 near the cut, so an empirical calibration, not demonstrated equivalence). V5: rev 3's 9.5 released 4.46 edges per 100 parentless children on sib-rich cells read on a 2.5x long map (hold H2); 12 returns the 9.5-12 M band to the low-material rule, as 4.16.1 (0.11 per 100), and passes the direction positive control (SCORE_g4c5_12, CONTROL_SCORE_g4c5_12). |
+| `tier_a_morgans` | `12.0` | Morgan | MCAL section 4.3; no Tier A non-parent in designs with sequenced parents from 8 M (74,337 Tier A edges at 8-15+ M), but Tier A is assessed only with the released Tier B thresholds, so its effective minimum is standard_morgans (12 M). Parent-free sib-rich designs release Tier A non-parents at 12-13, 13-15 and >= 15 M (2, 2, 1; their >= 15-M reference holds 1), so no higher cut removes them (documented limitation; V5 g4c5_12: 1 such edge in 448 parentless children at 13.7 M). |
+| `low_bootstrap` | `0.95` | fraction | DESIGN_4154 A4; Tier B configuration and parent bootstrap cut-off of the low-material band (assessable_morgans <= U < standard_morgans), where adjacent units of one chromosome are dependent. |
+| `low_leave_one_out` | `1.0` | fraction | DESIGN_4154 A4; every leave-one-unit-out fit must agree in the low-material band. |
 ## science.pedigree.parameters — PedigreeParameters
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -838,10 +839,11 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `exposure` | `ExposureParameters()` | See model | PD27; internal exposure-gate parameter group; units are declared by its fields. |
 | `direction` | `DirectionParameters()` | See model | PD27; internal orientation and family-factor parameter group; units are declared by its fields. |
 | `selection` | `SelectionParameters()` | See model | PD27; internal state-prior and acyclic-search parameter group; units are declared by its fields. |
-| `resampling` | `ResamplingParameters()` | See model | PD27; internal chromosome-bootstrap parameter group; units are declared by its fields. |
+| `resampling` | `ResamplingParameters()` | See model | PD27; internal unit-bootstrap parameter group; units are declared by its fields. |
 | `release` | `ReleaseParameters()` | See model | PD27; internal evidence-tier parameter group; units are declared by its fields. |
 | `exclusion` | `ExclusionParameters()` | See model | PD27; internal full-marker exclusion parameter group; units are declared by its fields. |
 | `relationship` | `RelationshipParameters()` | See model | PD27; painting relationship evidence parameters, with units declared by each field. |
+| `material` | `MaterialParameters()` | See model | DESIGN_417; material units and regime cut-offs, with units declared by each field. |
 ## science.pedigree.parameters — ScoringNumerics
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -857,7 +859,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `log_floor` | `-60.0` | See model | PS11; log-relative M1 score floor of -60 nats for nonretained parent identities. |
 | `tiny` | `1e-280` | See model | PS15; positive mass threshold 1e-280 selects probability-domain rather than log-domain pair-bound absorption. |
 | `family_exp_underflow` | `750.0` | See model | PD09; magnitude cutoff 750 nats skips exponentials whose float64 contributions vanish. |
-| `order_minimum_weight` | `2.0` | See model | PD07; require more than 2 weighted chromosome comparisons for graph-ordering support. |
+| `order_minimum_unit_weight` | `2.0` | See model | PD07; require more than 2 callability-weighted unit comparisons (one per material unit since 4.18) for graph-ordering support. |
 | `order_variance_offset` | `1.0` | See model | PD07; additive variance offset 1 in squared junction-count units for graph-ordering support. |
 | `junction_unreachable_state` | `1 << 30` | See model | PS18; integer cost sentinel 2^30 marks an unreachable minimum-switch trajectory state. |
 | `junction_unreachable_count` | `1 << 28` | See model | PS18; integer switch-count sentinel 2^28 marks unavailable junction counts. |
@@ -910,7 +912,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `COMMON_EMISSION_CACHE_BYTES` | `PEDIGREE_WORKSPACE.common_emission_cache_bytes` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `TINY` | `SCORING_NUMERICS.tiny` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `FAMILY_EXP_UNDERFLOW` | `SCORING_NUMERICS.family_exp_underflow` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `ORDER_MINIMUM_WEIGHT` | `SCORING_NUMERICS.order_minimum_weight` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
+| `ORDER_MINIMUM_UNIT_WEIGHT` | `SCORING_NUMERICS.order_minimum_unit_weight` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `ORDER_VARIANCE_OFFSET` | `SCORING_NUMERICS.order_variance_offset` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `JUNCTION_UNREACHABLE_STATE` | `SCORING_NUMERICS.junction_unreachable_state` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
 | `JUNCTION_UNREACHABLE_COUNT` | `SCORING_NUMERICS.junction_unreachable_count` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
@@ -1043,8 +1045,8 @@ Source: [haplotype_reconstruction/science/relatedness/parameters.py](../../haplo
 | `minimum_observed` | `0.5` | See model | Minimum observed-sample fraction (fraction); excludes poorly observed sites from family fitting. |
 | `family_site_step` | `20` | See model | Stride through eligible family sites (sites); thins the family likelihood evidence. |
 | `max_sweeps` | `30` | See model | Maximum sweeps of each family search (sweeps); bounds search iterations. |
-| `support_unit_morgans` | `1.0` | See model | Target genetic length of support units (Morgans); partitions chromosomes for member and parent stability summaries. |
-| `rate_is_measured` | `False` | See model | Treat fallback map rates as measured support distance (boolean); otherwise clip to measured map bounds and use zero length when no map exists. |
+| `support_unit_morgans` | `1.0` | See model | Length of the support units (Morgans of the configured working map, DESIGN_417 D5): the family sites' axis pooled over contigs in configured order is cut into consecutive units of this length, each weighted by its Morgans in the member and parent support shares. |
+| `support_tail_morgans` | `0.5` | See model | Final-piece length (Morgans) below which the last piece of the pooled support axis joins the unit before it (DESIGN_417 D5, the pedigree material rule). |
 | `gain_tolerance` | `1e-06` | See model | Family objective and support tie tolerance (nats); prevents numerical noise from choosing a placement or counting support. |
 | `screen_margin` | `0.1` | See model | Fixed screening-error allowance (nats); triggers exact evaluation near a screened gain boundary. |
 | `screen_margin_per_site` | `1e-06` | See model | Additional screening allowance per family site (nats per site); scales the error allowance with likelihood length. |

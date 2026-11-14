@@ -58,60 +58,66 @@ def edge_index(edges: np.ndarray, n_samples: int, children: np.ndarray, parents:
 
 @dataclass(frozen=True)
 class GenomeScores:
-    """Decision input: every informative contig's scores stacked in contig order (not a record).
+    """Decision input: the run's material units, summed from every informative contig's pieces (not a record).
 
-    contigs: informative contigs (C); arrays carry a leading contig axis C.
+    contigs: one name per material unit (H rows, "unit:<k>"); real_contigs: the informative contigs (C) in
+    configured order. Each unit is consecutive working-map material of about 1 Morgan (MaterialParameters) and may
+    straddle components and contigs; every array below carries the leading unit axis H.
     edges:   int64 [E, 2] the eligible (child, parent) edges, child-major with parents ascending
-             (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [C, E] on this
-             axis: the chromosome records' [N, N] entries off the eligible edges (M1 -inf, exposure
-             of non-edges and self coverage) are never read by the decision or the report.
-    zero float64 [C, N]; two, pair_explained, pair_exposed float64 [C, T] (panel rows); total_bins float64 [C];
-    informative_markers int64 [C]; junctions / callable_bins float64 [C, N]; junction_dyads int64 [D, 2] and
-    transmission_log_likelihood float64 [C, D] in nats (ChromosomeScores);
-    scored_morgans float64 [C] (NaN where unknown);
-    working_morgans float64 [C]: sum of -0.5 ln(1 - 2 theta) over scored components' selector boundaries,
-    the configured working-map distance of PS04. It is NOT measured exposure, and never enters a gate or
-    decision; reports alone use it to describe painted junctions per Morgan.
-    edge_exposed_morgans float64 [C, E] and pair_exposed_morgans float64 [C, T] (ChromosomeScores; 0 in earlier
-    records).
+             (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [H, E] on this
+             axis.
+    zero float64 [H, N]; two, pair_explained, pair_exposed float64 [H, T] (panel rows); total_bins float64 [H];
+    informative_markers int64 [H]; junctions / callable_bins float64 [H, N]; junction_dyads int64 [D, 2] and
+    transmission_log_likelihood float64 [H, D] in nats (sums of the pieces' per-bin increments);
+    working_morgans float64 [H]: each unit's working length (Morgans of the configured working map: sum of
+    -0.5 ln(1 - 2 theta) over its selector boundaries); it sets the unit's direction failure probability
+    (orientation.unit_failure) and is reported.
+    material_morgans: U, the working Morgans of the informative components (the regime reads it alone).
+    regime: "standard" or "low_material" (material.classify of U).
+    pieces / piece_contig / piece_unit: every contig-component piece of the units (report and audit only).
+    contig_*: per informative contig sums of the pieces (reports: evidence summary, painted junction rates).
     """
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
     contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
     panel: CandidatePanel = record_field("evidence", axes=(), units="1", dtype="CandidatePanel")
     edges: np.ndarray = record_field("evidence", axes=("E", "2"), units="1", dtype="int64")
-    zero: np.ndarray = record_field("evidence", axes=("C", "N"), units="nats", dtype="float64")
-    one: np.ndarray = record_field("evidence", axes=("C", "E"), units="nats", dtype="float64")
-    two: np.ndarray = record_field("evidence", axes=("C", "T"), units="nats", dtype="float64")
-    edge_matched: np.ndarray = record_field("evidence", axes=("C", "E"), units="painting bins", dtype="float64")
-    edge_exposed: np.ndarray = record_field("evidence", axes=("C", "E"), units="painting bins", dtype="float64")
-    pair_explained: np.ndarray = record_field("evidence", axes=("C", "T"), units="painting bins", dtype="float64")
-    pair_exposed: np.ndarray = record_field("evidence", axes=("C", "T"), units="painting bins", dtype="float64")
-    total_bins: np.ndarray = record_field("evidence", axes=("C",), units="painting bins", dtype="float64")
-    junctions: np.ndarray = record_field("evidence", axes=("C", "N"), units="painting bins", dtype="float64")
-    callable_bins: np.ndarray = record_field("evidence", axes=("C", "N"), units="painting bins", dtype="float64")
-    informative_markers: np.ndarray = record_field("obs", axes=("C",), units="1", dtype="int64")
+    zero: np.ndarray = record_field("evidence", axes=("H", "N"), units="nats", dtype="float64")
+    one: np.ndarray = record_field("evidence", axes=("H", "E"), units="nats", dtype="float64")
+    two: np.ndarray = record_field("evidence", axes=("H", "T"), units="nats", dtype="float64")
+    edge_matched: np.ndarray = record_field("evidence", axes=("H", "E"), units="painting bins", dtype="float64")
+    edge_exposed: np.ndarray = record_field("evidence", axes=("H", "E"), units="painting bins", dtype="float64")
+    pair_explained: np.ndarray = record_field("evidence", axes=("H", "T"), units="painting bins", dtype="float64")
+    pair_exposed: np.ndarray = record_field("evidence", axes=("H", "T"), units="painting bins", dtype="float64")
+    total_bins: np.ndarray = record_field("evidence", axes=("H",), units="painting bins", dtype="float64")
+    junctions: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
+    callable_bins: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
+    informative_markers: np.ndarray = record_field("obs", axes=("H",), units="1", dtype="int64")
     junction_dyads: np.ndarray = record_field("evidence", axes=("D", "2"), units="1", dtype="int64")
-    transmission_log_likelihood: np.ndarray = record_field("evidence", axes=("C", "D"), units="nats", dtype="float64")
-    scored_morgans: np.ndarray | None = record_field(
-        "evidence", axes=("C",), units="Morgans", dtype="float64", default=None
-    )
-    edge_exposed_morgans: np.ndarray | None = record_field(
-        "evidence", axes=("C", "E"), units="Morgans", dtype="float64", default=None
-    )
-    pair_exposed_morgans: np.ndarray | None = record_field(
-        "evidence", axes=("C", "T"), units="Morgans", dtype="float64", default=None
-    )
+    transmission_log_likelihood: np.ndarray = record_field("evidence", axes=("H", "D"), units="nats", dtype="float64")
 
     working_morgans: np.ndarray = record_field(
-        "report", axes=("C",), units="Morgans", dtype="float64", kw_only=True
+        "evidence", axes=("H",), units="Morgans", dtype="float64", kw_only=True
     )
+    material_morgans: float = record_field("state", units="Morgans", dtype="float", kw_only=True)
 
     regime: str = record_field("state", dtype="str", default="standard", kw_only=True)
 
     real_contigs: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]", default=(), kw_only=True)
-    block_chromosome: np.ndarray | None = record_field("obs", axes=("H",), dtype="int64", default=None, kw_only=True)
-    block_descriptors: tuple[MapBlock, ...] = record_field("obs", dtype="tuple[MapBlock, ...]", default=(), kw_only=True)
+    pieces: tuple[MapBlock, ...] = record_field("obs", dtype="tuple[MapBlock, ...]", default=(), kw_only=True)
+    piece_contig: np.ndarray | None = record_field("obs", axes=("P",), dtype="int64", default=None, kw_only=True)
+    piece_unit: np.ndarray | None = record_field("obs", axes=("P",), dtype="int64", default=None, kw_only=True)
+    piece_bins: np.ndarray | None = record_field("obs", axes=("P",), dtype="int64", default=None, kw_only=True)
+    piece_markers: np.ndarray | None = record_field("obs", axes=("P",), dtype="int64", default=None, kw_only=True)
+    contig_junctions: np.ndarray | None = record_field(
+        "report", axes=("C", "N"), dtype="float64", default=None, kw_only=True)
+    contig_callable_bins: np.ndarray | None = record_field(
+        "report", axes=("C", "N"), dtype="float64", default=None, kw_only=True)
+    contig_total_bins: np.ndarray | None = record_field(
+        "report", axes=("C",), dtype="float64", default=None, kw_only=True)
+    contig_working_morgans: np.ndarray | None = record_field(
+        "report", axes=("C",), units="Morgans", dtype="float64", default=None, kw_only=True)
+    contig_markers: np.ndarray | None = record_field("report", axes=("C",), dtype="int64", default=None, kw_only=True)
 
     chromosome_summary: tuple[ChromosomeSummaryView, ...] = record_field("obs", dtype="tuple[ChromosomeSummaryView, ...]", default=(), kw_only=True)
 
@@ -143,7 +149,10 @@ class ExclusionEvidence:
     markers: int = record_field("obs", axes=(), units="1", dtype="int")
     pattern_fallback_samples: int = record_field("diagnostic", axes=(), units="1", dtype="int")
     log_e_upper: np.ndarray | None = record_field("state", axes=("D",), units="nats", dtype="float64", default=None)
-    schema: int = schema_field(1)
+    # The contig's fixed weight in the genome e-value (DESIGN_417 D9): its configured working-map Morgans over the
+    # run's; the genome e-value is sum_k w_k E_k and a certificate proves log E_k >= threshold - log w_k.
+    log_weight: float = record_field("state", axes=(), units="1", dtype="float", default=float("nan"), kw_only=True)
+    schema: int = schema_field(2)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -193,30 +202,25 @@ class ParentEdges:
 
 @dataclass(frozen=True)
 class TierReach:
-    """What the chromosome resampling can release with this many informative chromosomes.
+    """What the run's material allows (DESIGN_417): its working Morgans, units and the regime cut values.
 
-    A non-M0 configuration is testable in a fit only when its edges are exposed on chromosomes holding at least
-    ExposureParameters.minimum_exposed_units map units, which caps the achievable support:
-    max_bootstrap_support = fraction of this run's bootstrap draws whose distinct chromosomes hold that many units;
-    max_loco_support = fraction of the leave-one-out fits that do. ``minimum_exposed_contigs`` is the number of
-    chromosomes shorter than one unit that the gate needs; ``minimum_contigs_tier_*`` count such chromosomes too
-    (longer chromosomes need fewer). informative_units: the run's informative chromosomes' map units.
-    tier_*_reachable: whether those caps meet the tier thresholds. minimum_contigs_tier_*: the
-    smallest chromosome count for which they would (exact combinatorics). ``statement``: one line
-    for the log and reports.
+    informative_morgans: U, the working Morgans of the informative painting components; informative_units: the
+    material units resampled (round(U) nominal units, empty ones omitted). The regime reads U alone: below
+    ``assessable_morgans`` nothing is assessed, below ``standard_morgans`` Tier B is assessed with the
+    low-material thresholds, from it with the released thresholds, and Tier A from ``tier_a_morgans``.
+    ``statement``: one line for the log and reports.
     """
 
-    informative_contigs: int = record_field("obs", axes=(), units="1", dtype="int")
-    minimum_exposed_contigs: int = record_field("report", axes=(), units="1", dtype="int")
-    max_bootstrap_support: float = record_field("report", axes=(), units="1", dtype="float")
-    max_loco_support: float = record_field("report", axes=(), units="1", dtype="float")
+    informative_morgans: float = record_field("obs", axes=(), units="Morgans", dtype="float")
+    informative_units: int = record_field("obs", axes=(), units="1", dtype="int")
+    regime: str = record_field("report", axes=(), units="1", dtype="str")
     tier_a_reachable: bool = record_field("report", axes=(), units="1", dtype="bool")
     tier_b_reachable: bool = record_field("report", axes=(), units="1", dtype="bool")
-    minimum_contigs_tier_a: int = record_field("report", axes=(), units="1", dtype="int")
-    minimum_contigs_tier_b: int = record_field("report", axes=(), units="1", dtype="int")
+    unit_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float")
+    assessable_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float")
+    standard_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float")
+    tier_a_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float")
     statement: str = record_field("report", axes=(), units="1", dtype="str")
-    informative_units: float = record_field("report", axes=(), units="map units", dtype="float", default=float("nan"))
-    unit_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float", default=float("nan"))
 
 
 @dataclass(frozen=True)
@@ -249,25 +253,31 @@ class Alternatives:
 
 @dataclass(frozen=True)
 class JunctionEvidence:
-    """Per-chromosome painted junction data of the informative chromosomes (weight independent).
+    """Per-unit painted junction data of the material units (weight independent).
 
-    junctions:     float64 [C, N] minimum founder switches of each painting.
-    callable_bins: float64 [C, N] observed haplotype-bin labels behind them.
-    total_bins:    float64 [C] painting bins (two haplotypes each).
+    junctions:     float64 [H, N] minimum founder switches of each painting.
+    callable_bins: float64 [H, N] observed haplotype-bin labels behind them.
+    total_bins:    float64 [H] painting bins (two haplotypes each).
     pair_child, pair_parent: int64 [U] the unordered dyads with both directions oriented, as (larger index,
                    smaller index) like the old [child, parent] (parent < child) triangle.
-    pair_log_odds: float64 [C, U] per-chromosome log odds of pair_parent -> pair_child against the reverse;
-                   ``compared`` bool [C, U] marks entries with evidence. Computed once; resamples only reweight
-                   it. Stored per dyad, not as [C, N, N] triangles.
+    pair_log_odds: float64 [H, U] per-unit log odds of pair_parent -> pair_child against the reverse, each unit
+                   mixed with its own painting-failure probability (orientation.unit_failure, DESIGN_417 D8);
+                   ``compared`` bool [H, U] marks entries with evidence. Computed once; resamples only reweight
+                   it. Stored per dyad, not as [H, N, N] triangles.
+    window:        int64 [H] the direction window of each unit (consecutive windows of
+                   DirectionParameters.window_morgans of the unit axis), or None when the window cap is off;
+                   window_cap: the cap (nats) on each window's summed log odds.
     """
 
-    junctions: np.ndarray = record_field("evidence", axes=("C", "N"), units="painting bins", dtype="float64")
-    callable_bins: np.ndarray = record_field("evidence", axes=("C", "N"), units="painting bins", dtype="float64")
-    total_bins: np.ndarray = record_field("evidence", axes=("C",), units="painting bins", dtype="float64")
+    junctions: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
+    callable_bins: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
+    total_bins: np.ndarray = record_field("evidence", axes=("H",), units="painting bins", dtype="float64")
     pair_child: np.ndarray = record_field("evidence", axes=("U",), units="1", dtype="int64")
     pair_parent: np.ndarray = record_field("evidence", axes=("U",), units="1", dtype="int64")
-    pair_log_odds: np.ndarray = record_field("evidence", axes=("C", "U"), units="nats", dtype="float64")
-    compared: np.ndarray = record_field("evidence", axes=("C", "U"), units="1", dtype="bool")
+    pair_log_odds: np.ndarray = record_field("evidence", axes=("H", "U"), units="nats", dtype="float64")
+    compared: np.ndarray = record_field("evidence", axes=("H", "U"), units="1", dtype="bool")
+    window: np.ndarray | None = record_field("evidence", axes=("H",), units="1", dtype="int64", default=None)
+    window_cap: float = record_field("evidence", units="nats", dtype="float", default=float("inf"))
 
 
 @dataclass(frozen=True)
@@ -290,33 +300,29 @@ class Orientation:
 
 @dataclass(frozen=True)
 class ExposureEvidence:
-    """Posterior-expected exposure of every eligible edge and panel pair, per informative chromosome.
+    """Posterior-expected exposure of every eligible edge and panel pair, per material unit.
 
-    edge_exposed: float64 [C, E] on the eligible edges (GenomeScores.edges); pair_exposed: float64 [C, T];
-    total_bins: float64 [C].
-    edge_present / pair_present: uint64 [W, E] / [W, T] packed per-chromosome flags of
-    exposure > 0 and >= the minimum bins (W = ceil(C / 64)).
-    units: float64 [C] map units of each chromosome (map_units of its scored length); edge_units / pair_units:
-    float64 [C, E] / [C, T] the units each edge / pair earns there (map_units of its exposed map length:
-    GenomeScores.edge_exposed_morgans / pair_exposed_morgans); a fit sums them over its exposed chromosomes.
+    edge_exposed: float64 [H, E] on the eligible edges (GenomeScores.edges); pair_exposed: float64 [H, T];
+    total_bins: float64 [H].
+    edge_present / pair_present: uint64 [W, E] / [W, T] packed per-unit flags of
+    exposure > 0 and >= the minimum bins (W = ceil(H / 64)); a fit counts the distinct exposed units it holds
+    (each unit counts one, DESIGN_417 D2).
     row_edges: int64 [A, 2] edge-axis positions of each configuration row's (child, parent) edges, one per
     parent slot; -1 for an empty slot.
     """
 
-    edge_exposed: np.ndarray = record_field("evidence", axes=("C", "E"), units="painting bins", dtype="float64")
-    pair_exposed: np.ndarray = record_field("evidence", axes=("C", "T"), units="painting bins", dtype="float64")
-    total_bins: np.ndarray = record_field("evidence", axes=("C",), units="painting bins", dtype="float64")
-    edge_present: np.ndarray = record_field("evidence", axes=("ceil(C/64)", "E"), units="1", dtype="uint64")
-    pair_present: np.ndarray = record_field("evidence", axes=("ceil(C/64)", "T"), units="1", dtype="uint64")
+    edge_exposed: np.ndarray = record_field("evidence", axes=("H", "E"), units="painting bins", dtype="float64")
+    pair_exposed: np.ndarray = record_field("evidence", axes=("H", "T"), units="painting bins", dtype="float64")
+    total_bins: np.ndarray = record_field("evidence", axes=("H",), units="painting bins", dtype="float64")
+    edge_present: np.ndarray = record_field("evidence", axes=("ceil(H/64)", "E"), units="1", dtype="uint64")
+    pair_present: np.ndarray = record_field("evidence", axes=("ceil(H/64)", "T"), units="1", dtype="uint64")
     row_edges: np.ndarray = record_field("evidence", axes=("A", "2"), units="1", dtype="int64")
-    units: np.ndarray = record_field("evidence", axes=("C",), units="1", dtype="float64")
-    edge_units: np.ndarray = record_field("evidence", axes=("C", "E"), units="1", dtype="float64")
-    pair_units: np.ndarray = record_field("evidence", axes=("C", "T"), units="1", dtype="float64")
 
 
 @dataclass(frozen=True)
 class OmissionTotals:
-    """One set of full-block totals for linear leave-one-block-out aggregation."""
+    """One set of full-data unit totals for linear leave-one-unit-out (LOBO) aggregation; edge_units /
+    pair_units count the exposed units."""
     genetic: np.ndarray = record_field("evidence", axes=("A",), units="nats", dtype="float64")
     edge_exposed: np.ndarray = record_field("evidence", axes=("E",), dtype="float64")
     pair_exposed: np.ndarray = record_field("evidence", axes=("T",), dtype="float64")
@@ -525,7 +531,7 @@ class PartialEdges:
     parents int64 [N, 2] released or exact-configuration parents per slot (NO_PARENT otherwise);
     supported bool [N, 2]; exact bool [N] (exact configuration released); count_minimum /
     count_maximum int64 [N] observed-parent count bounds; state int8 [N] (from the exact view);
-    status tuple[str]; release_evidence tuple[str] ("chromosome_resampling" or, after the
+    status tuple[str]; release_evidence tuple[str] ("unit_resampling" or, after the
     full-marker release, "mendelian_exclusion_and_supported_direction").
     """
 
@@ -626,8 +632,9 @@ class Decision:
     scores: genome-floor transformed chromosome scores; inputs: the fit inputs;
     full / orientation / adjusted (state, identity scores) / trace: the
     full-data fit and its per-row terms; sensitivity: (priors, selection) per alternative prior;
-    informative: int64 [N] chromosomes whose own evidence picks a unique state; informative_units: float64 [N]
-    their map units (read by the tier rules).
+    informative: int64 [N] material units whose own evidence picks a unique state; informative_units: float64 [N]
+    the same count (read by the tier rules: each unit counts one); informative_morgans: float64 [N] those units'
+    working Morgans (reported). tier_a_assessed: Tier A is assessed (standard regime and U >= tier_a_morgans).
     """
 
     scores: GenomeScores = record_field("state", axes=(), units="1", dtype="GenomeScores")
@@ -654,7 +661,9 @@ class Decision:
     reach: TierReach = record_field("state", axes=(), units="1", dtype="TierReach")
     family_solve: FamilySolveRecord = record_field("state", axes=(), units="1", dtype="FamilySolveRecord")
     tie_events: TieCounts = record_field("diagnostic", dtype="TieCounts")
-    informative_units: np.ndarray = record_field("state", axes=("N",), units="map units", dtype="float64")
+    informative_units: np.ndarray = record_field("state", axes=("N",), units="units", dtype="float64")
+    informative_morgans: np.ndarray = record_field("report", axes=("N",), units="Morgans", dtype="float64")
+    tier_a_assessed: bool = record_field("state", dtype="bool")
 
     @property
     def alternatives(self) -> Alternatives:
@@ -720,7 +729,7 @@ class GuardRelatedness:
 
 @dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 8 with working-map
+    """Complete released pedigree and retained numerical state, published atomically as schema 9 (4.18: material units) with working-map
     diagnostics, joint transmission direction likelihoods and columnar exclusion evidence."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -743,7 +752,7 @@ class Pedigree:
     retained: PedigreeRetained | None = record_field("state", dtype="PedigreeRetained | None", kw_only=True)
     reports_complete: bool = record_field("diagnostic", dtype="bool", kw_only=True)
     regime: str = record_field("state", dtype="str", default="standard", kw_only=True)
-    schema: int = schema_field(8)
+    schema: int = schema_field(9)
 
 
 @dataclass(frozen=True)
@@ -900,8 +909,8 @@ class ExclusionSummary(SummaryMapping):
     contigs: int = record_field("obs", axes=(), units="1", dtype="int")
     status: str = record_field("report", axes=(), units="1", dtype="str")
     released: int = record_field("report", axes=(), units="1", dtype="int")
-    chromosomes: list[dict[str, str | int]] | None = record_field(
-        "report", axes=(), units="1", dtype="list[dict[str, str | int]] | None", default=None
+    chromosomes: list[dict[str, str | int | float]] | None = record_field(
+        "report", axes=(), units="1", dtype="list[dict[str, str | int | float]] | None", default=None
     )
 
 
@@ -1072,8 +1081,8 @@ class DiagnosticView:
     callable_ancestry_haplotype_bin_count: float = record_field("report", units="1", dtype="float64")
     adjusted_ancestry_junction_burden: float = record_field("report", units="1", dtype="float64")
     ancestry_painting_callability_fraction: float = record_field("report", units="1", dtype="float64")
-    informative_contig_count: int = record_field("report", units="1", dtype="int")
-    informative_map_units: float = record_field("report", units="1", dtype="float64")
+    informative_unit_count: int = record_field("report", units="1", dtype="int")
+    informative_morgans: float = record_field("report", units="Morgans", dtype="float64")
     local_state_bootstrap_fraction: float = record_field("report", units="1", dtype="float64")
     local_configuration_bootstrap_fraction: float = record_field("report", units="1", dtype="float64")
     graph_configuration_bootstrap_fraction: float = record_field("report", units="1", dtype="float64")
@@ -1082,14 +1091,14 @@ class DiagnosticView:
     selected_graph_parent2_bootstrap_fraction: float = record_field("report", units="1", dtype="float64")
     parent1_bootstrap_fraction: float = record_field("report", units="1", dtype="float64")
     parent2_bootstrap_fraction: float = record_field("report", units="1", dtype="float64")
-    local_state_loco_fraction: float = record_field("report", units="1", dtype="float64")
-    local_configuration_loco_fraction: float = record_field("report", units="1", dtype="float64")
-    graph_configuration_loco_fraction: float = record_field("report", units="1", dtype="float64")
-    selected_graph_configuration_loco_fraction: float = record_field("report", units="1", dtype="float64")
-    selected_graph_parent1_loco_fraction: float = record_field("report", units="1", dtype="float64")
-    selected_graph_parent2_loco_fraction: float = record_field("report", units="1", dtype="float64")
-    parent1_loco_fraction: float = record_field("report", units="1", dtype="float64")
-    parent2_loco_fraction: float = record_field("report", units="1", dtype="float64")
+    local_state_lobo_fraction: float = record_field("report", units="1", dtype="float64")
+    local_configuration_lobo_fraction: float = record_field("report", units="1", dtype="float64")
+    graph_configuration_lobo_fraction: float = record_field("report", units="1", dtype="float64")
+    selected_graph_configuration_lobo_fraction: float = record_field("report", units="1", dtype="float64")
+    selected_graph_parent1_lobo_fraction: float = record_field("report", units="1", dtype="float64")
+    selected_graph_parent2_lobo_fraction: float = record_field("report", units="1", dtype="float64")
+    parent1_lobo_fraction: float = record_field("report", units="1", dtype="float64")
+    parent2_lobo_fraction: float = record_field("report", units="1", dtype="float64")
     state_winner_margin: float = record_field("report", units="nats", dtype="float64")
     conditional_identity_margin: float = record_field("report", units="nats", dtype="float64")
     unconstrained_winner_margin: float = record_field("report", units="nats", dtype="float64")
@@ -1179,7 +1188,7 @@ class CallExplanationView:
     state_winner_margin: float = record_field("report", units="nats", dtype="float64")
     conditional_identity_margin: float = record_field("report", units="nats", dtype="float64")
     local_state_bootstrap_fraction: float = record_field("report", units="1", dtype="float64")
-    local_state_loco_fraction: float = record_field("report", units="1", dtype="float64")
+    local_state_lobo_fraction: float = record_field("report", units="1", dtype="float64")
     eligible_m2_pairs: int = record_field("report", units="1", dtype="int")
     scored_m2_pairs: int = record_field("report", units="1", dtype="int")
     incomplete_m2_search: bool = record_field("report", units="1", dtype="bool")
@@ -1251,6 +1260,9 @@ class ChromosomeSummaryView:
     scored_component_count: int = record_field("report", units="1", dtype="int")
     informative_markers: int = record_field("report", units="1", dtype="int")
     omitted_reason: str | None = record_field("report", units="1", dtype="str | None")
+    # Working-map Morgans of [1, the contig's last evidence position] (the configured map, or its rate): the
+    # contig's fixed material in the exclusion weights (DESIGN_417 D9) and the report.
+    configured_morgans: float = record_field("report", units="Morgans", dtype="float", default=float("nan"))
 
 
 @dataclass(frozen=True)
@@ -1277,7 +1289,8 @@ class ExclusionEvidenceView:
 
 @dataclass(frozen=True)
 class BlockSummaryView:
-    """One occupied low-material block in decision order; bin endpoints are inclusive."""
+    """One contig-component piece of a material unit, in genome order; ``block`` is its unit (decision row); bin
+    endpoints are inclusive; ``nominal_index`` is the piece's whole-Morgan grid index on the genome axis."""
     contig: str = record_field("report", dtype="str")
     block: int = record_field("report", dtype="int")
     component: int = record_field("report", dtype="int")
@@ -1472,6 +1485,8 @@ class ExclusionRequest:
     target_count: int = record_field("state", dtype="int64")
     before_edges: ParentEdges = record_field("state", dtype="ParentEdges")
     relationship: RelationshipRequest = record_field("state", dtype="RelationshipRequest")
+    # log w_k of each configured contig in the genome exclusion e-value (DESIGN_417 D9; -inf: no material, no task).
+    log_weights: tuple[float, ...] = record_field("state", dtype="tuple[float, ...]", default=(), kw_only=True)
 
     @property
     def dyad_digest(self) -> str:
@@ -1483,13 +1498,9 @@ class ExclusionRequest:
 
 @dataclass(frozen=True)
 class PedigreePrecheck:
-    """The configured/informative chromosome requirements; warnings do not alter science."""
+    """The sample requirement (N >= 3); material is stated by TierReach, never by a count of contigs."""
 
     samples: int = record_field("obs", dtype="int64")
-    contigs: int = record_field("obs", dtype="int64")
-    minimum_scored_contigs: int = record_field("state", dtype="int64")
-    tier_b_minimum_contigs: int = record_field("state", dtype="int64")
-    tier_b_warning: bool = record_field("diagnostic", dtype="bool")
     basis: str = record_field("diagnostic", dtype="str")
 
 
@@ -1558,10 +1569,8 @@ class PreparedComponent:
     transition:        the painting's source transition (HammingTransition).
     factors:           exact source-posterior factors (SourceFactors).
     robustness_epsilon: painting emission robustness weight (uniform genotype mixture).
-    selector_switch_probability: float64 [B-1] meiotic switch probability per boundary (pedigree map).
-    measured_morgans:  float64 [B-1] measured map length (Morgans) between adjacent bin centres
-                       (PreparedComponent.measured_coordinates): 0 where no supplied map or stated rate
-                       measures it.
+    selector_switch_probability: float64 [B-1] meiotic switch probability per boundary (pedigree map); its
+                       per-bin Haldane coordinates are the component's material (DESIGN_417 D1).
     genotype_likelihoods: float64 [N, M, 3] normalised raw GLs at the selected markers.
     observed:          bool [N, M] read depth > 0 at the selected markers.
     state_classes:     int16 [N, B, 2] painting MAP state class per sample, bin and track; -1 = unknown
@@ -1576,7 +1585,6 @@ class PreparedComponent:
     factors: SourceFactors = record_field("state", axes=(), units="1", dtype="SourceFactors")
     robustness_epsilon: float = record_field("state", axes=(), units="1", dtype="float64")
     selector_switch_probability: np.ndarray = record_field("state", axes=("B-1",), units="1", dtype="float64")
-    measured_morgans: np.ndarray = record_field("state", axes=("B-1",), units="Morgans", dtype="float64")
     genotype_likelihoods: np.ndarray = record_field("state", axes=("N", "M", "3"), units="probability", dtype="float64")
     observed: np.ndarray = record_field("state", axes=("N", "M"), units="1", dtype="bool")
     state_classes: np.ndarray = record_field("state", axes=("N", "B", "2"), units="1", dtype="int16")
@@ -1604,7 +1612,10 @@ class PreparedChromosome:
 
     component_count: painting components on the contig; ``components`` keeps only components with
     observed non-uniform evidence at a selected marker, in painting order. ``omitted_reason`` is
-    "no_observed_nonuniform_component_evidence" when none remains, else None."""
+    "no_observed_nonuniform_component_evidence" when none remains, else None. ``configured_morgans``: the
+    configured working map (the map, or the configured rate where it applies) over [1, the contig's last
+    evidence position], fixed before any genotype is read: the contig's weight in the genome exclusion e-value
+    (DESIGN_417 D9); NaN only for supplied fixtures that request no exclusion."""
 
     contig: str = record_field("state", axes=(), units="1", dtype="str")
     component_count: int = record_field("state", axes=(), units="1", dtype="int64")
@@ -1612,12 +1623,13 @@ class PreparedChromosome:
         "state", axes=("components",), units="1", dtype="tuple[PreparedComponent, ...]"
     )
     omitted_reason: str | None = record_field("state", axes=(), units="1", dtype="str | None", default=None)
+    configured_morgans: float = record_field("state", axes=(), units="Morgans", dtype="float64", default=float("nan"))
 
     @property
     def informative_markers(self) -> int:
         return sum(component.informative_markers for component in self.components)
 
-    schema: int = schema_field(2)
+    schema: int = schema_field(3)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -1625,52 +1637,32 @@ class PreparedChromosome:
 
 @dataclass(frozen=True)
 class ChromosomeScores:
-    """Composite evidence of one informative contig, summed over its components (``pedigree/scores``).
+    """Composite evidence of one informative contig as its pieces of the genome's material units (record
+    ``pedigree/floored_scores``, schema 5; DESIGN_417 I1).
 
-    zero [N], one [N, N], two [T]: M0 / M1 / M2 log likelihoods (panel row order); -inf where ineligible.
-    edge_matched, edge_exposed: float64 [N, N] symmetric posterior-expected painting bins in which the
-        pair shares an anchored founder / is testable for one (diagnostic / gate).
-    pair_explained, pair_exposed: float64 [T] the same for a child and both panel parents.
-    total_bins:    painting bins of the scored components.
-    junctions:     int64 [N] minimum founder switches of each painting (phase-invariant).
-    callable_bins: int64 [N] observed haplotype-bin labels behind the junction count.
-    informative_markers: selected markers of the scored components.
+    A piece is the run of a painting component's bins between two whole-Morgan cuts of the genome axis
+    (MaterialParameters.unit_morgans); ``offset_morgans`` is the genome coordinate of the contig's first scored bin
+    (the working Morgans of every earlier informative contig, configured order) and ``end_morgans`` the coordinate
+    after its last component. Every piece field is a sum of per-bin increments of one never-restarted chain, so
+    the stacking sums pieces into units exactly; the units (and the tail rule) never enter this record.
+    floor: float64 [N] the screen's M1 floor of each child on this contig (CompactM1.floors); the stacking spreads
+    the genome deficit of the floors over all units by bins (DESIGN_417 D7).
     component_count, scored_component_count: painting components / prepared components.
     junction_dyads: int64 [D, 2] (child c, parent p) dyads the decision orients: both directions of every
-        eligible edge, in row-major order (the same for every chromosome of a run).
-    transmission_log_likelihood: float64 [D] joint log likelihood (nats) of the two samples' scheduled
-        homologues under c <- p (science.pedigree.transmission.log_likelihood).
-    scored_morgans: measured map length (Morgans) between adjacent bins of the scored components
-        (PreparedComponent.measured_morgans; each interval at most ExposureParameters.unit_morgans;
-        0 without a measured map).
-    working_morgans: configured working-map distance, sum of -0.5 ln(1 - 2 theta) over the scored
-        components' selector boundaries (PS04). This is NOT measured exposure and never enters a gate or
-        decision; it is retained only for reports.
-    edge_exposed_morgans: float64 [N, N] symmetric, pair_exposed_morgans: float64 [T]: the measured map length
-        over which the pair (child and both panel parents) is exposed: each measured interval between adjacent
-        bins counts as far as it is exposed at both ends."""
+        eligible edge, in row-major order (the same for every contig of a run).
+    working_morgans: the contig's configured working-map distance (its scored components' Haldane length)."""
 
     contig: str = record_field("state", axes=(), units="1", dtype="str")
-    zero: np.ndarray = record_field("state", axes=("N",), units="nats", dtype="float64")
-    one_floored: np.ndarray = record_field("state", axes=("N", "N"), units="nats", dtype="float64")
-    two: np.ndarray = record_field("state", axes=("T",), units="nats", dtype="float64")
-    edge_matched: np.ndarray = record_field("state", axes=("N", "N"), units="painting bins", dtype="float64")
-    edge_exposed: np.ndarray = record_field("state", axes=("N", "N"), units="painting bins", dtype="float64")
-    pair_explained: np.ndarray = record_field("state", axes=("T",), units="painting bins", dtype="float64")
-    pair_exposed: np.ndarray = record_field("state", axes=("T",), units="painting bins", dtype="float64")
-    total_bins: float = record_field("state", axes=(), units="painting bins", dtype="float64")
-    junctions: np.ndarray = record_field("state", axes=("N",), units="painting bins", dtype="int64")
-    callable_bins: np.ndarray = record_field("state", axes=("N",), units="painting bins", dtype="int64")
+    offset_morgans: float = record_field("state", axes=(), units="Morgans", dtype="float64")
+    end_morgans: float = record_field("state", axes=(), units="Morgans", dtype="float64")
     informative_markers: int = record_field("state", axes=(), units="1", dtype="int64")
     component_count: int = record_field("state", axes=(), units="1", dtype="int64")
     scored_component_count: int = record_field("state", axes=(), units="1", dtype="int64")
     junction_dyads: np.ndarray = record_field("state", axes=("D", "2"), units="1", dtype="int64")
-    transmission_log_likelihood: np.ndarray = record_field("state", axes=("D",), units="nats", dtype="float64")
-    scored_morgans: float = record_field("state", axes=(), units="Morgans", dtype="float64")
-    edge_exposed_morgans: np.ndarray = record_field("state", axes=("N", "N"), units="Morgans", dtype="float64")
-    pair_exposed_morgans: np.ndarray = record_field("state", axes=("T",), units="Morgans", dtype="float64")
-    working_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float64", kw_only=True)
-    schema: int = schema_field(4)
+    floor: np.ndarray = record_field("state", axes=("N",), units="nats", dtype="float64")
+    working_morgans: float = record_field("report", axes=(), units="Morgans", dtype="float64")
+    pieces: BlockScores = record_field("state", dtype="BlockScores")
+    schema: int = schema_field(5)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -1678,7 +1670,8 @@ class ChromosomeScores:
 
 @dataclass(frozen=True)
 class MapBlock:
-    """A2 descriptor: original component, half-open bin span, right-boundary distance, grid index."""
+    """One piece: original component, half-open bin span, working length (Morgans), nominal grid index (the
+    whole-Morgan index of its bins on the genome axis)."""
     component: int = record_field("obs", dtype="int")
     first_bin: int = record_field("obs", dtype="int")
     stop_bin: int = record_field("obs", dtype="int")
@@ -1688,36 +1681,28 @@ class MapBlock:
 
 @dataclass(frozen=True)
 class BlockScores:
-    """Low-material H rows on fixed eligible E, retained R, panel T and dyad D axes.
+    """P pieces of one contig on fixed eligible E, retained R, panel T and dyad D axes.
 
-    Raw retained M1 and the shared imputed child floor remain distinct. No exposed
-    Morgan field exists; the decision credits exactly one unit per block.
+    one_raw holds the retained pairs' M1 per piece; every other eligible edge takes the child's floor at
+    stacking. No exposed-Morgan field exists; the decision credits exactly one unit per unit.
     """
     descriptors: tuple[MapBlock, ...] = record_field("obs", dtype="tuple[MapBlock, ...]")
     retained_pairs: np.ndarray = record_field("state", axes=("R", "2"), dtype="int64")
-    one_raw: np.ndarray = record_field("evidence", axes=("H", "R"), units="nats", dtype="float64")
-    floors: np.ndarray = record_field("evidence", axes=("H", "N"), units="nats", dtype="float64")
-    zero: np.ndarray = record_field("evidence", axes=("H", "N"), units="nats", dtype="float64")
-    two: np.ndarray = record_field("evidence", axes=("H", "T"), units="nats", dtype="float64")
-    edge_matched: np.ndarray = record_field("evidence", axes=("H", "E"), units="painting bins", dtype="float64")
-    edge_exposed: np.ndarray = record_field("evidence", axes=("H", "E"), units="painting bins", dtype="float64")
-    pair_explained: np.ndarray = record_field("evidence", axes=("H", "T"), units="painting bins", dtype="float64")
-    pair_exposed: np.ndarray = record_field("evidence", axes=("H", "T"), units="painting bins", dtype="float64")
-    total_bins: np.ndarray = record_field("obs", axes=("H",), units="painting bins", dtype="float64")
-    informative_markers: np.ndarray = record_field("obs", axes=("H",), dtype="int64")
-    junctions: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
-    callable_bins: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
-    transmission_log_likelihood: np.ndarray = record_field("evidence", axes=("H", "D"), units="nats", dtype="float64")
+    one_raw: np.ndarray = record_field("evidence", axes=("P", "R"), units="nats", dtype="float64")
+    zero: np.ndarray = record_field("evidence", axes=("P", "N"), units="nats", dtype="float64")
+    two: np.ndarray = record_field("evidence", axes=("P", "T"), units="nats", dtype="float64")
+    edge_matched: np.ndarray = record_field("evidence", axes=("P", "E"), units="painting bins", dtype="float64")
+    edge_exposed: np.ndarray = record_field("evidence", axes=("P", "E"), units="painting bins", dtype="float64")
+    pair_explained: np.ndarray = record_field("evidence", axes=("P", "T"), units="painting bins", dtype="float64")
+    pair_exposed: np.ndarray = record_field("evidence", axes=("P", "T"), units="painting bins", dtype="float64")
+    total_bins: np.ndarray = record_field("obs", axes=("P",), units="painting bins", dtype="float64")
+    informative_markers: np.ndarray = record_field("obs", axes=("P",), dtype="int64")
+    junctions: np.ndarray = record_field("evidence", axes=("P", "N"), units="painting bins", dtype="float64")
+    callable_bins: np.ndarray = record_field("evidence", axes=("P", "N"), units="painting bins", dtype="float64")
+    transmission_log_likelihood: np.ndarray = record_field("evidence", axes=("P", "D"), units="nats", dtype="float64")
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
-
-
-@dataclass(frozen=True)
-class LowMaterialChromosomeScores(ChromosomeScores):
-    """Schema-4 low form; ordinary chromosome products have no blocks/form fields."""
-    blocks: BlockScores = record_field("state", dtype="BlockScores", kw_only=True)
-    form: str = record_field("state", dtype="str", default="low_material", kw_only=True)
 
 
 @dataclass(frozen=True)

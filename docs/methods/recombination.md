@@ -51,7 +51,7 @@ Cost and scope: O(markers x bins touched); O(E bins). These terms describe the u
 <a id="rc05"></a>
 ## rc05 Map aggregation and map units
 
-Sum expected counts and exposure over edges in the declared array reduction order. Derive rate from expected crossovers per meiosis-base and retain NaN where exposure is absent. Integrate only covered physical length for observed cumulative cM; distribute called events separately for the called-rate table. The rate_is_measured flag does not alter this conditional-map prior calculation.
+Sum expected counts and exposure over edges in the declared array reduction order. Derive rate from expected crossovers per meiosis-base and retain NaN where exposure is absent. Integrate only covered physical length for observed cumulative cM; distribute called events separately for the called-rate table.
 
 Implementation: [science/recombination/map.py](../../haplotype_reconstruction/science/recombination/map.py).
 

@@ -18,7 +18,7 @@ _RELEASE_414_KEYS = {
     "execution": ("cores", "contig_lanes", "memory_limit", "serial", "max_contigs", "profile", "scratch"),
     "input": ("kind", "vcf", "contigs"),
     "quality": ("site_filter", "sample_filter", "read_calibration"),
-    "genetic_map": ("rate_cm_per_mb", "file", "rate_is_measured"),
+    "genetic_map": ("rate_cm_per_mb", "file"),
     "family_phase": ("protected_intervals",),
     "recombination": ("order_breakpoints",),
     "export": ("enabled", "full_length"),

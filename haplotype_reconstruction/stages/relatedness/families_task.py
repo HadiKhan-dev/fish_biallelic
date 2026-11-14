@@ -63,7 +63,7 @@ def run(
 
         with thread_team(default=team):
             terms = evidence_pass(root, inputs, sample_ids, terms_of, team=team)
-            combined = concatenate_terms(sample_ids, tuple(item.contig for item in inputs), terms)
+            combined = concatenate_terms(sample_ids, tuple(item.contig for item in inputs), terms, parameters)
             # The task starts beside discovery with the CPUs it was given (often one); every search step re-reads its
             # share, so it grows into the CPUs that finished tasks free (as painting does at each batch).
             product = fit_families(combined, parameters, threads=claim_threads)

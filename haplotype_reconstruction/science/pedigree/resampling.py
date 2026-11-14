@@ -1,33 +1,32 @@
-"""Chromosome bootstrap and leave-one-chromosome-out support of the full-data decisions.
+"""Material-unit bootstrap and leave-one-unit-out (LOBO) support of the full-data decisions.
 
 Each replicate refits everything downstream of the genetic scores (orientation, exposure gate,
-family messages, state, identity, graph) with chromosome multiplicities: seeded bootstrap draws of
-C chromosomes with replacement, and C leave-one-out weightings (separate counts and denominator).
-A replicate whose final family solve does not converge abstains for every sample and stays in the
-denominator. Counts are integer sums, so support does not depend on worker count or order. A fit is a
-deterministic function of its multiplicities, so each distinct bootstrap multiplicity vector is fitted once and
-counted as many times as it was drawn (few chromosomes repeat most draws: 10 distinct vectors among 1,000 at C = 3).
+family messages, state, identity, graph) with unit multiplicities: seeded bootstrap draws of
+H units with replacement, and H leave-one-unit-out fits (separate counts and denominator) read from the full
+totals minus the left-out unit (selection.omission_totals). A replicate whose final family solve does not
+converge abstains for every sample and stays in the denominator. Counts are integer sums, so support does not
+depend on worker count or order. A fit is a deterministic function of its multiplicities, so each distinct
+bootstrap multiplicity vector is fitted once and counted as many times as it was drawn. Units are the genome's
+1-Morgan material units (DESIGN_417): no chromosome or contig count enters the resampling.
 
-Method: docs/methods/pedigree.md#chromosome-resampling.
+Method: docs/methods/pedigree.md#pd16.
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ...contracts.pedigree import Resampling, SupportCounts, TierReach
+from ...contracts.pedigree import Resampling, SupportCounts
 from ...core.errors import InvariantError
 from ...core.kernels import kernel
-from ...core.numerics import ordered_sum
 from ...core.random import bootstrap_multiplicities
 from . import selection
 from .family import FamilyMessageNonConvergence
 from .kernels.signatures import OVERLOADS
-from .parameters import PedigreeParameters, TierThresholds
+from .parameters import PedigreeParameters
 from .selection import DecisionInputs
 
 __all__ = [
@@ -40,8 +39,6 @@ __all__ = [
     "evaluate_task",
     "plan",
     "combine",
-    "minimum_contigs_for_tier",
-    "reach",
 ]
 
 # Work and results keep the existing coalesced task order and integer draw counts.
@@ -132,9 +129,9 @@ def evaluate(inputs: DecisionInputs, config: PedigreeParameters, multiplicities:
 class ResamplingPlan:
     """The fixed resampling work of one decision: the seeded draws and the ordered independent fit tasks.
 
-    multiplicities: float64 [R, C] the R bootstrap draws (PCG64 stream of the configured seed).
-    tasks: the fit tasks in their fixed order: the C leave-one-out fits first, then the distinct bootstrap
-    vectors that omit the most chromosomes (one vector per task when the work is spread over workers).
+    multiplicities: float64 [R, H] the R bootstrap draws (PCG64 stream of the configured seed).
+    tasks: the fit tasks in their fixed order: the H leave-one-unit-out fits first, then the distinct bootstrap
+    vectors that omit the most units (one vector per task when the work is spread over workers).
     worker_count: the workers the work is planned for (1 = one task holding every distinct vector).
     """
 
@@ -161,18 +158,13 @@ def plan(inputs: DecisionInputs, config: PedigreeParameters, cpus: int = 1) -> R
     # solves), so small tasks keep the tail short. Support counts are integer sums: neither order nor grouping
     # changes them.
     chunk = 1 if worker_count > 1 else max(1, fitted)
-    # Then the bootstrap vectors that omit the most chromosomes (weaker evidence, typically the slowest
+    # Then the bootstrap vectors that omit the most units (weaker evidence, typically the slowest
     # family solves), so that long fits start early rather than in the tail.
     order = np.argsort(-np.count_nonzero(distinct == 0.0, axis=1), kind="stable")
     tasks: list[FitTask] = []
     if n_contigs > 1:
         for omitted in range(n_contigs):
-            if inputs.regime == "low_material":
-                weights = np.array([[omitted]], dtype=np.int64)
-            else:
-                weights = np.ones((1, n_contigs), dtype=np.float64)
-                weights[0, omitted] = 0.0
-            tasks.append((True, weights, np.ones(1, dtype=np.int64), config))
+            tasks.append((True, np.array([[omitted]], dtype=np.int64), np.ones(1, dtype=np.int64), config))
     tasks += [
         (
             False,
@@ -188,12 +180,11 @@ def plan(inputs: DecisionInputs, config: PedigreeParameters, cpus: int = 1) -> R
 def evaluate_task(inputs: DecisionInputs, task: FitTask) -> FitResult:
     """One planned task: (is_loco, draws, selections of its multiplicity vectors)."""
     is_loco, weights, task_draws, task_config = task
-    return is_loco, task_draws, evaluate(inputs, task_config, weights,
-        omissions=is_loco and inputs.regime == "low_material")
+    return is_loco, task_draws, evaluate(inputs, task_config, weights, omissions=is_loco)
 
 
 def combine(inputs: DecisionInputs, planned: ResamplingPlan, results: Iterable[FitResult]) -> Resampling:
-    """Bootstrap and LOCO support counts from every planned task's result (integer sums: order free)."""
+    """Bootstrap and LOBO support counts from every planned task's result (integer sums: order free)."""
     alternatives = inputs.alternatives
     n_samples = alternatives.n_samples
     edges = named_edges(alternatives.rows, n_samples)
@@ -236,79 +227,4 @@ def combine(inputs: DecisionInputs, planned: ResamplingPlan, results: Iterable[F
         bootstrap_graph_budget_exhausted=graph_tallies[False],
         loco_graph_budget_exhausted=graph_tallies[True],
         maximum_graph_passes_used=maximum_graph_passes,
-    )
-
-
-# --------------------------------------------------------------------- chromosome-count reach
-def _distinct_probability(n_contigs: int, minimum: int) -> float:
-    """P(at least ``minimum`` distinct chromosomes among C draws with replacement from C)."""
-    total = 0
-    for distinct in range(minimum, n_contigs + 1):
-        surjections = sum((-1) ** j * math.comb(distinct, j) * (distinct - j) ** n_contigs for j in range(distinct + 1))
-        total += math.comb(n_contigs, distinct) * surjections
-    return total / n_contigs**n_contigs
-
-
-def minimum_contigs_for_tier(thresholds: TierThresholds, minimum_exposed_contigs: int) -> int:
-    """Smallest count of informative chromosomes shorter than one map unit whose resampling can reach ``thresholds``
-    (longer chromosomes count more units and need fewer; ``reach`` is exact for a run).
-
-    A non-M0 configuration is testable only on exposed chromosomes holding >= m map units; with chromosomes of one
-    unit each, fits with fewer than m distinct chromosomes tie every state and call nothing. So the bootstrap
-    support of any call is at most P(distinct draws >= m) and LOCO support is 0 unless C - 1 >= m.
-    """
-    n_contigs = max(1, minimum_exposed_contigs)
-    while True:
-        loco = 1.0 if n_contigs - 1 >= minimum_exposed_contigs else 0.0
-        if (
-            loco >= thresholds.loco_fraction
-            and _distinct_probability(n_contigs, minimum_exposed_contigs) >= thresholds.configuration_bootstrap
-        ):
-            return n_contigs
-        n_contigs += 1
-
-
-def reach(multiplicities: np.ndarray, units: np.ndarray, config: PedigreeParameters) -> TierReach:
-    """What this run's resampling can release with its informative chromosomes of ``units`` map units each: the
-    share of bootstrap draws, and of leave-one-out fits, whose distinct chromosomes hold the gate's map units."""
-    n_contigs = multiplicities.shape[1]
-    units = np.asarray(units, dtype=np.float64)
-    minimum_units = config.exposure.minimum_exposed_units
-    minimum = int(np.ceil(minimum_units))
-    drawn = ordered_sum((multiplicities > 0).T, axis=0, weights=units) if len(multiplicities) else np.zeros(0)
-    max_bootstrap = float(np.mean(drawn >= minimum_units)) if len(drawn) else 0.0
-    left = ordered_sum(units) - units
-    max_loco = float(np.mean(left >= minimum_units)) if n_contigs > 1 else 0.0
-
-    def reachable(thresholds: TierThresholds) -> bool:
-        return max_bootstrap >= thresholds.configuration_bootstrap and max_loco >= thresholds.loco_fraction
-
-    tier_a = reachable(config.release.tier_a)
-    tier_b = reachable(config.release.tier_b)
-    need_a = minimum_contigs_for_tier(config.release.tier_a, minimum)
-    need_b = minimum_contigs_for_tier(config.release.tier_b, minimum)
-    support = f"max bootstrap support {max_bootstrap:.3f}, LOCO {max_loco:.2f}"
-    size = (
-        f"{n_contigs} informative chromosomes holding {float(ordered_sum(units)):.1f} map units of "
-        f"{config.exposure.unit_morgans:g} Morgan"
-    )
-    short = f"chromosomes shorter than {config.exposure.unit_morgans:g} Morgan, fewer longer ones"
-    if tier_b:
-        statement = f"{size}: Tier B assessable ({support}); " + (
-            "Tier A assessable" if tier_a else f"Tier A needs >= {need_a} {short}"
-        )
-    else:
-        statement = f"{size}: not assessable ({support}); Tier B needs >= {need_b} {short}, Tier A >= {need_a}"
-    return TierReach(
-        n_contigs,
-        minimum,
-        max_bootstrap,
-        max_loco,
-        tier_a,
-        tier_b,
-        need_a,
-        need_b,
-        statement,
-        informative_units=float(ordered_sum(units)),
-        unit_morgans=float(config.exposure.unit_morgans),
     )

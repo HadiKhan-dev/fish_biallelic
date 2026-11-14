@@ -21,6 +21,7 @@ from ...core.digest import json_digest
 from ...core.errors import InputError, InvariantError
 from ...core.ties import TieCounts
 from ...science.pedigree.parameters import PedigreeParameters
+from ...science.pedigree.run import exclusion_contigs
 from ...store.container import CheckpointFile
 from ...store.identity import CodeIdentity, code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, read_items
@@ -87,21 +88,24 @@ def expected(
     numerical_policy: NumericalPolicy | None = None,
     code: CodeIdentity | None = None,
 ) -> str:
-    """Build the real schema-8 derivation; workers/storage routes and output switches are absent.
+    """Build the real schema-9 derivation; workers/storage routes and output switches are absent.
 
     Prepared records cover configured C, while floored records cover informative C.
-    Exclusion is empty only for an empty request; otherwise it covers configured C.
+    Exclusion is empty only for an empty request; otherwise it covers the configured contigs with material
+    (positive exclusion weight), in configured order.
     Code roots include input construction, adapters, codec and scientific closure.
     """
     for label, actual, expected in (
         ("prepared", inputs.prepared, contigs),
         ("floored scores", inputs.floored_scores, () if inputs.regime == "not_assessable" else informative_contigs),
-        ("exclusion", inputs.exclusion, contigs if inputs.exclusion else ()),
         ("relationship", inputs.relationship, contigs if inputs.relationship else ()),
         ("evidence", inputs.evidence, contigs if inputs.evidence else ()),
     ):
         if tuple(name for name, _ in actual) != expected:
             raise InputError(f"pedigree {label} identities do not follow their contig axis")
+    excluded = tuple(name for name, _ in inputs.exclusion)
+    if tuple(c for c in contigs if c in set(excluded)) != excluded:
+        raise InputError("pedigree exclusion identities do not follow their contig axis")
     upstream = {
         "eligibility": inputs.eligibility,
         "panel": inputs.panel,
@@ -145,7 +149,7 @@ def expected(
             informative_contigs=informative_contigs,
             product_schema=PedigreeAdapter.schema,
             regime=inputs.regime,
-            partition=(1.0, 1.5, 0.5, 0.499999, "component-grid-occupied-bins"),
+            partition="genome-axis-material-units-v1",
         ),
         numerical_policy or NumericalPolicy.current(),
         upstream,
@@ -166,6 +170,7 @@ class BoundInputs:
     summary: tuple[ChromosomeSummaryView, ...]
     dependencies: PedigreeDependencies
     classification: Any = None
+    axis: Any = None
 
     @property
     def informative_contigs(self) -> tuple[str, ...]:
@@ -218,11 +223,10 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         prepared_identity = prepare.derivation(
             parameters.preparation,
             dict(painting=painting.identity, evidence=evidence.identity, genetic_map=manifest["map_identities"][c]),
-            rate_is_measured=parameters.exposure.rate_is_measured,
             reverse=parameters.reverse_conventions,
             numerical_policy=policy,
         )
-        header = _header(file, PREPARED, prepared_identity, ("contig", "component_count", "omitted_reason", "layout"),
+        header = _header(file, PREPARED, prepared_identity, prepare.LAYOUT_ITEMS[1:],
                          schemas=prepare.PreparedAdapter.schema)
         if header["contig"] != c:
             raise InputError("prepared header contig differs from its configured axis")
@@ -241,16 +245,16 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     from ...science.pedigree import regimes
     layouts, prepared_summary = [], []
     for header in prepared_headers:
-        layout, prepared_row = prepare.layout_summary(header, parameters)
+        layout, prepared_row = prepare.layout_summary(header)
         prepared_summary.append(prepared_row)
         if header["omitted_reason"] is None:
             layouts.append(layout)
-    classification = regimes.classify(layouts, parameters)
+    classification, axis = regimes.classify_layouts(tuple(layouts), parameters)
     if classification.name == "not_assessable":
         dependencies = PedigreeDependencies(eligibility.identity(), "", "", tuple(prepared_ids), (),
                                            evidence=tuple(evidence_ids), regime=classification.name)
         return BoundInputs(parameters, policy, sample_ids, contigs, eligibility, None,
-                           tuple(prepared_summary), dependencies, classification)
+                           tuple(prepared_summary), dependencies, classification, axis)
     screen_identity = screen.screen_derivation(parameters, eligibility.identity(), informative, numerical_policy=policy)
     _header(store.run, SCREEN, screen_identity)
     bound_ids = tuple(
@@ -269,9 +273,10 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     panel = load_product(store.run, PANEL, panel_identity, screen.PanelAdapter())
     if panel is None:
         raise InvariantError("pedigree requires the complete candidate panel")
+    placed = prepare.placements(tuple(layouts), axis, parameters)
     score_ids = tuple(
-        (c, scores.derivation(parameters, identity, screen_identity, panel, numerical_policy=policy, regime=classification.name))
-        for c, identity in informative
+        (c, scores.derivation(parameters, identity, screen_identity, panel, placement, numerical_policy=policy))
+        for (c, identity), placement in zip(informative, placed, strict=True)
     )
     score_id_map = dict(score_ids)
     summary = []
@@ -281,11 +286,9 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
                 store.contig(c),
                 FLOORED_SCORES,
                 score_id_map[c],
-                ("contig", "component_count", "scored_component_count", "informative_markers", "form"),
+                ("contig", "component_count", "scored_component_count", "informative_markers"),
                 schemas=scores.ScoresAdapter.schema,
             )
-            if value.get("form", "standard") != classification.name:
-                raise InputError("score record form differs from the run regime")
             if value["contig"] != c or value["component_count"] != header["component_count"]:
                 raise InputError("score summary disagrees with its prepared chromosome")
             summary.append(
@@ -295,10 +298,12 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
                     value["scored_component_count"],
                     value["informative_markers"],
                     None,
+                    float(header["configured_morgans"]),
                 )
             )
         else:
-            summary.append(ChromosomeSummaryView(c, header["component_count"], 0, 0, header["omitted_reason"]))
+            summary.append(ChromosomeSummaryView(c, header["component_count"], 0, 0, header["omitted_reason"],
+                                                 float(header["configured_morgans"])))
     family_reader = families_records.result_reader(store, manifest, product="families")
     if family_reader is None:
         raise InvariantError("pedigree requires relatedness/families")
@@ -312,7 +317,8 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         evidence=tuple(evidence_ids),
         regime=classification.name,
     )
-    return BoundInputs(parameters, policy, sample_ids, contigs, eligibility, panel, tuple(summary), dependencies, classification)
+    return BoundInputs(parameters, policy, sample_ids, contigs, eligibility, panel, tuple(summary), dependencies,
+                       classification, axis)
 
 
 def request_dependencies(
@@ -324,6 +330,7 @@ def request_dependencies(
     """Bind separate count and relationship requests to their actual input records."""
     if tuple(c for c, _ in inputs.evidence) != request.contigs:
         raise InputError("pedigree exclusion/observed-count evidence must cover configured contigs in order")
+    weights = dict(exclusion_contigs(request))
     identities = (
         tuple(
             (
@@ -334,10 +341,12 @@ def request_dependencies(
                     request.dyads,
                     request.sample_ids,
                     request.contigs,
+                    weights[c],
                     numerical_policy=policy,
                 ),
             )
             for c, identity in inputs.evidence
+            if c in weights
         )
         if len(request.dyads)
         else ()
@@ -422,7 +431,7 @@ def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product:
         raise InputError("cached pedigree request axes differ from the bound run")
     inputs = request_dependencies(bound.dependencies, request, bound.parameters, bound.policy)
     for c, identity in inputs.exclusion:
-        _header(store.contig(c), EXCLUSION, identity)
+        _header(store.contig(c), EXCLUSION, identity, schemas=exclusion.ExclusionAdapter.schema)
     for c, identity in inputs.relationship:
         _header(store.contig(c), RELATIONSHIP, identity)
     identity = expected(

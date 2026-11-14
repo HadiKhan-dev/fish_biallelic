@@ -4,58 +4,114 @@ Pedigree inference compares no-, one- and two-observed-parent states using paint
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
 
-## Prepared-layout regimes and map blocks
+<a id="material-units"></a>
+## Material units and regimes
 
-A single regime is chosen before score tasks, uniformly for every child. After omission,
-standard requires both at least `ceil(minimum_exposed_units)` informative contigs and
-Tier B reach under the configured seeded chromosome draws. Standard uses the chromosome
-model and computes no blocks. Otherwise at least four occupied blocks gives low material;
-fewer gives a completed `not_assessable` pedigree: unresolved states, count bounds [0,2],
-no edges or counts, no best guesses and absent fit diagnostics. Fewer than three samples
-remains an input error.
+The pedigree decides by the amount of material, never by a count of chromosomes, contigs or components.
+The genome axis is the working-map coordinate of every scored painting bin: contigs in configured order, painting
+components in map order. For a component's selector probabilities theta, each boundary adds the Haldane distance
+`-0.5 * log(1 - 2 * min(theta, 0.499999))`; the component's first bin sits at the running offset of the components
+before it, so gaps between components (and half-bins at their ends) count nothing. U, the run's material, is the
+last coordinate: the working Morgans of its informative components. The configured map is used whether or not its
+rate is declared measured; a wrong rate scales U, and with it every cut below, by the same factor. Painting
+fragmentation can move U: a gap between painted components counts nothing.
 
-Partition each scored component independently. For selector probability theta, each
-boundary distance is `-0.5 * log(1 - 2 * min(theta, 0.499999))`, without another cap.
-Coordinates start at zero. If T is the last coordinate, let whole=floor(T); the nominal
-count is one when whole=0, otherwise whole+1 when T-whole>=0.5, else whole.
-A bin's nominal index is min(floor(coordinate), count-1). Omit empty nominal blocks;
-retain occupied blocks in component order. A one-bin component is one block. The boundary
-belongs to the bin on its right. The configured map is used whether declared measured
-or not. An incorrect rate changes the number of blocks and may change the regime;
-clipping and thresholds at 1 and 1.5 Morgans prevent a proportionality claim.
+The axis is cut into consecutive units of 1 working Morgan (`MaterialParameters.unit_morgans`). A final piece shorter
+than 0.5 Morgan (`tail_morgans`) joins the unit before it, so a run holds round(U) nominal units. A bin belongs to
+unit min(floor(x), last); a bin exactly at a cut belongs to the unit on its right; empty nominal units are omitted.
+Units may straddle components and contigs: chromosomes assort independently, so a straddling unit is no more
+dependent on its neighbours than a unit inside one chromosome. Unit composition depends on the configured contig
+order, a deterministic convention.
 
-Low material uses one unit per block in all exposure, informative and reach rules;
-lengths are descriptors only. The existing bin/fraction gates remain. Tier B configuration
-and parent bootstrap thresholds are 0.95; leave-one-block-out (LOBO) requires 1.0.
-Tier A configurations and marginal edges are not assessed and do not enter slot ordering.
-Full-marker exclusion, relationship evidence and slot observed counts keep real chromosomes.
-Independent count exclusion remains available after resampling abstentions. Nonconverged
-resamples abstain for every sample and remain in their original denominators.
+The regime reads U alone and is chosen before score tasks, uniformly for every child:
 
-Forward log increments in both views are credited per bin without restarting chains.
-Junctions use the original component's traced minimum-switch schedule; observed painted
-labels determine callability. Transmission retains its whole-component four-state filter.
-Genome retention, temperatures and the panel are fixed. Retained M1 uses raw block scores;
-other identities share the child's floor `M0_block + bins_block/bins_chr * (F_chr-M0_chr)`.
-This is an imputed profile, not raw M1. The panel exclusion guarantee covers full-data and
-leave-one-chromosome-out fits only, not every block omission; capped/incomplete diagnostics
-remain. Resampling is conditional on full-data preparations, source factors and schedules:
-later increments still depend on the filter states propagated through an omitted block.
-It measures conditional stability, not calibrated confidence or independent segregation.
+- U < `assessable_morgans` (5): a completed `not_assessable` pedigree: unresolved states, count bounds [0, 2], no
+  edges or counts, no best guesses and absent fit diagnostics.
+- `assessable_morgans` <= U < `standard_morgans` (12): low material. Tier B only, with configuration and parent
+  bootstrap thresholds `low_bootstrap` (0.95) and leave-one-unit-out (LOBO) fraction `low_leave_one_out` (1.0);
+  exposure and informative minimums of one unit.
+- U >= `standard_morgans`: the released Tier B thresholds (0.70 / 0.70 / LOBO 0.80) with minimums of three units.
+  Tier A (0.95 / 0.95 / 0.95) is assessed only when also U >= `tier_a_morgans` (12, so from the same 12 Morgans);
+  below it Tier A is not published and does not order parent slots.
 
-LOBO aggregation is linear in block count: full additive totals minus one block, distinct
-presence counts minus that block's flags, and graph-order moment totals minus its moments.
-No quadratic block-by-block omission vectors are stored. Each fit still refits family and
-graph selection. Arrays cost H times their eligible-edge/panel axes; for example each
-float64 H by E array costs 8 H E bytes, plus N by N orientation statistics, shared inputs,
-score decode/stack buffers and worker scratch.
+Every unit counts one in exposure, the informative minimums, the bootstrap and LOBO, whatever its length. The cuts
+are an empirical calibration on known-truth simulations, not variance-matched resampling: units of one chromosome
+are correlated at lag one (adjacent 1-Morgan units 0.12 to 0.22 for relatives, lag two at most 0.04), so one
+10-Morgan chromosome in ten units holds about 7.3 to 8.2 effective units. The calibration simulated 60 genomes of
+single chromosomes from 0.5 to 15 Morgans (six cohort designs: complete families, small families, mixed, backcross,
+random half-sibs and a parent-free sib-rich design; depth 1 and 5) with the configured map equal to the generating
+map, fitted both threshold sets on every whole-chromosome layout and compared each U band with the released
+thresholds on multi-chromosome genomes of at least 15 Morgans:
+
+- Below 5 Morgans the low-material rule released non-parents in mixed-family designs (12 of 971 releases at 3.5 to
+  5 Morgans, none of 600 at 5 to 7) and in small families; from 5 Morgans every design passes.
+- Below 12 Morgans the released thresholds released more non-parents than at 15 Morgans and above in small families
+  (about 2 % against 1.45 %) and more edges in the parent-free sib-rich design (0.1 to 0.5 per 100 parentless
+  children against 0.03); from 12 Morgans no design shows an excess. The tests have little power per design near
+  the cut (0.1 to 0.4): these are the cuts the data support, not demonstrated equivalence.
+- In designs with sequenced parents the low-material rule released no non-parent in 74,328 releases from 8
+  Morgans, at 0.5 to 3 points lower recall than the released thresholds.
+
+Limitations of the rule:
+
+- **The cuts are in true Morgans and the rule reads the working map.** U is measured on the map the run uses (the
+  map file, else `rate_cm_per_mb`), whether or not the rate is the organism's. A map k times too long scales every
+  cut down by k in true Morgans: with a configured rate 2.5 times the true one, 12 configured Morgans are about
+  4.8 true Morgans, where the released thresholds release relatives as parents (a sib-rich parent-free design read
+  on such a map with the cut at 9.5 released 4.5 edges per 100 parentless children). The cuts hold only on a
+  working map in true Morgans: a measured map or a correct genome-wide rate.
+- **Sib-rich parent-free designs.** Where no parent is sequenced and full-sib families are large, both tiers can
+  release a sibling or other relative as a parent at any material level: in the calibration Tier A released 2, 2
+  and 1 such edges at 12-13, 13-15 and at least 15 Morgans, so no higher Tier A cut removes them. An end-to-end
+  check released one Tier A non-parent in 448 parentless children of such a design at 13.7 Morgans.
+- **Rare events above the cut.** The end-to-end check (64 cells: 10 to 15 Morgans on one or two chromosomes, and
+  12 Morgans on two chromosomes plus 24 scaffolds) found two single events above 12 Morgans for which the
+  chromosome-axis rule gives no reference, because it assessed no Tier A in those cells and made no wrong
+  zero-parent call: the Tier A non-parent above, and one wrong zero-parent call in a small-family design at depth 1
+  (13 Morgans), within the released thresholds' small-family rate (1 in 946 at 15 Morgans and above). A parent-free
+  design released one Tier B non-parent (1.7 edges per 100 parentless children); elsewhere non-parent releases
+  equalled or fell below the chromosome-axis rule's on the same cells.
+- Long single chromosomes and sib-rich parent-free designs remain the least tested inputs; unit composition and the
+  orientation cap read the same working map.
+
+Each contig's score task scores its pieces of the genome units (a piece is a maximal run of one component's bins in
+one unit) from the barrier's cut list, computed from every informative prepared layout; the score identity binds the
+contig's offset, last unit and cut list, and the screen identity binds every informative contig's preparation, so a
+change in an earlier contig re-scores the later ones. Forward log increments are credited per bin without restarting
+chains; junctions use the component's traced minimum-switch schedule; transmission keeps its whole-component
+four-state filter; so every piece field is a sum of per-bin increments and the stacking sums pieces into units
+exactly. Retained M1 uses raw piece scores. Other identities share the child's floor
+`M0_unit + bins_unit / bins_genome * (sum_k F_k - M0_genome)`: the screen's genome floor deficit spread over all units
+by bins, so the floors of a child sum to its genome floor. This is an imputed profile, not raw M1. Per-contig
+reports (evidence summary, painted junctions) are built from the pieces before they are summed into units.
+
+The M2 panel's exclusion guarantee covers the full-data and leave-one-chromosome-out relevance fits only, not every
+unit omission or bootstrap fit; capped/incomplete diagnostics remain. Resampling is conditional on full-data
+preparations, source factors and schedules: later increments still depend on the filter states propagated through
+an omitted unit. It measures conditional stability, not calibrated confidence or independent segregation.
+
+LOBO aggregation is linear in the unit count: full additive totals minus one unit, distinct presence counts minus
+that unit's flags, and graph-order moment totals minus its moments; the decisions equal per-unit refits. Each fit
+still refits family and graph selection. Arrays cost H (units) times their eligible-edge/panel axes; each float64 H by
+E array costs 8 H E bytes, plus N by N orientation statistics, shared inputs, score decode/stack buffers and worker
+scratch. At N = 2,800 the decision task needs about 1.1 GB per unit (about 47 GB for a 42-Morgan genome) and the
+score records about 0.19 GB per unit.
+
+Parameters by name: `unit_morgans`, `tail_morgans`, `switch_clip`, `assessable_morgans`, `standard_morgans`,
+`tier_a_morgans`, `low_bootstrap`, `low_leave_one_out`. Values and provenance are in the
+[generated parameter reference](../reference/parameters.md).
+
+Implementation: [science/pedigree/regimes.py](../../haplotype_reconstruction/science/pedigree/regimes.py),
+[science/pedigree/blocks.py](../../haplotype_reconstruction/science/pedigree/blocks.py),
+[science/pedigree/stacking.py](../../haplotype_reconstruction/science/pedigree/stacking.py),
+[science/shared/material.py](../../haplotype_reconstruction/science/shared/material.py).
 
 <a id="ps01"></a>
 ## ps01 Scoring-side candidate universe, dyad sets and evidence-free candidates
 
 Treat every sample as a target and every other sample as a candidate parent. Availability is component-specific: it requires an observed painting site whose likelihood spread exceeds the named threshold. An unavailable parent reduces M1 to M0, or M2 to the other parent’s raw M1; its exposure is zero. Availability, information-exponent counts and excursion support have different informative tests and must remain separate.
 
-Implementation: [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+Implementation: [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py), [science/pedigree/block_scoring.py](../../haplotype_reconstruction/science/pedigree/block_scoring.py).
 
 Parameters by name: `INFORMATIVE_GL_SPREAD`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
@@ -84,16 +140,16 @@ Parameters by name: `markers_per_information_block`, `effective_markers_per_info
 Cost and scope: O(N ΣM). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps04"></a>
-## ps04 Selector switch probabilities and measured map lengths
+## ps04 Selector switch probabilities and configured material
 
-Use the run map’s interval distance, including fallback tails, for Haldane selector-switch probabilities and apply the selector floor. The shared Haldane helper supplies the expm1 form. Separately compute measured interval lengths from the measured-coordinate view: clip to supplied knots unless the fallback rate is explicitly measured, and use zero measured support without either. Model transition distance is not measured exposure.
+Use the run map's interval distance, including fallback tails, for Haldane selector-switch probabilities and apply the selector floor. The shared Haldane helper supplies the expm1 form. The selector probabilities, clipped below one half, also give each component's working-map material ([material units](#material-units)). Each contig additionally records its configured material, m(L) - m(0) of the run map (the map and its fallback-rate tails) with L its last evidence position: the contig's fixed weight in the exclusion e-value ([PS20](#ps20)).
 
 
-Implementation: [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+Implementation: [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
 
-Parameters by name: `SELECTOR_SWITCH_FLOOR`, `rate_is_measured`, `unit_morgans`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `SELECTOR_SWITCH_FLOOR`, `switch_clip`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(B). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps05"></a>
 ## ps05 Exact source chain: factors and posterior marginals
@@ -220,26 +276,26 @@ Parameters by name: `pair_relevance_margin`, `max_pairs_per_child`. Values and p
 Cost and scope: O(C² P); O(C P). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps16"></a>
-## ps16 Panel M2 scoring, fallback rows and the floored chromosome record
+## ps16 Panel M2 scoring, fallback rows and the piece record
 
-For each component, obtain pair masses before projection, score M0, score unique fallback dyads for pairs with exactly one available parent, then score M2 where both are available. Use raw fallback M1 or M0 for unavailable slots. Sum in component order. Publish raw zero/two scores and the already floored one-parent profile; the one-parent field is not raw and must not be floored again.
+For each component, obtain pair masses before projection, score M0, score unique fallback dyads for pairs with exactly one available parent, then score M2 where both are available. Use raw fallback M1 or M0 for unavailable slots. Credit every bin's increment to its piece of the genome's material units ([material units](#material-units)); each contig publishes its pieces, its genome offset and the screen's floor of each child. The stacking sums pieces into units and spreads the genome floor deficit; the one-parent profile is floored there exactly once.
 
-Implementation: [stages/pedigree/scores.py](../../haplotype_reconstruction/stages/pedigree/scores.py), [science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+Implementation: [stages/pedigree/scores.py](../../haplotype_reconstruction/stages/pedigree/scores.py), [science/pedigree/block_scoring.py](../../haplotype_reconstruction/science/pedigree/block_scoring.py), [science/pedigree/stacking.py](../../haplotype_reconstruction/science/pedigree/stacking.py).
 
-Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+Parameters: supplied typed inputs and the stage's [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
 
-Cost and scope: O(T (M + B) S²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(T (M + B) S²). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps17"></a>
-## ps17 Posterior-expected exposure (bins and measured map length)
+## ps17 Posterior-expected exposure (bins)
 
-Compute anchored shared/explained and fully anchored nonmatching pair probabilities, clipping rounding residues. Each unordered edge is evaluated with its lower sample index in the child role and then mirrored. Integrate the minimum adjacent-bin exposure over capped measured intervals. Evidence-free members contribute zero; diagonal matched/exposed values are retained, while diagonal measured length is zero. Exposure is posterior expectation, not an observed meiosis count.
+Compute anchored shared/explained and fully anchored nonmatching pair probabilities, clipping rounding residues. Each unordered edge is evaluated with its lower sample index in the child role and then mirrored. Sum over the bins of each piece, so exposure adds over pieces into units. Evidence-free members contribute zero; diagonal matched/exposed values are retained. Exposure is posterior expectation, not an observed meiosis count.
 
 Implementation: [science/pedigree/exposure.py](../../haplotype_reconstruction/science/pedigree/exposure.py).
 
-Parameters by name: `unit_morgans`, `report_edge_coverage`, `report_pair_explainability`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `report_edge_coverage`, `report_pair_explainability`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O((E/2 + T)·B·S(S+1)/2); O((E + T) B S²/2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O((E/2 + T)·B·S(S+1)/2); O((E + T) B S²/2). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps18"></a>
 ## ps18 Minimum painted junction counts and callable bins
@@ -268,7 +324,7 @@ The direction evidence is the joint likelihood of the two samples' scheduled hom
 Implementation: [stages/pedigree/scores.py](../../haplotype_reconstruction/stages/pedigree/scores.py),
 [science/pedigree/junctions.py](../../haplotype_reconstruction/science/pedigree/junctions.py),
 [science/pedigree/transmission.py](../../haplotype_reconstruction/science/pedigree/transmission.py),
-[science/pedigree/scoring.py](../../haplotype_reconstruction/science/pedigree/scoring.py).
+[science/pedigree/block_scoring.py](../../haplotype_reconstruction/science/pedigree/block_scoring.py).
 
 Parameters by name: `mismatch_probability`, `transmission_switch_floor`. Values and rationale are in the
 [generated parameter reference](../reference/parameters.md). The founder-mosaic junction probability is derived
@@ -280,7 +336,7 @@ likelihood O(D B) time with four states and constant workspace per dyad. Stored 
 <a id="ps20"></a>
 ## ps20 Full-marker exclusion e-value
 
-At jointly observed sites compare opposing homozygote evidence with the compatible-genotype replacement bound. Average products over the fixed bets and deduplicated whole-contig/half-overlapping windows, then average over configured contigs, including those without informative evidence. Pattern encoding and direct evaluation must agree. Release uses the genome lower endpoint; an interval straddling the threshold raises instead of guessing.
+At jointly observed sites compare opposing homozygote evidence with the compatible-genotype replacement bound. Average products over the fixed bets and deduplicated whole-contig/half-overlapping windows. The genome e-value is the weighted mean sum_k w_k E_k over the analysed contigs, with w_k their configured material m_k(L_k) - m_k(0) over the total (the run map and its fallback-rate tails; L_k the last evidence position): fixed before any genotype is read, so the mean is an e-value under any dependence between contigs (linearity of conditional expectation). Uninformative contigs keep their weight; a contig without material has weight zero and no task. Pattern encoding and direct evaluation must agree. Release uses the genome lower endpoint; an interval straddling the threshold raises instead of guessing.
 
 Implementation: [stages/pedigree/exclusion.py](../../haplotype_reconstruction/stages/pedigree/exclusion.py), [science/pedigree/exclusion.py](../../haplotype_reconstruction/science/pedigree/exclusion.py).
 
@@ -291,7 +347,7 @@ Cost and scope: O(D L). These terms describe the unit’s work/storage dimension
 <a id="ps21"></a>
 ## ps21 Completed-window exclusion certificate
 
-Visit sites in order, saving starting-window prefixes before evaluating completed windows in stable stop order. Subtract the declared numerical guards and certify only when the completed-window lower bound proves the genome threshold. Otherwise finish and reduce bets outside windows in the reference order. Store exact values as point intervals and certified values with an unbounded upper endpoint. Publish exclusion only when count-release target dyads exist.
+Visit sites in order, saving starting-window prefixes before evaluating completed windows in stable stop order. Subtract the declared numerical guards and certify only when the completed-window lower bound plus the contig's log weight proves the genome threshold (log w_k + log E_k >= threshold). Otherwise finish and reduce bets outside windows in the reference order. Store exact values as point intervals and certified values with an unbounded upper endpoint. Publish exclusion only when count-release target dyads exist.
 
 Implementation: [science/pedigree/exclusion_bound.py](../../haplotype_reconstruction/science/pedigree/exclusion_bound.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py).
 
@@ -302,7 +358,7 @@ Cost and scope: At most the full bet/window dyad scan; certification can stop a 
 <a id="ps22"></a>
 ## ps22 Scoring orchestration, records, identities and resume
 
-Publish prepared, selective-screen, pair-bound, floored-score and exclusion records under their distinct checked identities. Reuse the selective screen as a whole, other products at their declared contig granularity, and rebuild the deterministic candidate panel from records. Keep state counters distinct from timing diagnostics. Worker count, completion order, resident caching and memory pacing cannot alter scientific values or admission.
+Publish prepared, selective-screen, pair-bound, piece-score and exclusion records under their distinct checked identities. A score identity binds the scoring parameters, the material partition rule and the contig's placement on the genome axis (offset, last unit and cut list), never the regime or release thresholds; an exclusion identity binds the contig's log weight. Reuse the selective screen as a whole, other products at their declared contig granularity, and rebuild the deterministic candidate panel from records. Keep state counters distinct from timing diagnostics. Worker count, completion order, resident caching and memory pacing cannot alter scientific values or admission.
 
 Implementation: [stages/pedigree/exclusion.py](../../haplotype_reconstruction/stages/pedigree/exclusion.py), [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
@@ -346,23 +402,19 @@ Parameters by name: `m0_contamination_probability`. Values and provenance are in
 Cost and scope: O(C A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd05"></a>
-## pd05 Exposure gate and map units
+## pd05 Exposure gate and units
 
-Require every named edge and M2 pair to meet inclusive exposed-bin, exposure-fraction and map-unit thresholds, with no tie band. Count each represented contig once for map-unit support even when bootstrap weight repeats it. Nonfinite measured length contributes the declared unit fallback. An untestable row retains M0 as its state score and has no finite identity score. Validate edge membership and required exposure fields.
+Require every named edge and M2 pair to meet inclusive exposed-bin, exposure-fraction and unit thresholds, with no tie band. Each exposed material unit counts one, once even when bootstrap weight repeats it. An untestable row retains M0 as its state score and has no finite identity score. Validate edge membership and required exposure fields.
 
 Implementation: [science/pedigree/selection.py](../../haplotype_reconstruction/science/pedigree/selection.py).
 
-Parameters by name: `minimum_edge_exposed_bins`, `minimum_pair_exposed_bins`, `minimum_exposed_fraction`, `minimum_exposed_units`, `unit_morgans`, `rate_is_measured`, `preparation`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_edge_exposed_bins`, `minimum_pair_exposed_bins`, `minimum_exposed_fraction`, `minimum_exposed_units`, `preparation`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(C (E + T)). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(H (E + T)). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="finite-continuous-direction"></a>
 <a id="pd06"></a>
 ## pd06 Joint-transmission orientation evidence and the direction correction
-
-In low material the nonlinear robust direction transform below is applied to each block,
-with the configured chromosome error probability interpreted per block. The cap is per
-block. This is a block-level orientation model; it does not claim chromosome equivalence.
 
 For an ordered dyad (child c, parent p), score the joint likelihood of their four scheduled homologues.
 One homologue of c is a meiotic copy of p's two scheduled homologues. The hidden state is (h, s): which child
@@ -385,13 +437,25 @@ straight and crossed alignments equally when tied. Apply this independently to p
 four-state paths, rescaling at each bin and accumulating natural log mass, and add independent component log
 likelihoods. The stored quantity is `transmission_log_likelihood`, in nats.
 
-For each chromosome compare the forward and reverse joint log likelihoods. With d = log L(c ← p) − log L(p ← c)
-and epsilon = `chromosome_error_probability`, its robust orientation log odds are
+For each material unit compare the forward and reverse joint log likelihoods. With d = log L(c ← p) − log L(p ← c)
+and epsilon the unit's painting-failure probability, its robust orientation log odds are
 
-`log[(1 − epsilon) sigmoid(d) + epsilon/2] − log[(1 − epsilon) sigmoid(−d) + epsilon/2]`.
+`log[(1 − epsilon) sigmoid(d) + epsilon/2] − log[(1 − epsilon) sigmoid(−d) + epsilon/2]`,
+
+capped at ln((2 − epsilon)/epsilon). epsilon follows the relationship model's two-state failure process on the
+working map ([PD28](#pd28)): failure regions start at lambda = `failure_region_rate` per Morgan and end at
+mu = 1/`failure_region_length` per Morgan; from its stationary law the probability that a region touches a unit of L
+working Morgans is epsilon(L) = 1 − mu/(lambda + mu) exp(−lambda L) (a 1-Morgan unit: 0.0997, cap 2.95 nats; a
+0.5-Morgan unit: 0.054, cap 3.59). No unit of 0.36 Morgan or more can therefore orient an edge alone (the release
+needs ln 49 = 3.89 nats). Scope: this protects against the short painting failures of the relationship model only.
+A chromosome-wide failure (a misassembly or a label inconsistency over a whole chromosome) is not capped: a chromosome
+of 1.5 working Morgans or more (two units) can orient an edge by itself. The optional window cap bounds such votes
+without counting chromosomes: with `window_morgans` W > 0 the units are grouped into consecutive windows of W working
+Morgans along the unit axis and each window's summed log odds is capped at `window_cap` (ln 39) before the windows
+are summed; it is off by default (W = 0).
 
 Require positive bins and callability. Jointly impossible or exactly equal directions contribute zero. Sum in
-contig order with resampling multiplicities, then apply the existing pair-failure direction correction to finite
+unit order with resampling multiplicities, then apply the existing pair-failure direction correction to finite
 configuration scores. Reciprocal messages, resampling, release tiers retain their
 existing definitions; the relationship guard is defined in [PD23](#pd23). The junction-density `order_probability` in [PD07](#pd07) still supplies graph search order
 and reports; it is a separate quantity. This intermediate direction evidence differs from final released
@@ -411,25 +475,26 @@ subsequent phase and recombination outputs.
 Implementation: [science/pedigree/transmission.py](../../haplotype_reconstruction/science/pedigree/transmission.py),
 [science/pedigree/orientation.py](../../haplotype_reconstruction/science/pedigree/orientation.py).
 
-Parameters by name: `mismatch_probability`, `transmission_switch_floor`, `chromosome_error_probability`,
-`pair_failure_probability`. Values and rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `mismatch_probability`, `transmission_switch_floor`, `failure_region_rate`,
+`failure_region_length`, `window_morgans`, `window_cap`, `pair_failure_probability`. Values and rationale are in the
+[generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(D B) for the likelihood and O(C U) for the chromosome contrasts; the likelihood has four states,
+Cost and scope: O(D B) for the likelihood and O(H U) for the unit contrasts; the likelihood has four states,
 independent of founder count once the schedules are built.
 
 <a id="pd07"></a>
 ## pd07 Junction-density order probability (graph visit order, role probability)
 
-Low material applies this contrast, variance and comparison-count condition to block rows.
-LOBO removes the omitted block's four additive moment contributions before normalization.
+The contrast, variance and comparison-count condition apply to the material-unit rows in every regime. LOBO
+removes the omitted unit's four additive moment contributions before normalization.
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-Compute a weighted junction-density contrast over contigs with common callability, including missingness variance. Insufficient total weight leaves a neutral order probability; otherwise use the weighted sum, not its mean, in the normal approximation. This retained heuristic supplies the graph visit order’s primary key and can therefore affect which cyclic child is displaced.
+Compute a weighted junction-density contrast over material units with common callability, including missingness variance. Insufficient total weight leaves a neutral order probability; otherwise use the weighted sum, not its mean, in the normal approximation. This retained heuristic supplies the graph visit order’s primary key and can therefore affect which cyclic child is displaced.
 
 Implementation: [science/pedigree/orientation.py](../../haplotype_reconstruction/science/pedigree/orientation.py).
 
-Parameters by name: `order_minimum_weight`, `order_variance_offset`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `order_minimum_unit_weight`, `order_variance_offset`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(C N²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -512,37 +577,37 @@ Parameters by name: `prior_sensitivity`. Values and provenance are in the [gener
 Cost and scope: O(A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd15"></a>
-## pd15 Informative chromosomes and informative map units
+## pd15 Informative units
 
-For each chromosome, apply the abstaining winner rule to its own parent-count state evidence. A chromosome is informative when any state has a unique winner; it need not agree with the genome-wide state or configuration. Sum the declared informative map units, using the nonfinite-length fallback. Apply the later release threshold without a tie band. Without measured support the units are contig counts, not inferred physical map length.
+For each material unit, apply the abstaining winner rule to the child's own parent-count state evidence there. A unit is informative when any state has a unique winner; it need not agree with the genome-wide state or configuration. Count the informative units (each counts one) and report their working Morgans; apply the later release threshold to the count without a tie band. The unit winners are counted in their own tie scope (`pedigree.informative_unit`).
 
 Implementation: [science/pedigree/decision.py](../../haplotype_reconstruction/science/pedigree/decision.py).
 
-Parameters by name: `minimum_informative_units`, `unit_morgans`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `minimum_informative_units`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(C A); O(C E). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(H A). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd16"></a>
-## pd16 Chromosome bootstrap and LOCO resampling
+## pd16 Unit bootstrap and LOBO resampling
 
-Draw all chromosome bootstrap multiplicities first from the named fixed stream, then coalesce identical vectors in lexicographic order. Schedule leave-one-contig-out fits first and bootstrap fits by the declared stable sparsity order. Accumulate integer selection counts with each vector’s multiplicity. A family-message nonconvergence makes the entire fit abstain but leaves its multiplicity in the denominator; other failures stop the stage. Scheduling cannot change support fractions. The stage groups consecutive planned fits into batches by estimated alternative-row scans, with a work ceiling and a target of two waves per planned worker when the fit count allows. Each process attaches the read-only inputs once per batch and evaluates its fits serially. The gather restores the complete original plan before reducing integer counts; batching neither redraws multiplicities nor changes denominators.
+Draw all unit bootstrap multiplicities first from the named fixed stream, then coalesce identical vectors in lexicographic order. Schedule the leave-one-unit-out (LOBO) fits first, each read from the full totals minus the left-out unit, and bootstrap fits by the declared stable sparsity order. Accumulate integer selection counts with each vector's multiplicity. A family-message nonconvergence makes the entire fit abstain but leaves its multiplicity in the denominator; other failures stop the stage. Scheduling cannot change support fractions. The stage groups consecutive planned fits into batches by estimated alternative-row scans, with a work ceiling and a target of two waves per planned worker when the fit count allows. Each process attaches the read-only inputs once per batch and evaluates its fits serially. The gather restores the complete original plan before reducing integer counts; batching neither redraws multiplicities nor changes denominators.
 
 Implementation: [stages/pedigree/execution.py](../../haplotype_reconstruction/stages/pedigree/execution.py), [science/pedigree/resampling.py](../../haplotype_reconstruction/science/pedigree/resampling.py).
 
 Parameters by name: `bootstrap_replicates`, `bootstrap_seed`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(C A + C N² (PD07) + (4 + I)(A + N²) + R A + R N² + R² T + graph). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(H A + H N² (PD07) + (4 + I)(A + N²) + R A + R N² + R² T + graph). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd17"></a>
-## pd17 Tier reach and chromosome-count precheck
+## pd17 Tier reach and the material statement
 
-Compute the maximum achievable bootstrap and leave-one-contig-out support from distinct represented contigs and their map units. Derive each tier’s minimum contig count from both support requirements rather than hard-coding it. Choose the prepared-layout regime above and publish a completed unresolved product when fewer than four blocks remain. Report unreachable tiers. Reach is an evidence-availability statement, not a released pedigree call.
+The reach record states U, the resampled units and the cut values of the [material regimes](#material-units): whether Tier B is assessed (U >= `assessable_morgans`), with which thresholds, and whether Tier A is (U >= `tier_a_morgans` in the standard band). The precheck refuses fewer than three samples only. Before a genome-wide run the command line warns when the configured working map of the analysed contigs (their configured lengths on the run map) lies below a cut; the informative material is measured after painting and is at most that. Reach is a material statement, not a released pedigree call.
 
-Implementation: [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [science/pedigree/resampling.py](../../haplotype_reconstruction/science/pedigree/resampling.py).
+Implementation: [science/pedigree/regimes.py](../../haplotype_reconstruction/science/pedigree/regimes.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py).
 
-Parameters by name: `minimum_exposed_units`, `unit_morgans`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `assessable_morgans`, `standard_morgans`, `tier_a_morgans`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(R C); O(C²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(B) over the prepared layouts. These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd18"></a>
 ## pd18 Tier A/B state and exact-configuration release
@@ -626,9 +691,16 @@ sequences; witnesses share c and p and are dependent. It has no posterior-odds i
 
 Withhold below `−withholding_score`. A retained edge has `family` evidence above the positive score threshold,
 and `pair_only` evidence otherwise. An edge without witnesses and with zero pair margin is `untested`;
-a nonzero pair margin is tested even without a family. A prior at most one half has price zero and contributes no evidence, giving an effective support floor of 0.5.
+a nonzero pair margin is tested even without a family. The support bands (`support_bounds` 0.5 and 0.75) read the
+relatedness members' Morgan-weighted support ([RL17](relatedness.md#rl17)); their priors (`sibship_prior`
+0.67, 0.96, 0.99) price 0.71, 3.18 and 4.60 nats. They are the full-sib shares of the guard's own witness occurrences
+(each priced once per vote) pooled over three known-truth simulation sets (4,159 occurrences in 73 runs; run-bootstrap
+intervals 0.54-0.79, 0.91-0.98 and 0.97-1.00, the re-check band); no guard, edge, state or count decision changed under
+any held-out table. The shares depend on the design mix and on material: runs below 9.5 Morgans of family-site
+material measure 0.38, 0.74 and 0.945, so low-material runs are priced above their measured shares.
 A single witness cannot withhold while the pair margin is above
-`−(withholding_score − top price)`, where the top price is log(0.98/0.02). Two top-band witnesses can still withhold. The sibling-guard table reports final witnesses, set-aside/against/supporting counts,
+`−(withholding_score − top price)`, where the top price is log(0.99/0.01) = 4.60, i.e. −2.31 nats. Two top-band
+witnesses can still withhold. The sibling-guard table reports final witnesses, set-aside/against/supporting counts,
 pair/family/total score, final evidence call, irreversible call, withdrawal iteration and pair/family basis.
 A witness is against below −1 nat and supporting above +1 nat. Set-aside counts include a contradicted family
 check or both hypothesis margins at or below minus its price. Withholding basis is `pair` when the pair margin
@@ -798,9 +870,9 @@ O(N² B) and reference trios O(K_ref B) per component. Sequence kernels parallel
 
 **Child forward model and composite score:** see [PS10](#ps10).
 
-<a id="chromosome-resampling"></a>
+<a id="unit-resampling-mechanism"></a>
 
-**Chromosome resampling:** see [PD16](#pd16).
+**Unit resampling:** see [PD16](#pd16).
 
 <a id="configuration-likelihoods-and-the-exposure-gate"></a>
 

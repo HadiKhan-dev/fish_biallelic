@@ -11,6 +11,7 @@ import numpy as np
 from numba import prange
 
 from ...contracts.pedigree import ExclusionEvidence
+from ...core.errors import InputError
 from ...core.kernels import kernel
 from .kernels.signatures import OVERLOADS
 from .parameters import EXCLUSION_DYAD_BATCH, EXCLUSION_PATTERN_LIMIT, EXCLUSION_TINY
@@ -83,17 +84,37 @@ def _encode_patterns(gl, observed, cap):
     return codes, catalog, counts
 
 
-def combine(evidence: Sequence[ExclusionEvidence]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Log endpoints of the arithmetic mean of exclusion e-values over all configured contigs.
+def contig_log_weights(configured_morgans: Sequence[float]) -> tuple[float, ...]:
+    """log w_k of the included contigs in the genome e-value (DESIGN_417 D9): w_k = m_k / sum m, m_k the
+    configured working-map Morgans of contig k over [0, its length] (ChromosomeSummaryView.configured_morgans).
+    Fixed before any genotype is read, so sum_k w_k E_k is an e-value under any dependence between contigs
+    (linearity of conditional expectation); uninformative contigs keep their weight; a contig without material
+    gets -inf (no weight, no task)."""
+    values = np.asarray(configured_morgans, dtype=np.float64)
+    if values.ndim != 1 or not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise InputError("exclusion weights need finite nonnegative configured Morgans for every contig")
+    total = float(values.sum())
+    if total <= 0:
+        raise InputError("exclusion weights need configured material on some contig")
+    with np.errstate(divide="ignore"):
+        return tuple(float(value) for value in np.log(values / total))
 
-    Preserve contig order and include uninformative contigs in the denominator. An absent upper
-    endpoint means exact evidence; certified lower bounds retain their supplied upper endpoint.
-    Observed-site counts are summed over contigs."""
+
+def combine(evidence: Sequence[ExclusionEvidence]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Log endpoints of the weighted mean sum_k w_k E_k of the contigs' exclusion e-values (DESIGN_417 D9).
+
+    Every contig with material supplies evidence carrying its fixed log weight (uninformative contigs keep their
+    weight). An absent upper endpoint means exact evidence; certified lower bounds retain their supplied upper
+    endpoint. Observed-site counts are summed over contigs."""
+    weights = np.asarray([value.log_weight for value in evidence], dtype=np.float64)
+    if not np.all(np.isfinite(weights)):
+        raise InputError("combined exclusion evidence requires every contig's finite log weight")
     # NumPy 2.5's reduce stub omits the ordinary allocating out=None overload.
-    lower = np.logaddexp.reduce(np.stack([value.log_e for value in evidence]), axis=0) - np.log(len(evidence))
+    lower = np.logaddexp.reduce(weights[:, None] + np.stack([value.log_e for value in evidence]), axis=0)
     upper = np.logaddexp.reduce(
-        np.stack([value.log_e if value.log_e_upper is None else value.log_e_upper for value in evidence]), axis=0
+        weights[:, None]
+        + np.stack([value.log_e if value.log_e_upper is None else value.log_e_upper for value in evidence]),
+        axis=0,
     )
-    upper -= np.log(len(evidence))
     observed = np.sum([value.observed_sites for value in evidence], axis=0).astype(np.int64)
     return lower, upper, observed

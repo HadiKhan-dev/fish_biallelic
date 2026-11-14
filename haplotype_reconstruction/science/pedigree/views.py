@@ -213,10 +213,8 @@ def diagnostics(decision: Decision, config: PedigreeParameters) -> tuple[Diagnos
                 callable_ancestry_haplotype_bin_count=float(np.sum(callable_bins[:, child])),
                 adjusted_ancestry_junction_burden=float(decision.orientation.adjusted_burden[child]),
                 ancestry_painting_callability_fraction=float(decision.orientation.callability[child]),
-                informative_contig_count=int(decision.informative[child]),
-                informative_map_units=(
-                    float(decision.informative_units[child]) if decision.informative_units is not None else np.nan
-                ),
+                informative_unit_count=int(decision.informative[child]),
+                informative_morgans=float(decision.informative_morgans[child]),
                 local_state_bootstrap_fraction=evidence.state_bootstrap[child],
                 local_configuration_bootstrap_fraction=evidence.configuration_bootstrap[child],
                 graph_configuration_bootstrap_fraction=evidence.configuration_graph_bootstrap[child],
@@ -225,14 +223,14 @@ def diagnostics(decision: Decision, config: PedigreeParameters) -> tuple[Diagnos
                 selected_graph_parent2_bootstrap_fraction=evidence.graph_parent_bootstrap[child, 1],
                 parent1_bootstrap_fraction=evidence.parent_bootstrap[child, 0],
                 parent2_bootstrap_fraction=evidence.parent_bootstrap[child, 1],
-                local_state_loco_fraction=evidence.state_loco[child],
-                local_configuration_loco_fraction=evidence.configuration_loco[child],
-                graph_configuration_loco_fraction=evidence.configuration_graph_loco[child],
-                selected_graph_configuration_loco_fraction=evidence.graph_configuration_loco[child],
-                selected_graph_parent1_loco_fraction=evidence.graph_parent_loco[child, 0],
-                selected_graph_parent2_loco_fraction=evidence.graph_parent_loco[child, 1],
-                parent1_loco_fraction=evidence.parent_loco[child, 0],
-                parent2_loco_fraction=evidence.parent_loco[child, 1],
+                local_state_lobo_fraction=evidence.state_loco[child],
+                local_configuration_lobo_fraction=evidence.configuration_loco[child],
+                graph_configuration_lobo_fraction=evidence.configuration_graph_loco[child],
+                selected_graph_configuration_lobo_fraction=evidence.graph_configuration_loco[child],
+                selected_graph_parent1_lobo_fraction=evidence.graph_parent_loco[child, 0],
+                selected_graph_parent2_lobo_fraction=evidence.graph_parent_loco[child, 1],
+                parent1_lobo_fraction=evidence.parent_loco[child, 0],
+                parent2_lobo_fraction=evidence.parent_loco[child, 1],
                 state_winner_margin=state_margin,
                 conditional_identity_margin=identity_margin,
                 unconstrained_winner_margin=(
@@ -430,7 +428,7 @@ def explanations(
                 diag.state_winner_margin,
                 diag.conditional_identity_margin,
                 diag.local_state_bootstrap_fraction,
-                diag.local_state_loco_fraction,
+                diag.local_state_lobo_fraction,
                 int(alternatives.full_counts[child, 2]),
                 int(alternatives.scored_counts[child, 2]),
                 bool(alternatives.scored_counts[child, 2] < alternatives.full_counts[child, 2]),
@@ -518,18 +516,21 @@ def build(
             dyads[:, 0].copy(), dyads[:, 1].copy(), np.where(exact, lower, np.nan), observed, lower, upper, exact
         )
     scores = decision.scores
-    mean_junctions = np.mean(scores.junctions, axis=1)
-    mean_callable = np.mean(scores.callable_bins, axis=1)
-    evidence_summary = tuple(
-        EvidenceSummaryView(c, int(scores.informative_markers[i]), float(mean_junctions[i]), float(mean_callable[i]))
-        for i, c in enumerate(scores.contigs)
-    )
-    if scores.regime == "low_material":
-        evidence_summary = tuple(EvidenceSummaryView(c,
-            int(scores.informative_markers[scores.block_chromosome == i].sum()),
-            float(np.mean(scores.junctions[scores.block_chromosome == i].sum(axis=0))),
-            float(np.mean(scores.callable_bins[scores.block_chromosome == i].sum(axis=0))))
+    if scores.contig_junctions is not None and scores.contig_callable_bins is not None:
+        # Per contig from its pieces, before they are summed into (possibly straddling) units.
+        assert scores.contig_markers is not None
+        evidence_summary = tuple(
+            EvidenceSummaryView(c, int(scores.contig_markers[i]), float(np.mean(scores.contig_junctions[i])),
+                                float(np.mean(scores.contig_callable_bins[i])))
             for i, c in enumerate(scores.real_contigs))
+    else:
+        mean_junctions = np.mean(scores.junctions, axis=1)
+        mean_callable = np.mean(scores.callable_bins, axis=1)
+        evidence_summary = tuple(
+            EvidenceSummaryView(c, int(scores.informative_markers[i]), float(mean_junctions[i]),
+                                float(mean_callable[i]))
+            for i, c in enumerate(scores.contigs)
+        )
     return PedigreeViews(
         tuple(replace(r, release_evidence=evidence[r.sample]) for r in relationships(release.tier_b, rows)),
         partial_relationships(release.partial_b, True),

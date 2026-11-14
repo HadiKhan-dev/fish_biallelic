@@ -33,6 +33,7 @@ __all__ = [
     "ReleaseParameters",
     "ExclusionParameters",
     "RelationshipParameters",
+    "MaterialParameters",
     "PedigreeParameters",
     "ScoringNumerics",
     "PedigreeWorkspace",
@@ -48,7 +49,7 @@ __all__ = [
     "COMMON_EMISSION_CACHE_BYTES",
     "TINY",
     "FAMILY_EXP_UNDERFLOW",
-    "ORDER_MINIMUM_WEIGHT",
+    "ORDER_MINIMUM_UNIT_WEIGHT",
     "ORDER_VARIANCE_OFFSET",
     "JUNCTION_UNREACHABLE_STATE",
     "JUNCTION_UNREACHABLE_COUNT",
@@ -77,13 +78,6 @@ __all__ = [
     "EXCLUSION_DYAD_BATCH",
 ]
 
-# Frozen low-material regime (DESIGN_4154 revision 3, A1–A4). Distances are configured Morgans.
-LOW_MATERIAL_BLOCK_MORGANS = 1.0
-LOW_MATERIAL_TAIL_MORGANS = 0.5
-LOW_MATERIAL_SWITCH_CLIP = 0.499999
-LOW_MATERIAL_MINIMUM_BLOCKS = 4
-LOW_MATERIAL_BOOTSTRAP = 0.95
-LOW_MATERIAL_LEAVE_ONE_OUT = 1.0
 
 @dataclass(frozen=True)
 class WinnerNumerics:
@@ -300,45 +294,23 @@ class ExposureParameters:
             "provenance": "PD05; require at least 1 posterior-expected exposed painting bin for a parent pair.",
         },
     )
-    # Exposed bins / total painting bins of the selected chromosomes.
+    # Exposed bins / total painting bins of the fit's units.
     minimum_exposed_fraction: float = field(
         default=0.1,
         metadata={
-            "provenance": "PD05; require an exposed-bin fraction of at least 0.1 across selected chromosomes.",
+            "provenance": "PD05; require an exposed-bin fraction of at least 0.1 across the fit's units.",
         },
     )
-    # Working map units a fit's exposed chromosomes must hold (bootstrap draws count once). A
-    # chromosome counts max(1, its scored map length / unit_morgans) units, and an edge (or panel pair) there
-    # max(1, the map length it is exposed over / unit_morgans): an unlinked chromosome is an independent replicate
-    # however short, and a long one holds several nearly independent stretches (one meiosis's transmission
-    # correlation between loci d Morgans apart is exp(-2 d) under Haldane, 0.14 at 1 Morgan). With the resampling
-    # thresholds Tier B needs 5 chromosomes shorter than unit_morgans, fewer when they are longer (resampling.reach).
-    # Lengths are measured by a supplied genetic map, over the span its knots cover, or by a stated rate
-    # (rate_is_measured); the fallback rate, and a map's extrapolated tails, are placeholders that measure no
-    # recombination (contracts.genetic_map.measured_coordinates), so a chromosome with neither counts one unit.
+    # Material units (MaterialParameters: 1-Morgan units of the working map) a fit's exposed units must number
+    # (bootstrap draws count once). Every unit counts one, whatever chromosome or component it lies on; the
+    # low-material band (U < MaterialParameters.standard_morgans) needs one.
     minimum_exposed_units: float = field(
         default=3.0,
         metadata={
             "provenance": (
-                "PD05; require 3 working map units of exposed chromosomes; each distinct chromosome supplies at "
-                "least one unit."
+                "PD05 / DESIGN_417 D2; require 3 exposed material units (1-Morgan units of the working map) in the "
+                "standard regime; 1 in the low-material band."
             ),
-        },
-    )
-    unit_morgans: float = field(
-        default=1.0,
-        metadata={
-            "provenance": (
-                "PD05; 1 Morgan per working map unit measures approximately independent transmission stretches."
-            ),
-        },
-    )
-    # [genetic_map] rate_is_measured: the fallback rate is the organism's stated genome-wide average, so map lengths
-    # count from it where no supplied map covers them (contracts.genetic_map.measured_coordinates).
-    rate_is_measured: bool = field(
-        default=False,
-        metadata={
-            "provenance": "PD05; boolean false leaves fallback genetic-map distances unmeasured for exposure units.",
         },
     )
     # Report-only thresholds of the C/X compatibility diagnostics (never gate a decision).
@@ -373,12 +345,29 @@ class DirectionParameters:
         },
     )
 
-    # Probability that one chromosome's junction comparison of a pair is painting failure.
-    chromosome_error_probability: float = field(
-        default=0.05,
+    # The probability that one unit's junction comparison of a pair is painting failure is not a parameter here:
+    # it follows from the relationship model's two-state failure process (RelationshipParameters
+    # failure_region_rate and failure_region_length) and the unit's working length (orientation.unit_failure,
+    # DESIGN_417 D8). It protects against short failures only; the window cap below bounds long ones.
+    window_morgans: float = field(
+        default=0.0,
         metadata={
+            "units": "Morgan",
             "provenance": (
-                "PD06/PD08/PD09/PD10; probability 0.05 of painting failure in a chromosome junction comparison."
+                "DESIGN_417 rev 4; width W of the direction windows (consecutive windows of W working Morgans of "
+                "the unit axis) whose summed direction log odds are capped at window_cap; 0 (default) turns the "
+                "cap off. A count-free bound on a long (chromosome-wide) painting failure's votes, measured in V5 "
+                "with a positive control before the owner chooses W."
+            ),
+        },
+    )
+    window_cap: float = field(
+        default=float(np.log(39.0)),
+        metadata={
+            "units": "nats",
+            "provenance": (
+                "DESIGN_417 rev 4; ln 39 = 3.66 nats, 4.16.1's per-chromosome cap (failure probability 0.05), "
+                "below the release cut-off ln 49, so one window cannot orient an edge alone."
             ),
         },
     )
@@ -502,18 +491,18 @@ class SelectionParameters:
 
 @dataclass(frozen=True)
 class ResamplingParameters:
-    """Chromosome bootstrap (seeded) and leave-one-chromosome-out refits."""
+    """Material-unit bootstrap (seeded) and leave-one-unit-out (LOBO) fits."""
 
     bootstrap_replicates: int = field(
         default=1000,
         metadata={
-            "provenance": "PD16; 1000 chromosome-bootstrap draws for configuration and parent support fractions.",
+            "provenance": "PD16; 1000 unit-bootstrap draws for configuration and parent support fractions.",
         },
     )
     bootstrap_seed: int = field(
         default=20260725,
         metadata={
-            "provenance": "PD16; integer seed 20260725 fixes the chromosome-bootstrap random stream.",
+            "provenance": "PD16; integer seed 20260725 fixes the unit-bootstrap random stream.",
         },
     )
 
@@ -534,9 +523,9 @@ class TierThresholds:
             ),
         },
     )
-    loco_fraction: float = field(
+    lobo_fraction: float = field(
         metadata={
-            "provenance": "PD18; minimum fraction of leave-one-chromosome-out fits supporting this release tier.",
+            "provenance": "PD18; minimum fraction of leave-one-unit-out (LOBO) fits supporting this release tier.",
         },
     )
 
@@ -545,14 +534,13 @@ class TierThresholds:
 class ReleaseParameters:
     """Tier A / Tier B release rules (Tier B is the primary product)."""
 
-    # A tier call needs the child's own per-chromosome state evidence to pick a unique winner on chromosomes holding
-    # at least this many map units (ExposureParameters.unit_morgans: three chromosomes shorter than one unit,
-    # or without a genetic map, suffice).
+    # A tier call needs the child's own per-unit state evidence to pick a unique winner on at least this many
+    # material units (1 in the low-material band).
     minimum_informative_units: float = field(
         default=3.0,
         metadata={
             "provenance": (
-                "PD18/PD20/PD21; require 3 map units of chromosomes with a unique child-evidence state winner."
+                "PD18/PD20/PD21 / DESIGN_417 D2; require 3 material units with a unique child-evidence state winner."
             ),
         },
     )
@@ -670,21 +658,29 @@ class RelationshipParameters:
         default=float(np.log(1000.0)),
         metadata={
             "units": "nats",
-            "provenance": "PD23; log(1000) survives higher-prior sensitivity; two top-band witnesses suffice.",
+            "provenance": (
+                "PD23; log(1000) survives higher-prior sensitivity; with the 4.18 priors one top-band witness "
+                "withholds only with a pair margin below -2.31 nats."
+            ),
         },
     )
     sibship_prior: tuple[float, ...] = field(
-        default=(0.46, 0.87, 0.98),
+        default=(0.67, 0.96, 0.99),
         metadata={
             "units": "probability",
-            "provenance": "PD28; measured full-sib shares among 3556 same-family pairs in three support bands.",
+            "provenance": (
+                "PD28 / DESIGN_417 D5; full-sib shares of the guard's witness occurrences in three support bands, "
+                "support on pooled Morgan-weighted 1-M units, pooled over three known-truth sets (4,159 "
+                "occurrences, 73 runs; run-bootstrap intervals 0.54-0.79, 0.91-0.98, 0.97-1.00); every held-out "
+                "fit changed no guard decision (RELCAL)."
+            ),
         },
     )
     support_bounds: tuple[float, ...] = field(
         default=(0.5, 0.75),
         metadata={
             "units": "share",
-            "provenance": "PD28; support bands of the measured same-family sibship calibration.",
+            "provenance": "PD28; support bands of the sibship calibration, unchanged in 4.18 (DESIGN_417 D5).",
         },
     )
     sibship_check_partners: int = field(
@@ -733,6 +729,118 @@ class RelationshipParameters:
             or self.reference_triples < 1
         ):
             raise SettingsError("pedigree relationship reference_triples must be a positive integer")
+
+
+@dataclass(frozen=True)
+class MaterialParameters:
+    """The genome's material: equal-material units of the working map and the regime cut-offs (4.18, DESIGN_417).
+
+    Every run resamples consecutive units of ``unit_morgans`` of the genome-ordered working map (configured contig
+    order, then painting components in map order; the per-bin Haldane coordinates of the selector switch
+    probabilities, the configured map whether or not it is declared measured, gaps between components contributing
+    nothing). A final piece shorter than ``tail_morgans`` joins the unit before it, so a run holds round(U) units,
+    where U is the working Morgans of its informative components. The regime reads U alone; no count of chromosomes,
+    contigs or components enters it. Distances are Morgans of the configured working map: a wrong configured rate
+    scales U, and with it every cut below, by the same factor.
+    """
+
+    unit_morgans: float = field(
+        default=1.0,
+        metadata={
+            "units": "Morgan",
+            "provenance": (
+                "DESIGN_417 D1; one unit per working Morgan, about one meiosis's correlation length (Haldane "
+                "exp(-2d) = 0.14 at 1 M); adjacent 1-M units correlate 0.12-0.22 for relatives on one chromosome, "
+                "lag 2 at most 0.04 (CALIB2 section 5)."
+            ),
+        },
+    )
+    tail_morgans: float = field(
+        default=0.5,
+        metadata={
+            "units": "Morgan",
+            "provenance": (
+                "DESIGN_4154 A2 / DESIGN_417 D1; a final piece shorter than half a unit joins the unit before it."
+            ),
+        },
+    )
+    switch_clip: float = field(
+        default=0.499999,
+        metadata={
+            "units": "probability",
+            "provenance": "DESIGN_4154 A2; switch probabilities are clipped below 1/2 before the Haldane distance.",
+        },
+    )
+    assessable_morgans: float = field(
+        default=5.0,
+        metadata={
+            "units": "Morgan",
+            "provenance": (
+                "MCAL section 4.1 (60 simulated genomes, configured map = generating map, so U in true Morgans; "
+                "single chromosomes 0.5-15 M; pre-registered one-sided exact tests, clustered by genome); below 5 "
+                "Morgans nothing is assessed: the low-material rule released non-parents in mixed-family designs "
+                "at 3.5-5 M (12 of 971 against 0 of 600 at 5-7 M) and in small families; from 5 M every design "
+                "passes the tested criterion (8 M on its literal point reading). V5 (64 end-to-end cells, "
+                "g4c5_12): no hold criterion fires below 12 M. Replaces DESIGN_417 rev 3's 3.5 (MCAL: 3.5-5 M in excess)."
+            ),
+        },
+    )
+    standard_morgans: float = field(
+        default=12.0,
+        metadata={
+            "units": "Morgan",
+            "provenance": (
+                "MCAL section 4.2; the released Tier B thresholds apply from 12 working Morgans: below it they "
+                "released more non-parents than their own reference (multi-chromosome genomes of >= 15 M) in "
+                "small families (11-12 M: 10 of 486 against 10 of 1,379, p = 0.035) and in parent-free sib-rich "
+                "designs (10-11 M: 10 releases per 3,808 parentless children against 2 per 6,720, p = 0.008); "
+                "from 12 M no excess in any design (10 M on the cumulative test; per-design power 0.1-0.4 near "
+                "the cut, so an empirical calibration, not demonstrated equivalence). V5: rev 3's 9.5 released "
+                "4.46 edges per 100 parentless children on sib-rich cells read on a 2.5x long map (hold H2); "
+                "12 returns the 9.5-12 M band to the low-material rule, as 4.16.1 (0.11 per 100), and passes the "
+                "direction positive control (SCORE_g4c5_12, CONTROL_SCORE_g4c5_12)."
+            ),
+        },
+    )
+    tier_a_morgans: float = field(
+        default=12.0,
+        metadata={
+            "units": "Morgan",
+            "provenance": (
+                "MCAL section 4.3; no Tier A non-parent in designs with sequenced parents from 8 M (74,337 Tier A "
+                "edges at 8-15+ M), but Tier A is assessed only with the released Tier B thresholds, so its "
+                "effective minimum is standard_morgans (12 M). Parent-free sib-rich designs release Tier A "
+                "non-parents at 12-13, 13-15 and >= 15 M (2, 2, 1; their >= 15-M reference holds 1), so no "
+                "higher cut removes them (documented limitation; V5 g4c5_12: 1 such edge in 448 parentless "
+                "children at 13.7 M)."
+            ),
+        },
+    )
+    low_bootstrap: float = field(
+        default=0.95,
+        metadata={
+            "units": "fraction",
+            "provenance": (
+                "DESIGN_4154 A4; Tier B configuration and parent bootstrap cut-off of the low-material band "
+                "(assessable_morgans <= U < standard_morgans), where adjacent units of one chromosome are dependent."
+            ),
+        },
+    )
+    low_leave_one_out: float = field(
+        default=1.0,
+        metadata={
+            "units": "fraction",
+            "provenance": "DESIGN_4154 A4; every leave-one-unit-out fit must agree in the low-material band.",
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if not 0 < self.tail_morgans <= self.unit_morgans:
+            raise SettingsError("pedigree material tail must lie in (0, unit]")
+        if not 0 < self.switch_clip < 0.5:
+            raise SettingsError("pedigree material switch clip must lie in (0, 0.5)")
+        if not 0 < self.assessable_morgans <= self.standard_morgans <= self.tier_a_morgans:
+            raise SettingsError("pedigree material cuts must increase: assessable <= standard <= Tier A")
 
 
 @dataclass(frozen=True)
@@ -793,7 +901,7 @@ class PedigreeParameters:
     resampling: ResamplingParameters = field(
         default_factory=ResamplingParameters,
         metadata={
-            "provenance": "PD27; internal chromosome-bootstrap parameter group; units are declared by its fields.",
+            "provenance": "PD27; internal unit-bootstrap parameter group; units are declared by its fields.",
         },
     )
     release: ReleaseParameters = field(
@@ -811,6 +919,10 @@ class PedigreeParameters:
     relationship: RelationshipParameters = field(
         default_factory=RelationshipParameters,
         metadata={"provenance": "PD27; painting relationship evidence parameters, with units declared by each field."},
+    )
+    material: MaterialParameters = field(
+        default_factory=MaterialParameters,
+        metadata={"provenance": "DESIGN_417; material units and regime cut-offs, with units declared by each field."},
     )
 
 @dataclass(frozen=True)
@@ -884,10 +996,13 @@ class ScoringNumerics:
             "provenance": "PD09; magnitude cutoff 750 nats skips exponentials whose float64 contributions vanish.",
         },
     )
-    order_minimum_weight: float = field(
+    order_minimum_unit_weight: float = field(
         default=2.0,
         metadata={
-            "provenance": "PD07; require more than 2 weighted chromosome comparisons for graph-ordering support.",
+            "provenance": (
+                "PD07; require more than 2 callability-weighted unit comparisons (one per material unit since "
+                "4.18) for graph-ordering support."
+            ),
         },
     )
     order_variance_offset: float = field(
@@ -1129,7 +1244,7 @@ COMMON_EMISSION_CACHE_BYTES = PEDIGREE_WORKSPACE.common_emission_cache_bytes
 
 TINY = SCORING_NUMERICS.tiny
 FAMILY_EXP_UNDERFLOW = SCORING_NUMERICS.family_exp_underflow
-ORDER_MINIMUM_WEIGHT = SCORING_NUMERICS.order_minimum_weight
+ORDER_MINIMUM_UNIT_WEIGHT = SCORING_NUMERICS.order_minimum_unit_weight
 ORDER_VARIANCE_OFFSET = SCORING_NUMERICS.order_variance_offset
 JUNCTION_UNREACHABLE_STATE = SCORING_NUMERICS.junction_unreachable_state
 JUNCTION_UNREACHABLE_COUNT = SCORING_NUMERICS.junction_unreachable_count

@@ -23,6 +23,8 @@ class RelatednessFamilies:
     close relative. Parent calls, direction and their support belong to the pedigree stage.
     NaN slot support denotes a latent slot, and search_margin may be
     NaN when the alternate search was not measured. Canonicalisation is RL1 science.
+    member_support / parent_support (FamilySupport, ParentSlot*Support): Morgan-weighted shares of the
+    ``support_units`` pooled 1-Morgan units of the family sites' working map (DESIGN_417 D5).
     """
 
     schema: int = schema_field(1)

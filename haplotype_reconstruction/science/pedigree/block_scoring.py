@@ -1,18 +1,33 @@
-"""Continuous-chain block scoring with fixed genome retention and bin-share floors.
+"""Continuous-chain piece scoring of one contig with fixed genome retention (DESIGN_417 I1).
 
-M2 fallback slots are chosen on original components, before any block aggregation.
-The schedule and its traceback are likewise computed once on each whole component.
+Each scored component is cut into pieces at the whole-Morgan cuts of the genome axis (blocks.pieces, from the
+contig's genome offset); every piece row is a sum of per-bin increments of chains computed once on the whole
+component, so the stacking sums pieces into material units exactly. M2 fallback slots are chosen on original
+components, before any aggregation; the junction schedule and its traceback are likewise computed once on each
+whole component. Floors are not spread here: the stacking spreads the genome deficit by bins (D7).
 """
+
 from __future__ import annotations
+
 import numpy as np
-from ...contracts.pedigree import BlockScores, LowMaterialChromosomeScores
+
+from ...contracts.pedigree import BlockScores, ChromosomeScores
+from ...core.errors import InvariantError
 from . import blocks, exposure, forward, junctions, transmission
 from .resident import resident
-from .scoring import scored_morgans
 
 
-def score(prepared, compact, chromosome, panel, eligibility, parameters, claim_threads=lambda: None, *, reverse=None):
+def score(prepared, compact, chromosome, panel, eligibility, parameters, offset, last, claim_threads=lambda: None, *,
+          reverse=None, cuts=None):
+    """The contig's pieces from genome coordinate ``offset`` (its first scored bin) with the genome's last nominal
+    unit ``last`` (regimes.axis). ``cuts``: the barrier's cut list of this contig (blocks.cut_list), checked."""
     n = len(eligibility.sample_ids)
+    if cuts is not None:
+        mine = blocks.cut_list(tuple(c.selector_switch_probability for c in prepared.components), offset, last,
+                               parameters.material)
+        if not np.array_equal(mine, np.asarray(cuts, dtype=np.int64).reshape(-1, 3)):
+            raise InvariantError(f"{prepared.contig}: prepared pieces differ from the genome cut list")
+    material = parameters.material
     edges = np.ascontiguousarray(np.argwhere(eligibility.parents), dtype=np.int64)
     retained_pairs = np.column_stack((np.repeat(np.arange(n), np.diff(compact.indptr)), compact.parents)).astype(np.int64)
     trios = panel.trios
@@ -26,10 +41,12 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, claim_t
     parts = {key: [] for key in ("zero", "one_raw", "two", "edge_matched", "edge_exposed", "pair_explained",
         "pair_exposed", "junctions", "callable_bins", "transmission_log_likelihood", "total_bins", "informative_markers")}
     descriptors = []
-    matched_total, exposed_total = np.zeros((n, n)), np.zeros((n, n))
     reverse = parameters.reverse_conventions if reverse is None else reverse
+    start = float(offset)
     for component in prepared.components:
-        axis, description = blocks.partition(component.selector_switch_probability, component.component_index)
+        axis, description = blocks.pieces(component.selector_switch_probability, start, last, material,
+                                          component.component_index)
+        start += blocks.component_length(component.selector_switch_probability, material)
         descriptors.extend(description)
         state = resident(component, parameters, claim_threads, reverse=reverse)
         claim_threads()
@@ -42,13 +59,11 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, claim_t
         crossed = np.count_nonzero(schedule.pairs[:, :-1] != schedule.pairs[:, 1:, ::-1], axis=2)
         costs = np.minimum(straight, crossed)
         present = np.count_nonzero(component.state_classes >= 0, axis=2)
-        for block in description:
-            first, stop = block.first_bin, block.stop_bin
-            matched, exposed, explained, pair_exposed, _, _ = exposure.expected_structure(
+        for piece in description:
+            first, stop = piece.first_bin, piece.stop_bin
+            matched, exposed, explained, pair_exposed = exposure.expected_structure(
                 np.ascontiguousarray(state.pair_masses[:, first:stop]), component.anchored_states,
-                required, trios, component.factors.available, claim_threads, bins_only=True)
-            matched_total += matched
-            exposed_total += exposed
+                required, trios, component.factors.available, claim_threads)
             for key, value in (("edge_matched", matched[edges[:, 0], edges[:, 1]]),
                                ("edge_exposed", exposed[edges[:, 0], edges[:, 1]]),
                                ("pair_explained", explained), ("pair_exposed", pair_exposed),
@@ -69,19 +84,10 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, claim_t
             for key, value in parts.items() if key not in ("total_bins", "informative_markers")}
     data["total_bins"] = np.asarray(parts["total_bins"], dtype=np.float64)
     data["informative_markers"] = np.asarray(parts["informative_markers"], dtype=np.int64)
-    zero_total = data["zero"].sum(axis=0)
-    shares = data["total_bins"] / data["total_bins"].sum()
-    floors = data["zero"] + shares[:, None] * (compact.floors[chromosome] - zero_total)[None]
-    block_scores = BlockScores(tuple(descriptors), retained_pairs, floors=floors, **data)
-    total = lambda key: data[key].sum(axis=0)
-    return LowMaterialChromosomeScores(
-        contig=prepared.contig, zero=zero_total, one_floored=compact.chromosome_reference(chromosome, eligibility),
-        two=total("two"), edge_matched=matched_total, edge_exposed=exposed_total,
-        pair_explained=total("pair_explained"), pair_exposed=total("pair_exposed"),
-        total_bins=float(data["total_bins"].sum()), junctions=total("junctions").astype(np.int64),
-        callable_bins=total("callable_bins").astype(np.int64), informative_markers=prepared.informative_markers,
-        component_count=prepared.component_count, scored_component_count=len(prepared.components),
-        junction_dyads=dyads, transmission_log_likelihood=total("transmission_log_likelihood"),
-        scored_morgans=scored_morgans(prepared, parameters.exposure.unit_morgans),
-        working_morgans=sum(b.working_morgans for b in descriptors),
-        edge_exposed_morgans=np.zeros((n, n)), pair_exposed_morgans=np.zeros(len(trios)), blocks=block_scores)
+    return ChromosomeScores(
+        contig=prepared.contig, offset_morgans=float(offset), end_morgans=float(start),
+        informative_markers=prepared.informative_markers, component_count=prepared.component_count,
+        scored_component_count=len(prepared.components), junction_dyads=dyads,
+        floor=np.ascontiguousarray(compact.floors[chromosome], dtype=np.float64),
+        working_morgans=float(sum(p.working_morgans for p in descriptors)),
+        pieces=BlockScores(tuple(descriptors), retained_pairs, **data))

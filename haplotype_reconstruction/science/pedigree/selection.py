@@ -1,10 +1,10 @@
 """One weighted fit: exposure gate, family-adjusted scores, marginal state, identity, acyclic graph.
 
-A fit gives every informative chromosome a multiplicity (all ones for the full data, bootstrap
-counts or a left-out chromosome in resampling). The genome-wide likelihood of a configuration is
-the weighted chromosome sum, mixed once with the child's M0 likelihood. A non-M0 configuration is
-testable only when its edges (and pair) are exposed in enough bins, enough of the painted genome
-and enough distinct chromosomes; an untestable configuration contributes the child's M0 likelihood
+A fit gives every material unit (1-Morgan units of the working map, DESIGN_417) a multiplicity (all ones
+for the full data, bootstrap counts or a left-out unit in resampling). The genome-wide likelihood of a
+configuration is the weighted unit sum, mixed once with the child's M0 likelihood. A non-M0 configuration is
+testable only when its edges (and pair) are exposed in enough bins, enough of the painted genome and enough
+distinct units (each unit counts one); an untestable configuration contributes the child's M0 likelihood
 to its state's mean but cannot be named. The marginal state is chosen first (log mean identity
 evidence plus a fixed prior), then the identity within it; the graph step then enforces a DAG.
 
@@ -40,7 +40,7 @@ from .orientation import fit as fit_orientation
 from .parameters import ExposureParameters, PedigreeParameters
 from .ties import magnitude, unique_finite_winner
 
-__all__ = ["map_units", "testable", "fit_scores", "select", "fit", "build_exposure"]
+__all__ = ["testable", "fit_scores", "select", "fit", "build_exposure"]
 
 
 # ------------------------------------------------------------------------------- inputs
@@ -59,34 +59,26 @@ def _pack_presence(values):
 
 
 @kernel(overloads=OVERLOADS["selection._units_present"], cache=True, nogil=True)
-def _units_present(packed, weights, units):
-    """float64 [items]: map units (``units`` [C, items]) of the chromosomes with positive weight whose presence bit is
-    set."""
+def _units_present(packed, weights):
+    """float64 [items]: the number of distinct units with positive weight whose presence bit is set (a unit drawn
+    several times counts once)."""
     n_words, n_items = packed.shape
     totals = np.zeros(n_items, dtype=np.float64)
     one = np.uint64(1)
-    for contig in range(weights.shape[0]):
-        if weights[contig] > 0:
-            bit = one << np.uint64(contig % 64)
-            word = contig // 64
+    for unit in range(weights.shape[0]):
+        if weights[unit] > 0:
+            bit = one << np.uint64(unit % 64)
+            word = unit // 64
             for item in range(n_items):
                 if packed[word, item] & bit:
-                    totals[item] += units[contig, item]
+                    totals[item] += 1.0
     return totals
-
-
-def map_units(morgans, config: ExposureParameters) -> np.ndarray:
-    """float64: map units of measured map lengths ``morgans`` (Morgans; any shape), max(1, length / unit_morgans) (1
-    where the length is unknown): an unlinked chromosome counts once however short, a long one by its length."""
-    morgans = np.asarray(morgans, dtype=np.float64)
-    units = np.where(np.isfinite(morgans), morgans / config.unit_morgans, 1.0)
-    return np.ascontiguousarray(np.maximum(1.0, units))
 
 
 # ------------------------------------------------------------------------------- gate and scores
 def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureParameters, *, omitted=None) -> np.ndarray:
-    """bool [A]: configurations testable on the weighted chromosomes (M0 always): every edge (and an M2 pair) exposed
-    in enough bins, enough of the fit's painted bins and on chromosomes holding enough map units."""
+    """bool [A]: configurations testable on the weighted units (M0 always): every edge (and an M2 pair) exposed
+    in enough bins, enough of the fit's painted bins and on enough distinct units."""
     exposure = inputs.exposure
     alternatives = inputs.alternatives
     totals = inputs.omission_totals
@@ -102,11 +94,11 @@ def testable(weights: np.ndarray, inputs: DecisionInputs, config: ExposureParame
         total_bins = totals.total_bins - float(exposure.total_bins[omitted])
     edge_fraction = np.divide(edge_exposed, total_bins, out=np.zeros_like(edge_exposed), where=total_bins > 0.0)
     pair_fraction = np.divide(pair_exposed, total_bins, out=np.zeros_like(pair_exposed), where=total_bins > 0.0)
-    # Exposed chromosomes count by their map units (a short chromosome once), not one each.
+    # Each exposed material unit counts one (DESIGN_417 D2).
     if omitted is None:
         weights = np.ascontiguousarray(weights, dtype=np.float64)
-        edge_units = _units_present(exposure.edge_present, weights, exposure.edge_units)
-        pair_units = _units_present(exposure.pair_present, weights, exposure.pair_units)
+        edge_units = _units_present(exposure.edge_present, weights)
+        pair_units = _units_present(exposure.pair_present, weights)
     else:
         assert totals is not None
         bit = np.uint64(1) << np.uint64(omitted % 64)
@@ -143,7 +135,7 @@ def fit_scores(
 ) -> tuple[np.ndarray, np.ndarray]:
     """(state scores, identity scores) [A] of one weighted fit, family terms included.
 
-    The chromosome sum multiplies every row, including zero weights; IEEE nonfinite
+    The unit sum multiplies every row, including zero weights; IEEE nonfinite
     propagation differs from the panel-admission fold that omits zero-weight rows.
     """
     alternatives = inputs.alternatives
@@ -310,11 +302,9 @@ def fit(
 
 
 def build_exposure(scores: GenomeScores, alternatives: Alternatives, config: ExposureParameters) -> ExposureEvidence:
-    """Derive exposure from scored contigs; absent map lengths count one unit per chromosome."""
+    """Derive exposure from the material units; every unit counts one."""
     edges, edge_exposed, pair_exposed = scores.edges, scores.edge_exposed, scores.pair_exposed
     total_bins = scores.total_bins
-    scored_morgans = scores.scored_morgans
-    edge_exposed_morgans, pair_exposed_morgans = scores.edge_exposed_morgans, scores.pair_exposed_morgans
     edge_flags = (edge_exposed > 0.0) & (edge_exposed >= config.minimum_edge_exposed_bins)
     pair_flags = (pair_exposed > 0.0) & (pair_exposed >= config.minimum_pair_exposed_bins)
     rows = alternatives.rows
@@ -324,12 +314,6 @@ def build_exposure(scores: GenomeScores, alternatives: Alternatives, config: Exp
         row_edges[named, slot - 1] = edge_index(edges, alternatives.n_samples, rows[named, 0], rows[named, slot])
     if np.any(row_edges[rows[:, 1:] >= 0] < 0):
         raise InputError("a configuration row names a parent outside the eligible edges")
-
-    def units(morgans, shape):
-        if scores.regime == "low_material":
-            return np.ones(shape, dtype=np.float64)
-        return map_units(np.full(shape, np.nan) if morgans is None else morgans, config)
-
     return ExposureEvidence(
         edge_exposed,
         pair_exposed,
@@ -337,9 +321,6 @@ def build_exposure(scores: GenomeScores, alternatives: Alternatives, config: Exp
         _pack_presence(np.ascontiguousarray(edge_flags)),
         _pack_presence(np.ascontiguousarray(pair_flags)),
         row_edges,
-        units(scored_morgans, len(total_bins)),
-        units(edge_exposed_morgans, edge_exposed.shape),
-        units(pair_exposed_morgans, pair_exposed.shape),
     )
 
 
@@ -353,8 +334,8 @@ def omission_totals(inputs):
         ordered_sum(inputs.alternatives.log_likelihoods, axis=0),
         ordered_sum(exposure.edge_exposed, axis=0), ordered_sum(exposure.pair_exposed, axis=0),
         float(ordered_sum(exposure.total_bins)),
-        _units_present(exposure.edge_present, weights, exposure.edge_units),
-        _units_present(exposure.pair_present, weights, exposure.pair_units),
+        _units_present(exposure.edge_present, weights),
+        _units_present(exposure.pair_present, weights),
         junctions.junctions.sum(axis=0), junctions.callable_bins.sum(axis=0),
         junctions.pair_log_odds.sum(axis=0),
         _order_statistics(junctions.junctions, junctions.callable_bins, junctions.total_bins))

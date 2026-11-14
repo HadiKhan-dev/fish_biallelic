@@ -219,7 +219,6 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -234,7 +233,6 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
         ),
     ),
     "exposure._pairs": (
@@ -248,7 +246,6 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -260,7 +257,6 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -272,7 +268,6 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
         ),
     ),
     "exposure._presence": (
@@ -1728,7 +1723,7 @@ OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
         ),
         (
             types.Array(types.float64, 2, "C", readonly=True, aligned=True),
@@ -1738,7 +1733,7 @@ OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.float64, 1, "C", readonly=True, aligned=True),
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
         ),
     ),
     "orientation._weighted_log_odds": (
@@ -2481,7 +2476,6 @@ OVERLOADS = {
         (
             types.Array(types.uint64, 2, "C", readonly=False),
             types.Array(types.float64, 1, "C", readonly=False),
-            types.Array(types.float64, 2, "C", readonly=False),
         ),
     ),
     "ties._top_two_finite": (

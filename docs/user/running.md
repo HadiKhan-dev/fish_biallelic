@@ -41,7 +41,6 @@ contigs = ["chr1", "chr2", "chr3", "chr4", "chr5"]
 
 [genetic_map]
 file = "data/cross.map"
-rate_is_measured = false
 ```
 
 `generic` supplies no contig list. `tromau` supplies the preset's configured
@@ -96,13 +95,14 @@ is applied. A plateau is a zero-distance interval, not missing map information.
 A supplied map interpolates between knots; `[genetic_map] rate_cm_per_mb` supplies
 unmapped contigs and the tails outside the knots.
 
-The models use two coordinate views. **Genetic coordinates** include fallback
-extensions and determine transition probabilities. **Measured coordinates** credit
-only supplied-map spans unless `[genetic_map] rate_is_measured = true` declares
-that the fallback rate is a measured genome-wide rate for this organism. Pedigree
-and family-support rules use that measured exposure. Do not label a convenient
-placeholder rate as measured: it can overstate independent evidence. Generating
-maps in a simulation are separate from the inference map.
+Genetic coordinates include fallback extensions and determine transition probabilities. The pedigree and the
+relatedness support measure material on the same working map: a supplied map, else `rate_cm_per_mb`. The pedigree's
+regime reads U, the working Morgans of the informative painted components (below 5 Morgans nothing is assessed,
+below 12 Tier B uses the low-material thresholds, Tier A needs 12), so a placeholder rate that is far from the
+organism's sets the material scale: a rate twice too high doubles U and halves every cut in true Morgans. The cuts
+were calibrated in true Morgans, so they hold only on a measured map or a correct genome-wide rate. Before a
+genome-wide run the command line warns when the configured working map of the analysed contigs lies below a cut.
+Generating maps in a simulation are separate from the inference map.
 
 ## Resources and stopping
 

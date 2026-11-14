@@ -51,7 +51,6 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 |---|---|---|---|---|---|
 | `rate_cm_per_mb` | float | `5.0` | — | yes | Fallback recombination rate (cM/Mb) without a map or beyond its knots. Provenance: Fallback recombination rate (cM/Mb) without a map or beyond its knots. |
 | `file` | path | `""` | — | yes | Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). Provenance: Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). |
-| `rate_is_measured` | bool | `false` | — | yes | rate_cm_per_mb is this organism's genome-wide average: the pedigree's map-length rule counts chromosome lengths from it where no map covers them. Off: the rate is a placeholder and only a supplied map's span counts. Provenance: rate_cm_per_mb is this organism's genome-wide average: the pedigree's map-length rule counts chromosome lengths from it where no map covers them. Off: the rate is a placeholder and only a supplied map's span counts. |
 ## family_phase
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |

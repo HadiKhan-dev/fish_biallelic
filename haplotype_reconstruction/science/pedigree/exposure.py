@@ -21,7 +21,6 @@ from __future__ import annotations
 import numpy as np
 from numba import prange
 
-from ...core.errors import InputError
 from ...core.kernels import kernel
 from .kernels.signatures import OVERLOADS
 
@@ -77,16 +76,12 @@ def _edges(
     both,
     any_presence,
     full_presence,
-    interval_morgans,
 ):
-    """Symmetric matched and exposed bins [N, N] of the requested edges (diagonal: self coverage), and their exposed
-    map length [N, N] (off the diagonal): each interval between adjacent bins (``interval_morgans`` [B-1]) counts
-    as far as the edge is exposed at both its ends."""
+    """Symmetric matched and exposed bins [N, N] of the requested edges (diagonal: self coverage)."""
     n_samples, n_bins = both.shape
     n_features = len(pair_first)
     matched = np.zeros((n_samples, n_samples), dtype=np.float64)
     exposed = np.zeros((n_samples, n_samples), dtype=np.float64)
-    exposed_morgans = np.zeros((n_samples, n_samples), dtype=np.float64)
     for child in prange(n_samples):
         if available[child] and diagonal_required[child]:
             diagonal = 0.0
@@ -103,8 +98,6 @@ def _edges(
         parent = edge_second[edge]
         edge_match = 0.0
         edge_exposure = 0.0
-        edge_morgans = 0.0
-        previous = 0.0
         for block in range(n_bins):
             block_match = 0.0
             full_nonmatch = 0.0
@@ -135,17 +128,11 @@ def _edges(
             # so keep its nonnegative bound and exposure never rounds below the match.
             block_exposure = _unit(block_match + max(0.0, full_nonmatch))
             edge_exposure += block_exposure
-            if block > 0 and len(interval_morgans):
-                # min(): the larger joint probability of exposure at both ends the two marginals allow.
-                edge_morgans += min(previous, block_exposure) * interval_morgans[block - 1]
-            previous = block_exposure
         matched[child, parent] = edge_match
         matched[parent, child] = edge_match
         exposed[child, parent] = edge_exposure
         exposed[parent, child] = edge_exposure
-        exposed_morgans[child, parent] = edge_morgans
-        exposed_morgans[parent, child] = edge_morgans
-    return matched, exposed, exposed_morgans
+    return matched, exposed
 
 
 @kernel(overloads=OVERLOADS["exposure._pairs"], cache=True, parallel=True, nogil=True)
@@ -159,21 +146,18 @@ def _pairs(
     both,
     any_presence,
     full_presence,
-    interval_morgans,
 ):
-    """Explained and exposed bins [T] of the panel rows, and their exposed map length [T] (as ``_edges``)."""
+    """Explained and exposed bins [T] of the panel rows (as ``_edges``)."""
     n_bins = both.shape[1]
     n_features = len(pair_first)
     explained = np.zeros(len(trios), dtype=np.float64)
     exposed = np.zeros(len(trios), dtype=np.float64)
-    exposed_morgans = np.zeros(len(trios), dtype=np.float64)
     for row in prange(len(trios)):
         child = int(trios[row, 0])
         parent1 = int(trios[row, 1])
         parent2 = int(trios[row, 2])
         if not available[child] or not available[parent1] or not available[parent2]:
             continue
-        previous = 0.0
         for block in range(n_bins):
             block_explained = 0.0
             full_nonexplained = 0.0
@@ -211,10 +195,7 @@ def _pairs(
             explained[row] += block_explained
             block_exposure = _unit(block_explained + max(0.0, full_nonexplained))
             exposed[row] += block_exposure
-            if block > 0 and len(interval_morgans):
-                exposed_morgans[row] += min(previous, block_exposure) * interval_morgans[block - 1]
-            previous = block_exposure
-    return explained, exposed, exposed_morgans
+    return explained, exposed
 
 
 def expected_structure(
@@ -224,18 +205,13 @@ def expected_structure(
     trios: np.ndarray,
     available: np.ndarray,
     claim_threads=lambda: None,
-    interval_morgans: np.ndarray | None = None,
-    *, bins_only: bool = False,
 ):
-    """(edge matched [N, N], edge exposed [N, N], pair explained [T], pair exposed [T]) in bins, then (edge exposed
-    [N, N], pair exposed [T]) in measured map length.
+    """(edge matched [N, N], edge exposed [N, N], pair explained [T], pair exposed [T]) in posterior-expected
+    painting bins: sums over the bins of ``masses``, so the values of a bin range add over its pieces.
 
     ``masses`` float64 [N, B, S (S + 1) / 2] unordered pair masses (``pair_masses``);
     ``required_edges`` bool [N, N] symmetric (edges to evaluate; the diagonal requests self
-    coverage); ``available`` bool [N] gates evidence-free samples to zero; ``interval_morgans``
-    float64 [B-1] the measured map length between adjacent bins (default none): an interval counts
-    as far as the edge (or pair) is exposed at both its ends, so an exposed island counts its own
-    length, however many bins it holds.
+    coverage); ``available`` bool [N] gates evidence-free samples to zero.
     """
     n_states = anchored_states.shape[0]
     pair_first, pair_second = np.triu_indices(n_states)
@@ -248,20 +224,10 @@ def expected_structure(
     pair_anchored = np.ascontiguousarray(state_anchored[pair_first] * state_anchored[pair_second])
     pair_has_anchor = np.ascontiguousarray(np.maximum(state_anchored[pair_first], state_anchored[pair_second]))
     edge_first, edge_second = np.nonzero(np.triu(required_edges & available[:, None] & available[None, :], k=1))
-    n_bins = masses.shape[1]
-    intervals = (
-        np.zeros(max(n_bins - 1, 0))
-        if interval_morgans is None
-        else np.ascontiguousarray(interval_morgans, dtype=np.float64)
-    )
-    if bins_only:
-        intervals = np.empty(0)
-    if not bins_only and len(intervals) != max(n_bins - 1, 0):
-        raise InputError("interval_morgans needs one length per pair of adjacent bins")
     claim_threads()
     both, any_presence, full_presence = _presence(masses, feature_of, state_anchored, pair_anchored, available)
     claim_threads()
-    matched, exposed, exposed_morgans = _edges(
+    matched, exposed = _edges(
         masses,
         pair_first,
         pair_second,
@@ -274,10 +240,9 @@ def expected_structure(
         both,
         any_presence,
         full_presence,
-        intervals,
     )
     claim_threads()
-    explained, pair_exposed, pair_morgans = _pairs(
+    explained, pair_exposed = _pairs(
         masses,
         pair_first,
         pair_second,
@@ -287,6 +252,5 @@ def expected_structure(
         both,
         any_presence,
         full_presence,
-        intervals,
     )
-    return matched, exposed, explained, pair_exposed, exposed_morgans, pair_morgans
+    return matched, exposed, explained, pair_exposed

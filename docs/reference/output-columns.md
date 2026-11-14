@@ -403,8 +403,8 @@ Source: [`DIAGNOSTICS_COLUMNS`](../../haplotype_reconstruction/outputs/reports/p
 | 38 | `painted_junctions_per_morgan` | minimum painted founder switches per homologue per Morgan of callable painting on the configured working map; missing for zero callable map length; reported only, never used in a decision (1/Morgan). |
 | 39 | `adjusted_ancestry_junction_burden` | adjusted ancestry junction burden (1). |
 | 40 | `ancestry_painting_callability_fraction` | ancestry painting callability fraction (1). |
-| 41 | `informative_contig_count` | informative contig count (1). |
-| 42 | `informative_map_units` | informative map units (1). |
+| 41 | `informative_unit_count` | material units (1-Morgan units of the working map) on which the child's own evidence picks a unique parent count (1). |
+| 42 | `informative_morgans` | working Morgans of those units; reported only (Morgans). |
 | 43 | `local_state_bootstrap_fraction` | local state bootstrap fraction (1). |
 | 44 | `local_configuration_bootstrap_fraction` | local configuration bootstrap fraction (1). |
 | 45 | `graph_configuration_bootstrap_fraction` | graph configuration bootstrap fraction (1). |
@@ -413,14 +413,14 @@ Source: [`DIAGNOSTICS_COLUMNS`](../../haplotype_reconstruction/outputs/reports/p
 | 48 | `selected_graph_parent2_bootstrap_fraction` | selected graph parent2 bootstrap fraction (1). |
 | 49 | `parent1_bootstrap_fraction` | parent1 bootstrap fraction (1). |
 | 50 | `parent2_bootstrap_fraction` | parent2 bootstrap fraction (1). |
-| 51 | `local_state_loco_fraction` | local state loco fraction (1). |
-| 52 | `local_configuration_loco_fraction` | local configuration loco fraction (1). |
-| 53 | `graph_configuration_loco_fraction` | graph configuration loco fraction (1). |
-| 54 | `selected_graph_configuration_loco_fraction` | selected graph configuration loco fraction (1). |
-| 55 | `selected_graph_parent1_loco_fraction` | selected graph parent1 loco fraction (1). |
-| 56 | `selected_graph_parent2_loco_fraction` | selected graph parent2 loco fraction (1). |
-| 57 | `parent1_loco_fraction` | parent1 loco fraction (1). |
-| 58 | `parent2_loco_fraction` | parent2 loco fraction (1). |
+| 51 | `local_state_lobo_fraction` | local state leave-one-unit-out (LOBO) fraction (1). |
+| 52 | `local_configuration_lobo_fraction` | local configuration leave-one-unit-out (LOBO) fraction (1). |
+| 53 | `graph_configuration_lobo_fraction` | graph configuration leave-one-unit-out (LOBO) fraction (1). |
+| 54 | `selected_graph_configuration_lobo_fraction` | selected graph configuration leave-one-unit-out (LOBO) fraction (1). |
+| 55 | `selected_graph_parent1_lobo_fraction` | selected graph parent1 leave-one-unit-out (LOBO) fraction (1). |
+| 56 | `selected_graph_parent2_lobo_fraction` | selected graph parent2 leave-one-unit-out (LOBO) fraction (1). |
+| 57 | `parent1_lobo_fraction` | parent1 leave-one-unit-out (LOBO) fraction (1). |
+| 58 | `parent2_lobo_fraction` | parent2 leave-one-unit-out (LOBO) fraction (1). |
 | 59 | `state_winner_margin` | state winner margin (nats). |
 | 60 | `conditional_identity_margin` | conditional identity margin (nats). |
 | 61 | `unconstrained_winner_margin` | unconstrained winner margin (nats). |
@@ -484,7 +484,7 @@ Source: [`CALL_EXPLANATIONS_COLUMNS`](../../haplotype_reconstruction/outputs/rep
 | 20 | `state_winner_margin` | state winner margin (nats). |
 | 21 | `conditional_identity_margin` | conditional identity margin (nats). |
 | 22 | `local_state_bootstrap_fraction` | local state bootstrap fraction (1). |
-| 23 | `local_state_loco_fraction` | local state loco fraction (1). |
+| 23 | `local_state_lobo_fraction` | local state leave-one-unit-out (LOBO) fraction (1). |
 | 24 | `eligible_m2_pairs` | eligible m2 pairs (1). |
 | 25 | `scored_m2_pairs` | scored m2 pairs (1). |
 | 26 | `incomplete_m2_search` | incomplete m2 search (1). |
@@ -592,6 +592,7 @@ Source: [`CHROMOSOME_SUMMARY_COLUMNS`](../../haplotype_reconstruction/outputs/re
 | 3 | `scored_component_count` | scored component count (1). |
 | 4 | `informative_markers` | informative markers (1). |
 | 5 | `omitted_reason` | omitted reason (1). |
+| 6 | `configured_morgans` | configured working-map Morgans of [0, the contig's last evidence position]: its fixed weight in the Mendelian exclusion e-value (Morgans). |
 
 ## pedigree/relative_contrasts.csv
 

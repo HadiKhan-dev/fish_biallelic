@@ -34,9 +34,10 @@ class FamilyFit:
     """The fitted families (sample indices of the run's axis).
 
     members: one int64 array per family (sorted). parents: int64 [F, 2] sequenced sample per parent slot, -1 latent.
-    member_support: float64 [N] share of support units (``ranges``) on which the sample's family is its best placement
+    member_support: float64 [N] Morgan-weighted share of support units (``ranges``, weighted by their working
+    Morgans) on which the sample's family is its best placement
     (for a one-member family: on which staying alone beats joining any family; a latent one-member family is the
-    sample alone, a tie, so it scores 0). parent_support: float64 [F, 2] share
+    sample alone, a tie, so it scores 0). parent_support: float64 [F, 2] Morgan-weighted share
     of support units on which the slot sample
     beats a latent slot (NaN for a latent slot). half_sib: int64 [H, 2] pairs of latent families sharing one latent
     parent better than not (gain above log N), half_sib_gain: float64 [H]. loglik: the objective. sweeps: search
@@ -517,13 +518,15 @@ def fit(
     logpi: np.ndarray,
     logpost: np.ndarray,
     ranges: tuple[tuple[int, int], ...],
+    weights: tuple[float, ...] | None = None,
     *,
     max_sweeps: int,
     parameters: FamilyParameters = _DEFAULT_FAMILY,
     threads: ThreadSource = 1,
 ) -> FamilyFit:
     """Families over the samples of C [N, M, 9] (child terms), logpi [M, 3], logpost [N, M, 3]; ``ranges``: each
-    support unit's site range (lo, hi). Two bounded production searches; screens use exact fallback gains."""
+    support unit's site range (lo, hi), ``weights`` its working Morgans (None: equal weights). Two bounded production searches; screens
+    use exact fallback gains."""
     # Partition sums borrow singleton rows before detaching on mutation. A readonly
     # task input needs an owned buffer so Numba's mutable sum list remains valid.
     C = C if C.flags.writeable else C.copy()
@@ -548,7 +551,7 @@ def fit(
         state, sweeps, converged = first
         part.restore(state)
         search, margin = "best_improvement", first_total - second_total
-    member_support, parent_hits = _support(part, ranges)
+    member_support, parent_hits = _support(part, ranges, weights)
     live = part.live()
     parents = part.slots[live].copy()
     parent_support = np.where(parents >= 0, parent_hits[live], np.nan)

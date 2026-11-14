@@ -148,8 +148,8 @@ COLUMNS = {
         "PaintedJunctionsPerMorgan",
         "AdjustedAncestryJunctionBurden",
         "AncestryPaintingCallabilityFraction",
-        "InformativeContigCount",
-        "InformativeMapUnits",
+        "InformativeUnitCount",
+        "InformativeMorgans",
         "LocalStateBootstrapFraction",
         "LocalConfigurationBootstrapFraction",
         "GraphConfigurationBootstrapFraction",
@@ -158,14 +158,14 @@ COLUMNS = {
         "SelectedGraphParent2BootstrapFraction",
         "Parent1BootstrapFraction",
         "Parent2BootstrapFraction",
-        "LocalStateLOCOFraction",
-        "LocalConfigurationLOCOFraction",
-        "GraphConfigurationLOCOFraction",
-        "SelectedGraphConfigurationLOCOFraction",
-        "SelectedGraphParent1LOCOFraction",
-        "SelectedGraphParent2LOCOFraction",
-        "Parent1LOCOFraction",
-        "Parent2LOCOFraction",
+        "LocalStateLOBOFraction",
+        "LocalConfigurationLOBOFraction",
+        "GraphConfigurationLOBOFraction",
+        "SelectedGraphConfigurationLOBOFraction",
+        "SelectedGraphParent1LOBOFraction",
+        "SelectedGraphParent2LOBOFraction",
+        "Parent1LOBOFraction",
+        "Parent2LOBOFraction",
         "StateWinnerMargin",
         "ConditionalIdentityMargin",
         "UnconstrainedWinnerMargin",
@@ -224,7 +224,7 @@ COLUMNS = {
         "StateWinnerMargin",
         "ConditionalIdentityMargin",
         "LocalStateBootstrapFraction",
-        "LocalStateLOCOFraction",
+        "LocalStateLOBOFraction",
         "EligibleM2Pairs",
         "ScoredM2Pairs",
         "IncompleteM2Search",
@@ -282,7 +282,8 @@ COLUMNS = {
         "ReleaseConditionalOnSupportedDirections",
     ],
     "evidence_summary": ["Contig", "InformativeMarkers", "MeanMinimumAncestryJunctions", "MeanCallableHaplotypeBins"],
-    "chromosome_summary": ["Contig", "ComponentCount", "ScoredComponentCount", "InformativeMarkers", "OmittedReason"],
+    "chromosome_summary": ["Contig", "ComponentCount", "ScoredComponentCount", "InformativeMarkers", "OmittedReason",
+                           "ConfiguredMorgans"],
     "block_summary": ["Contig", "Block", "Component", "FirstBin", "LastBin", "NominalIndex", "WorkingMorgans", "Bins", "InformativeMarkers"],
     "relative_contrasts": [
         "Sample",
@@ -439,8 +440,8 @@ def render(
     """Render numeric rows and text only; never choose or recompute a scientific value."""
     result = {}
     for table, fixed_columns in COLUMNS.items():
-        if table == "block_summary" and product.regime == "standard":
-            continue
+        if table == "block_summary" and product.regime == "standard" and not product.block_summary:
+            continue  # supplied unit scores without pieces (every stacked run lists its pieces)
         values = getattr(product, table)
         columns = list(fixed_columns)
         if table in EMPTY_COLUMNS and not values:
@@ -519,8 +520,6 @@ def render(
     if product.regime != "standard":
         for frame in result.values():
             if frame is not None:
-                frame.rename(columns={c: c.replace("LOCO", "LOBO").replace("InformativeContigCount", "InformativeBlockCount")
-                                      for c in frame.columns}, inplace=True)
                 frame["Regime"] = product.regime
     return result
 
@@ -549,12 +548,12 @@ _PAINTED_JUNCTION_DEFINITION = (
 
 
 def _painted_junction_rates(scores: records.GenomeScores) -> np.ndarray:
-    """Report-only switches per homologue per Morgan of callable painting on the working map."""
-    if scores.regime == "low_material":
-        length = np.asarray([scores.working_morgans[scores.block_chromosome == i].sum() for i in range(len(scores.real_contigs))])
-        bins = np.asarray([scores.total_bins[scores.block_chromosome == i].sum() for i in range(len(scores.real_contigs))])
-        callable_bins = np.stack([scores.callable_bins[scores.block_chromosome == i].sum(axis=0) for i in range(len(scores.real_contigs))])
-        callable_morgans = np.sum(length[:, None] * callable_bins / (2 * bins[:, None]), axis=0)
+    """Report-only switches per homologue per Morgan of callable painting on the working map, per contig from the
+    pieces (a unit may straddle contigs)."""
+    if getattr(scores, "contig_working_morgans", None) is not None:
+        assert scores.contig_callable_bins is not None and scores.contig_total_bins is not None
+        length, bins = scores.contig_working_morgans, scores.contig_total_bins
+        callable_morgans = np.sum(length[:, None] * scores.contig_callable_bins / (2 * bins[:, None]), axis=0)
     else:
         callable_morgans = np.sum(
             scores.working_morgans[:, None] * scores.callable_bins / (2.0 * scores.total_bins[:, None]), axis=0
@@ -855,8 +854,8 @@ DIAGNOSTICS_COLUMNS = (
     "PaintedJunctionsPerMorgan",
     "AdjustedAncestryJunctionBurden",
     "AncestryPaintingCallabilityFraction",
-    "InformativeContigCount",
-    "InformativeMapUnits",
+    "InformativeUnitCount",
+    "InformativeMorgans",
     "LocalStateBootstrapFraction",
     "LocalConfigurationBootstrapFraction",
     "GraphConfigurationBootstrapFraction",
@@ -865,14 +864,14 @@ DIAGNOSTICS_COLUMNS = (
     "SelectedGraphParent2BootstrapFraction",
     "Parent1BootstrapFraction",
     "Parent2BootstrapFraction",
-    "LocalStateLOCOFraction",
-    "LocalConfigurationLOCOFraction",
-    "GraphConfigurationLOCOFraction",
-    "SelectedGraphConfigurationLOCOFraction",
-    "SelectedGraphParent1LOCOFraction",
-    "SelectedGraphParent2LOCOFraction",
-    "Parent1LOCOFraction",
-    "Parent2LOCOFraction",
+    "LocalStateLOBOFraction",
+    "LocalConfigurationLOBOFraction",
+    "GraphConfigurationLOBOFraction",
+    "SelectedGraphConfigurationLOBOFraction",
+    "SelectedGraphParent1LOBOFraction",
+    "SelectedGraphParent2LOBOFraction",
+    "Parent1LOBOFraction",
+    "Parent2LOBOFraction",
     "StateWinnerMargin",
     "ConditionalIdentityMargin",
     "UnconstrainedWinnerMargin",
@@ -950,8 +949,8 @@ DIAGNOSTICS_COLUMNS = (
     PaintedJunctionsPerMorgan: minimum painted founder switches per homologue per Morgan of callable painting on the configured working map; missing for zero callable map length; reported only, never used in a decision (1/Morgan).
     AdjustedAncestryJunctionBurden: adjusted ancestry junction burden (1).
     AncestryPaintingCallabilityFraction: ancestry painting callability fraction (1).
-    InformativeContigCount: informative contig count (1).
-    InformativeMapUnits: informative map units (1).
+    InformativeUnitCount: material units (1-Morgan units of the working map) on which the child's own evidence picks a unique parent count (1).
+    InformativeMorgans: working Morgans of those units; reported only (Morgans).
     LocalStateBootstrapFraction: local state bootstrap fraction (1).
     LocalConfigurationBootstrapFraction: local configuration bootstrap fraction (1).
     GraphConfigurationBootstrapFraction: graph configuration bootstrap fraction (1).
@@ -960,14 +959,14 @@ DIAGNOSTICS_COLUMNS = (
     SelectedGraphParent2BootstrapFraction: selected graph parent2 bootstrap fraction (1).
     Parent1BootstrapFraction: parent1 bootstrap fraction (1).
     Parent2BootstrapFraction: parent2 bootstrap fraction (1).
-    LocalStateLOCOFraction: local state loco fraction (1).
-    LocalConfigurationLOCOFraction: local configuration loco fraction (1).
-    GraphConfigurationLOCOFraction: graph configuration loco fraction (1).
-    SelectedGraphConfigurationLOCOFraction: selected graph configuration loco fraction (1).
-    SelectedGraphParent1LOCOFraction: selected graph parent1 loco fraction (1).
-    SelectedGraphParent2LOCOFraction: selected graph parent2 loco fraction (1).
-    Parent1LOCOFraction: parent1 loco fraction (1).
-    Parent2LOCOFraction: parent2 loco fraction (1).
+    LocalStateLOBOFraction: local state leave-one-unit-out (LOBO) fraction (1).
+    LocalConfigurationLOBOFraction: local configuration leave-one-unit-out (LOBO) fraction (1).
+    GraphConfigurationLOBOFraction: graph configuration leave-one-unit-out (LOBO) fraction (1).
+    SelectedGraphConfigurationLOBOFraction: selected graph configuration leave-one-unit-out (LOBO) fraction (1).
+    SelectedGraphParent1LOBOFraction: selected graph parent1 leave-one-unit-out (LOBO) fraction (1).
+    SelectedGraphParent2LOBOFraction: selected graph parent2 leave-one-unit-out (LOBO) fraction (1).
+    Parent1LOBOFraction: parent1 leave-one-unit-out (LOBO) fraction (1).
+    Parent2LOBOFraction: parent2 leave-one-unit-out (LOBO) fraction (1).
     StateWinnerMargin: state winner margin (nats).
     ConditionalIdentityMargin: conditional identity margin (nats).
     UnconstrainedWinnerMargin: unconstrained winner margin (nats).
@@ -1027,7 +1026,7 @@ CALL_EXPLANATIONS_COLUMNS = (
     "StateWinnerMargin",
     "ConditionalIdentityMargin",
     "LocalStateBootstrapFraction",
-    "LocalStateLOCOFraction",
+    "LocalStateLOBOFraction",
     "EligibleM2Pairs",
     "ScoredM2Pairs",
     "IncompleteM2Search",
@@ -1060,7 +1059,7 @@ CALL_EXPLANATIONS_COLUMNS = (
     StateWinnerMargin: state winner margin (nats).
     ConditionalIdentityMargin: conditional identity margin (nats).
     LocalStateBootstrapFraction: local state bootstrap fraction (1).
-    LocalStateLOCOFraction: local state loco fraction (1).
+    LocalStateLOBOFraction: local state leave-one-unit-out (LOBO) fraction (1).
     EligibleM2Pairs: eligible m2 pairs (1).
     ScoredM2Pairs: scored m2 pairs (1).
     IncompleteM2Search: incomplete m2 search (1).
@@ -1188,7 +1187,9 @@ EVIDENCE_SUMMARY_COLUMNS = ("Contig", "InformativeMarkers", "MeanMinimumAncestry
     MeanCallableHaplotypeBins: mean callable haplotype bins (1).
 """
 
-CHROMOSOME_SUMMARY_COLUMNS = ("Contig", "ComponentCount", "ScoredComponentCount", "InformativeMarkers", "OmittedReason")
+CHROMOSOME_SUMMARY_COLUMNS = (
+    "Contig", "ComponentCount", "ScoredComponentCount", "InformativeMarkers", "OmittedReason", "ConfiguredMorgans"
+)
 """Columns in published order.
 
     Contig: contig identifier (text).
@@ -1196,6 +1197,7 @@ CHROMOSOME_SUMMARY_COLUMNS = ("Contig", "ComponentCount", "ScoredComponentCount"
     ScoredComponentCount: scored component count (1).
     InformativeMarkers: informative markers (1).
     OmittedReason: omitted reason (1).
+    ConfiguredMorgans: configured working-map Morgans of [0, the contig's last evidence position]: its fixed weight in the Mendelian exclusion e-value (Morgans).
 """
 
 RELATIVE_CONTRASTS_COLUMNS = (

@@ -170,13 +170,14 @@ def score_contig(
     positions: np.ndarray,
     dyads: np.ndarray,
     config: ExclusionParameters,
-    genome_contigs: int,
+    log_weight: float,
     sample_count: int,
     claim_threads: Callable[[], int | None] = lambda: None,
 ) -> tuple[ExclusionEvidence, dict[str, int | float]]:
-    """Bounded scorer with exact fallback and the required FINAL average divisor."""
-    if genome_contigs < 1 or sample_count < 1:
-        raise InputError("positive chromosome and sample counts required")
+    """Bounded scorer with exact fallback; a certificate proves log w_k + log E_k >= threshold (``log_weight`` =
+    log w_k, the contig's fixed weight in the genome e-value, DESIGN_417 D9)."""
+    if not (np.isfinite(log_weight) and log_weight <= 0.0) or sample_count < 1:
+        raise InputError("a finite log weight <= 0 and a positive sample count are required")
     threshold = exclusion.log_threshold(sample_count, config.alpha)
     spans = exclusion.physical_windows(positions, config.window_widths_bp)
     starts = np.unique(spans[:, 0])
@@ -210,7 +211,7 @@ def score_contig(
             float(config.genotype_replacement_probability),
             bets,
             log_denominator,
-            np.log(genome_contigs),
+            -float(log_weight),
             threshold,
         )
     upper = np.where(certified, np.inf, lower)
@@ -222,7 +223,8 @@ def score_contig(
         certificate_visited_sites=int(visited.sum()),
         full_dyad_sites=int(len(dyads) * len(positions)),
         packed_words=int(len(dyads) * ((len(positions) + 63) // 64)),
-        final_chromosome_divisor=genome_contigs,
+        final_log_weight=float(log_weight),
         threshold=threshold,
     )
-    return ExclusionEvidence(contig, dyads, lower, jointly_observed, len(positions), fallback_samples, upper), work
+    return ExclusionEvidence(contig, dyads, lower, jointly_observed, len(positions), fallback_samples, upper,
+                             log_weight=float(log_weight)), work

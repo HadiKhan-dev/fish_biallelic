@@ -314,24 +314,30 @@ def run_checks(
     *,
     genome_wide: bool,
     parameters: Any = None,
-    minimum_scored_contigs: int | None = None,
-    tier_b_minimum_contigs: int | None = None,
+    configured_morgans: float | None = None,
+    rate: str = "",
 ) -> tuple[str, ...]:
-    """Return the driver's warning text; the application decides where to print it."""
-    if not genome_wide:
+    """Return the driver's warning text; the application decides where to print it.
+
+    The pedigree decides by material, never by a count of contigs (DESIGN_417): the warning compares the configured
+    working map of the analysed contigs (``configured_morgans``: Morgans over their configured lengths, None when a
+    length is unknown) with the regime cut-offs. The informative material U is measured after painting and is at
+    most the configured map (gaps between painted components count nothing)."""
+    if not genome_wide or configured_morgans is None:
         return ()
-    if parameters is not None:
-        import math
-
-        from ..science.pedigree.resampling import minimum_contigs_for_tier
-
-        # The exposure rule supplies the minimum; pedigree's tier function determines reach.
-        minimum_scored_contigs = math.ceil(parameters.exposure.minimum_exposed_units)
-        tier_b_minimum_contigs = minimum_contigs_for_tier(parameters.release.tier_b, minimum_scored_contigs)
-    if minimum_scored_contigs is None or tier_b_minimum_contigs is None:
-        raise SettingsError("pedigree parameters or both explicit contig thresholds are required")
-    if len(contigs) < tier_b_minimum_contigs:
-        return ("configured contigs are below the pedigree tier-B minimum; informative contigs are rechecked",)
+    if parameters is None:
+        raise SettingsError("pedigree parameters are required for the material check")
+    material = parameters.material
+    size = f"configured working map of {configured_morgans:.2f} Morgans{rate}"
+    if configured_morgans < material.assessable_morgans:
+        return (f"{size} is below the pedigree's assessable minimum of {material.assessable_morgans:g} Morgans; "
+                "the pedigree will be not assessable",)
+    if configured_morgans < material.standard_morgans:
+        return (f"{size} is below the {material.standard_morgans:g} Morgans of the released Tier B thresholds; "
+                "the pedigree releases Tier B with low-material resampling at most (informative material is "
+                "measured after painting)",)
+    if configured_morgans < material.tier_a_morgans:
+        return (f"{size} is below the {material.tier_a_morgans:g} Morgans Tier A needs; Tier A is not assessed",)
     return ()
 
 

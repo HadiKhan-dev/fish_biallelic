@@ -1,5 +1,71 @@
 # Changelog
 
+## 4.18.0 (14 November 2026)
+
+This release makes the pedigree stage decide from the amount of material it has, measured in Morgans, instead of
+from a count of chromosomes. A long chromosome and several short ones of the same total length are assessed alike.
+Released results change only where the amount of material and the old chromosome count disagree.
+
+**Pedigree: one regime from the material, U.** U is the working Morgans of the informative painted components
+(Haldane distances of the selector switch probabilities on the run's working map). The stage chooses one regime for
+the run from U alone:
+
+- U below 5 M: not assessed (the product is completed as unresolved);
+- 5 to 12 M: low material, Tier B only, with configuration and parent bootstrap support of at least 0.95, every
+  leave-one-unit-out fit agreeing, and minimums of one unit;
+- 12 M and above: the released Tier B thresholds and Tier A.
+
+This replaces 4.17's rule of at least three informative chromosomes plus a chromosome-bootstrap reach, and Tier A by
+chromosome counts. The cut-offs were calibrated in true Morgans on 60 simulated genomes (six designs, depths 1 and
+5) against pre-registered criteria, and checked end to end on 64 further simulated cells and a positive control in
+which one chromosome's painting of a parent-child pair is exchanged. The rule they replace released relatives as
+parents in sib-rich crosses whose configured map was too long, and reversed edges in the positive control; the new
+cuts do neither.
+
+**Equal-material units.** The genome is divided into consecutive one-Morgan units of the genome-ordered working map
+(a final piece under half a Morgan joins the previous; units may straddle chromosomes). Every unit counts once in
+exposure, informative minimums, the bootstrap and the leave-one-unit-out fits. Score tasks stay per chromosome and
+store their pieces of the global units, which are summed exactly when the scores are stacked. Imputed floors spread
+the genome deficit over all units. Direction evidence is capped per unit by the relationship model's failure
+process (a one-Morgan unit can contribute at most 2.95 nats), replacing a per-chromosome error probability. The
+genome exclusion e-value is the Morgan-weighted mean of the chromosomes' values, and the relatedness stage's support
+units are pooled one-Morgan units of the family sites, with the sibship prior recalibrated on the guard's witness
+population. Tier A is neither assessed nor used for slot order below 12 M. The run warns from the configured material
+(Morgans over the configured lengths) instead of the configured chromosome count.
+
+**Removed** (the package has had no public release, so nothing is kept for compatibility): the setting
+`[genetic_map] rate_is_measured` (material is measured on the working map whether or not the rate is declared
+measured), the measured-map arrays and chromosome-reach helpers, and the earlier pedigree, score, prepared and
+exclusion record schemas (now 9, 5, 3 and 2). Run roots written by earlier versions cannot be resumed.
+
+**Outputs.** New fields for the informative unit count, informative Morgans, configured Morgans and exclusion
+weights; leave-one-out fractions are per unit (LOBO, was per chromosome); the reach reports U, the units and the cut
+values; the release evidence label of standard runs is `unit_resampling` (was `chromosome_resampling`).
+
+**Effect** (release matrix run end to end, scored against the simulated pedigrees). On a real cichlid cross
+(U = 42 M) every edge, tier and state call is unchanged. Nine simulated crosses at about 15 M are unchanged, and
+their family phase and recombination are identical. A backcross in the low regime gains two correct edges and an F3
+cross one correct parent state; two crosses without sequenced parents still release no edge and gain correct
+zero-parent calls (99 to 102 and 97 to 99 correct parent states); two long-chromosome crosses at 5.5 M move from the
+standard to the low regime and withhold one and two correct parent states; and a 30-founder simulation with 0.14 M
+of material on five short chromosomes, which 4.17.3 assessed because it had five chromosomes, is no longer assessed
+(its 4 correct edges and 24 correct parent states are withdrawn). No case releases a wrong edge. Founders and
+paintings are unchanged everywhere; family phase and recombination change only where the pedigree changed (the
+backcross's genotype errors fall slightly). Scoring costs 25 to 70 % more CPU and the score records about double.
+
+**Limitations** (documented in the pedigree methods). The cut-offs are in true Morgans and the rule reads the working
+map: a map k times too long lowers every cut by a factor k in true Morgans. In sib-rich crosses without sequenced
+parents both tiers can release relatives as parents at any material level, so no higher Tier A cut removes them. Two
+single events above 12 M had no reference to compare with: one Tier A non-parent (sib-rich, no sequenced parents, 1
+in 448 parentless children) and one wrong zero-parent call (small families, depth 1). Near the cut-offs the
+calibration has 0.1 to 0.4 power against a doubling of the error rate: they are the cuts the data support, not a
+demonstrated equivalence.
+
+**Validation.** The default suite and the stage tier (four shards) pass. The decision path equals the calibrated
+reference on 717 fits of 276 saved layouts; the 70 end-to-end cells reproduce the reference results field by field;
+the pedigree step replayed on the release matrix and the real cross gives the effects above; and the release matrix
+run end to end is identical to 4.17.3 outside the pedigree and what reads it.
+
 ## 4.17.3 (14 November 2026)
 
 This release fixes a crash of the pedigree stage and makes errors raised in worker processes reach the run intact.

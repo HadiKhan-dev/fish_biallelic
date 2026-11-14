@@ -1,8 +1,9 @@
 """Score requested exclusion dyads once per configured contig (PS20–PS22).
 
 Request order is authoritative: target prefix and guard-only suffix are retained.
-The configured chromosome divisor is passed to every certificate, including when
-only one contig is executed in a stage cut. Empty requests schedule no task.
+Each contig's fixed weight in the genome e-value (DESIGN_417 D9: its configured working-map Morgans over the
+run's) is passed to its certificate and bound in its identity, including when only one contig is executed in a
+stage cut. Empty requests and contigs without material schedule no task.
 """
 
 from __future__ import annotations
@@ -33,9 +34,10 @@ KEY = "pedigree/exclusion"
 
 
 class ExclusionAdapter:
-    """Persist both certificate endpoints; a missing upper endpoint is invalid."""
+    """Persist both certificate endpoints and the contig's log weight; a missing upper endpoint is invalid.
+    Schema 2 (4.18): 1/C records are refused."""
 
-    schema = 1
+    schema = 2
 
     def encode(self, value: ExclusionEvidence) -> Mapping[str, Any]:
         if value.log_e_upper is None:
@@ -57,13 +59,15 @@ def derivation(
     dyads: np.ndarray,
     sample_ids: tuple[str, ...],
     configured_contigs: tuple[str, ...],
+    log_weight: float,
     *,
     numerical_policy: NumericalPolicy | None = None,
 ) -> str:
-    """Bind full evidence, ordered dyads, configured C and sample axis."""
+    """Bind full evidence, ordered dyads, the configured contig axis, this contig's log weight and the samples."""
     return Derivation(
         code_dependency_identity((__name__,)),
-        dict(exclusion=parameters, model=exclusion_bound.MODEL, samples=sample_ids, contigs=configured_contigs),
+        dict(exclusion=parameters, model=exclusion_bound.MODEL, samples=sample_ids, contigs=configured_contigs,
+             log_weight=float(log_weight)),
         numerical_policy or NumericalPolicy.current(),
         dict(evidence=evidence_identity, dyads=array_digest(dyads)),
     ).identity
@@ -74,7 +78,7 @@ def run(
     evidence: ContigEvidence,
     dyads: np.ndarray,
     parameters: ExclusionParameters,
-    configured_contigs: int,
+    log_weight: float,
     sample_count: int,
     *,
     threads: int = 1,
@@ -101,7 +105,7 @@ def run(
             evidence.positions,
             rows,
             parameters,
-            configured_contigs,
+            log_weight,
             sample_count,
             claim_threads,  # the science's kernel boundaries re-read this task's share
         )
@@ -116,7 +120,7 @@ def task(
     evidence: ContigEvidence,
     dyads: np.ndarray,
     parameters: ExclusionParameters,
-    configured_contigs: int,
+    log_weight: float,
     sample_count: int,
     *,
     file: CheckpointFile | None = None,
@@ -130,7 +134,7 @@ def task(
     return Task(
         TaskKey("pedigree", "exclusion", contig),
         run,
-        args=(contig, evidence, dyads, parameters, configured_contigs, sample_count),
+        args=(contig, evidence, dyads, parameters, log_weight, sample_count),
         kwargs=dict(file=file, identity=identity),
         depends_on=depends_on,
         inputs=(RecordKey(contig, "evidence"),),

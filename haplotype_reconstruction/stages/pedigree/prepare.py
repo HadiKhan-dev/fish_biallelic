@@ -28,6 +28,7 @@ from ...engine.cpu import TASK_THREADS, thread_team
 from ...engine.graph import Expansion, ResultRef
 from ...science.pedigree import prepare as science
 from ...science.pedigree.parameters import PedigreeParameters, PreparationParameters
+from ...science.pedigree.blocks import ScorePlacement, cut_list
 from ...science.pedigree.regimes import Layout
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
@@ -39,37 +40,39 @@ KEY = "pedigree/prepared"
 
 
 class PreparedAdapter:
-    """Lossless schema-2 prepared record; derived views are not persisted."""
+    """Lossless schema-3 prepared record with a small layout header (selectors, bins, markers) and the contig's
+    configured material; 4.16 records (schema 1-2, with measured map lengths) are refused and re-prepared."""
 
-    schema = 2
+    schema = 3
 
     def encode(self, value: PreparedChromosome) -> Mapping[str, Any]:
         return {"schema": self.schema, **to_payload(value), "layout": [
-            dict(selector=c.selector_switch_probability, measured=c.measured_morgans,
-                 bins=c.n_bins, markers=c.informative_markers) for c in value.components]}
+            dict(selector=c.selector_switch_probability, bins=c.n_bins, markers=c.informative_markers)
+            for c in value.components]}
 
     def decode(self, payload: Mapping[str, Any]) -> PreparedChromosome:
-        require_schema(payload, (1, self.schema))
+        require_schema(payload, self.schema)
         names = {f.name for f in fields(PreparedChromosome)}
-        # Schema 1 has the same prepared scientific arrays; schema 2 adds only a small layout header.
-        return from_payload(PreparedChromosome, {**{k: v for k, v in payload.items() if k in names},
-                                                "schema": self.schema})
+        return from_payload(PreparedChromosome, {k: v for k, v in payload.items() if k in names})
 
 
-def layout_summary(header: Mapping[str, Any], parameters: PedigreeParameters) -> tuple[Layout, ChromosomeSummaryView]:
-    """Prepared header to the classifier and original chromosome report summary; no block arrays."""
+# Prepared header items the material axis and the chromosome summary read (no component arrays).
+LAYOUT_ITEMS = ("schema", "contig", "component_count", "omitted_reason", "layout", "configured_morgans")
+
+
+def layout_summary(header: Mapping[str, Any]) -> tuple[Layout, ChromosomeSummaryView]:
+    """Prepared header to the material axis and the original chromosome report summary; no block arrays."""
     parts = header["layout"]
-    measured = float(sum(np.minimum(p["measured"], parameters.exposure.unit_morgans).sum() for p in parts))
-    return (Layout(header["contig"], measured, tuple(p["selector"] for p in parts)),
+    return (Layout(header["contig"], tuple(p["selector"] for p in parts)),
             ChromosomeSummaryView(header["contig"], header["component_count"], len(parts),
-                                  sum(p["markers"] for p in parts), header["omitted_reason"]))
+                                  sum(p["markers"] for p in parts), header["omitted_reason"],
+                                  float(header["configured_morgans"])))
 
 
 def derivation(
     parameters: PreparationParameters,
     upstream: Mapping[str, str],
     *,
-    rate_is_measured: bool = False,
     reverse: bool = False,
     numerical_policy: NumericalPolicy | None = None,
 ) -> str:
@@ -78,7 +81,7 @@ def derivation(
         raise InputError("prepared identity needs painting, evidence and genetic_map derivations")
     return Derivation(
         code_dependency_identity((__name__,)),
-        dict(preparation=parameters, rate_is_measured=rate_is_measured),
+        dict(preparation=parameters),
         numerical_policy or NumericalPolicy.current(),
         dict(upstream),
         reverse,
@@ -91,7 +94,6 @@ def run(
     chromosome_map: ChromosomeGeneticMap,
     parameters: PreparationParameters,
     *,
-    rate_is_measured: bool = False,
     threads: int = 1,
     file: CheckpointFile | None = None,
     identity: str | None = None,
@@ -106,9 +108,7 @@ def run(
         if previous is not None:
             return previous
     with thread_team(default=threads):
-        product = science.prepare_chromosome(
-            painting, evidence, chromosome_map, parameters, rate_is_measured=rate_is_measured
-        )
+        product = science.prepare_chromosome(painting, evidence, chromosome_map, parameters)
     if file is not None:
         assert identity is not None
         publish_product(file, KEY, identity, product, adapter)
@@ -163,7 +163,6 @@ def prepare_stored(
     identity = derivation(
         parameters.preparation,
         dict(painting=painted.identity, evidence=observed.identity, genetic_map=manifest["map_identities"][contig]),
-        rate_is_measured=parameters.exposure.rate_is_measured,
         reverse=parameters.reverse_conventions,
         numerical_policy=numerical_policy,
     )
@@ -182,7 +181,6 @@ def prepare_stored(
         evidence,
         chromosome_map,
         parameters.preparation,
-        rate_is_measured=parameters.exposure.rate_is_measured,
         threads=threads,
         file=file,
         identity=identity,
@@ -226,13 +224,22 @@ def _bound_stored(
     return reference.contig, identity
 
 
+def placements(layouts: tuple[Layout, ...], axis: Any, parameters: PedigreeParameters) -> tuple[ScorePlacement, ...]:
+    """Every informative contig's placement from the prepared layouts (the barrier and the bound-input reader)."""
+    last = axis.units - 1
+    return tuple(
+        ScorePlacement(offset, last, cut_list(layout.selectors, offset, last, parameters.material))
+        for layout, offset in zip(layouts, axis.offsets, strict=True)
+    )
+
+
 def _scores_stored(
     root: str,
     reference: PreparedReference,
     chromosome: int,
     screen_identity: str,
     panel_identity: str,
-    regime: str,
+    placement: ScorePlacement,
     sample_ids: tuple[str, ...],
     parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
@@ -246,14 +253,12 @@ def _scores_stored(
     if panel is None:
         raise InputError("floored scores require the complete candidate panel")
     identity = scores.derivation(
-        parameters, reference.identity, screen_identity, panel, numerical_policy=numerical_policy, regime=regime
+        parameters, reference.identity, screen_identity, panel, placement, numerical_policy=numerical_policy
     )
     file = store.contig(reference.contig)
-    cached = read_items(file, scores.KEY, identity, ("schema", "contig", "form"))
+    cached = read_items(file, scores.KEY, identity, ("schema", "contig"))
     if cached is not None:
         require_schema(cached.payload, scores.ScoresAdapter.schema)
-        if cached.payload.get("form", "standard") != regime:
-            raise InputError("score record form differs from the run regime")
         return reference.contig, identity
     record = load_product(store.run, screen.SCREEN, screen_identity, screen.ScreenAdapter())
     if record is None:
@@ -265,10 +270,10 @@ def _scores_stored(
         panel,
         ParentEligibility.unrestricted(sample_ids),
         parameters,
+        placement,
         threads=threads,
         file=file,
         identity=identity,
-        regime=regime,
     )
     return reference.contig, identity
 
@@ -279,7 +284,7 @@ def _after_bounds(
     manifest: Mapping[str, Any],
     references: tuple[PreparedReference, ...],
     screen_identity: str,
-    regime: str,
+    placed: tuple[ScorePlacement, ...],
     parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
     maximum_cores: int,
@@ -321,7 +326,7 @@ def _after_bounds(
                 k,
                 screen_identity,
                 identity,
-                regime,
+                placement,
                 tuple(manifest["sample_ids"]),
                 parameters,
                 numerical_policy,
@@ -331,7 +336,7 @@ def _after_bounds(
             outputs=(RecordKey(reference.contig, "pedigree/floored_scores"),),
             thread_argument="threads",
         )
-        for k, reference in enumerate(references)
+        for k, (reference, placement) in enumerate(zip(references, placed, strict=True))
     )
     return Expansion(
         tasks, decision.task_stored(root, manifest, cores=maximum_cores, depends_on=tuple(t.key for t in tasks))
@@ -348,27 +353,26 @@ def _after_prepared(
     *,
     threads: int = 1,
 ) -> Expansion | dict[RecordKey, str]:
+    from ...science.pedigree import regimes
     from ...science.pedigree.run import precheck
     from . import decision, screen
-    from ...science.pedigree import regimes
 
     informative = tuple(r for r in references if r.omitted_reason is None)
     sample_ids = tuple(manifest["sample_ids"])
-    precheck(len(sample_ids), len(informative), parameters, basis="informative")
+    precheck(len(sample_ids), basis="informative")
     eligibility = ParentEligibility.unrestricted(sample_ids)
     store = CheckpointStore(root, nthreads=threads)
     summaries, layouts = [], []
     for r in references:
-        header = read_items(store.contig(r.contig), KEY, r.identity,
-                            ("schema", "contig", "component_count", "omitted_reason", "layout"))
+        header = read_items(store.contig(r.contig), KEY, r.identity, LAYOUT_ITEMS)
         if header is None:
             raise InputError("missing complete prepared chromosome")
         require_schema(header.payload, PreparedAdapter.schema)
-        layout, summary = layout_summary(header.payload, parameters)
+        layout, summary = layout_summary(header.payload)
         summaries.append(summary)
         if r.omitted_reason is None:
             layouts.append(layout)
-    classification = regimes.classify(layouts, parameters)
+    classification, axis = regimes.classify_layouts(tuple(layouts), parameters)
     if classification.name == "not_assessable":
         from .records import PedigreeDependencies
         dependencies = PedigreeDependencies(eligibility.identity(), "", "",
@@ -383,6 +387,7 @@ def _after_prepared(
             file=store.run, numerical_policy=numerical_policy, receipt=True)
         assert isinstance(reply, dict)
         return reply
+    placed = placements(tuple(layouts), axis, parameters)
     identity = screen.screen_derivation(
         parameters,
         eligibility.identity(),
@@ -421,7 +426,7 @@ def _after_prepared(
             manifest,
             informative,
             identity,
-            classification.name,
+            placed,
             parameters,
             numerical_policy,
             maximum_cores,
@@ -455,7 +460,7 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     )
     numerical_policy = NumericalPolicy(**manifest["numerical_policy"])
     contigs = AnalysisContigs.from_manifest(manifest).included
-    precheck(len(manifest["sample_ids"]), len(contigs), parameters, basis="configured")
+    precheck(len(manifest["sample_ids"]), basis="configured")
     if any(json_digest(maps.identity(c)) != manifest["map_identities"][c] for c in contigs):
         raise InputError("pedigree maps differ from the bound run manifest")
     tasks = tuple(

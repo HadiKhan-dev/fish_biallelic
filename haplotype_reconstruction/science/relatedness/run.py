@@ -12,16 +12,16 @@ from typing import Protocol
 
 import numpy as np
 
-from ...contracts.genetic_map import ChromosomeGeneticMap, measured_coordinates
+from ...contracts.genetic_map import ChromosomeGeneticMap
 from ...contracts.likelihoods import CodedLikelihoods, gather_likelihoods
 from ...contracts.observations import PairArray
 from ...contracts.relatedness import RelatednessFamilies
 from ...core.concurrency import ThreadSource
 from ...core.errors import InputError
+from ..shared.material import partition_coordinates
 from .frequency import allele_frequency
 from .parameters import AlleleFrequencyParameters, FamilyParameters
 from .search import FamilyFit, fit
-from .support import support_units
 from .terms import family_terms
 
 _DEFAULT_FAMILY = FamilyParameters()
@@ -56,17 +56,19 @@ class Evidence(Protocol):
 
 @dataclass(frozen=True)
 class ContigTerms:
-    """One contig's float64 child/parent terms and int64 unit boundaries."""
+    """One contig's float64 child/parent terms and its family sites' working-map coordinates (Morgans,
+    nondecreasing: the configured map, or the configured rate where it applies)."""
 
     child: np.ndarray
     log_prior: np.ndarray
     log_posterior: np.ndarray
-    units: np.ndarray
+    coordinates: np.ndarray
 
 
 @dataclass(frozen=True)
 class FamilyTerms:
-    """Family input arrays on the bound concatenated site axis; all inputs read-only."""
+    """Family input arrays on the bound concatenated site axis; all inputs read-only. ``ranges``: the support
+    units' site ranges, ``weights`` their working Morgans (DESIGN_417 D5)."""
 
     sample_ids: tuple[str, ...]
     contigs: tuple[str, ...]
@@ -75,6 +77,7 @@ class FamilyTerms:
     log_posterior: np.ndarray
     ranges: tuple[tuple[int, int], ...]
     chromosome_sites: tuple[int, ...]
+    weights: tuple[float, ...] = ()
 
 
 def contig_terms(
@@ -85,44 +88,60 @@ def contig_terms(
     *,
     map_work=map,
 ) -> ContigTerms:
-    """Return C[N,M,9], logpi[M,3], logpost[N,M,3] and support boundaries; mutate nothing. ``map_work`` (ordered,
-    optional): the allele frequencies' site windows concurrently."""
+    """Return C[N,M,9], logpi[M,3], logpost[N,M,3] and the family sites' working-map coordinates; mutate nothing.
+    ``map_work`` (ordered, optional): the allele frequencies' site windows concurrently."""
     gl, observed, positions = evidence.likelihoods, evidence.observed, evidence.positions
     if not len(positions):
         n = len(evidence.sample_ids)
-        return ContigTerms(
-            np.empty((n, 0, 9)), np.empty((0, 3)), np.empty((n, 0, 3)), np.asarray([0, 0], dtype=np.int64)
-        )
+        return ContigTerms(np.empty((n, 0, 9)), np.empty((0, 3)), np.empty((n, 0, 3)), np.empty(0))
     p = allele_frequency(gl, observed, frequency_parameters, map_work=map_work)
     keep = (np.minimum(p, 1 - p) >= family_parameters.minor_allele_frequency) & (
         observed.mean(axis=0) >= family_parameters.minimum_observed
     )
     sites = np.flatnonzero(keep)[:: family_parameters.family_site_step]
     child, prior, post = family_terms(gather_likelihoods(gl, sites), observed[:, sites], p[sites], family_parameters)
-    units = support_units(
-        measured_coordinates(genetic_map, positions[sites], family_parameters.rate_is_measured),
-        family_parameters.support_unit_morgans,
-    )
-    return ContigTerms(child, prior, post, units)
+    coordinates = np.asarray(genetic_map.cumulative_morgans(np.asarray(positions[sites], dtype=np.float64)),
+                             dtype=np.float64).reshape(-1)
+    return ContigTerms(child, prior, post, coordinates)
+
+
+def support_axis(
+    terms: tuple[ContigTerms, ...], unit_morgans: float, tail_morgans: float
+) -> tuple[tuple[tuple[int, int], ...], tuple[float, ...]]:
+    """Support units of the pooled family-site axis (DESIGN_417 D5, RELCAL 1.1): each contig's first family site at
+    the running offset (no gap between contigs, configured order), cut into consecutive ``unit_morgans`` pieces
+    (a final piece shorter than ``tail_morgans`` joins the one before it; a site exactly at a cut belongs to the
+    unit on its right); empty units omitted. Returns each unit's site range on the concatenated axis and its
+    working Morgans (the coordinate of its last site minus that of the previous unit's last site; a gap without
+    sites is carried by the next unit); a degenerate axis of 0 Morgans is one unit of weight 1."""
+    parts, offset = [], 0.0
+    for value in terms:
+        if not len(value.coordinates):
+            continue
+        parts.append(offset + (value.coordinates - value.coordinates[0]))
+        offset += float(value.coordinates[-1] - value.coordinates[0])
+    if not parts:
+        return (), ()
+    coordinates = np.concatenate(parts)
+    _, units = partition_coordinates(coordinates, unit_morgans, tail_morgans)
+    ranges = tuple((first, stop) for first, stop, _, _ in units)
+    weights = tuple(morgans for _, _, morgans, _ in units)
+    if sum(weights) <= 0:
+        return ((0, len(coordinates)),), (1.0,)
+    return ranges, weights
 
 
 def concatenate_terms(
-    sample_ids: tuple[str, ...], contigs: tuple[str, ...], terms: tuple[ContigTerms, ...]
+    sample_ids: tuple[str, ...], contigs: tuple[str, ...], terms: tuple[ContigTerms, ...],
+    parameters: FamilyParameters = _DEFAULT_FAMILY,
 ) -> FamilyTerms:
-    """Concatenate float64 family terms in supplied contig order; drop empty support units."""
+    """Concatenate float64 family terms in supplied contig order with the pooled Morgan-weighted support units."""
     if len(contigs) != len(terms):
         raise InputError("relatedness contigs and term batches must have equal lengths")
     if not terms:
         raise InputError("relatedness requires at least one bound contig")
-    ranges: list[tuple[int, int]] = []
-    chromosome_sites: list[int] = []
-    lo = 0
-    for value in terms:
-        chromosome_sites.append(value.child.shape[1])
-        ranges.extend(
-            (lo + int(a), lo + int(b)) for a, b in zip(value.units[:-1], value.units[1:], strict=False) if b > a
-        )
-        lo += value.child.shape[1]
+    chromosome_sites = [value.child.shape[1] for value in terms]
+    ranges, weights = support_axis(terms, parameters.support_unit_morgans, parameters.support_tail_morgans)
     return FamilyTerms(
         sample_ids,
         contigs,
@@ -131,6 +150,7 @@ def concatenate_terms(
         np.ascontiguousarray(np.concatenate([t.log_posterior for t in terms], axis=1)),
         tuple(ranges),
         tuple(chromosome_sites),
+        tuple(weights),
     )
 
 
@@ -145,6 +165,7 @@ def fit_families(
         terms.log_prior,
         terms.log_posterior,
         terms.ranges,
+        terms.weights,
         max_sweeps=parameters.max_sweeps,
         parameters=parameters,
         threads=threads,

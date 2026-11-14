@@ -1583,7 +1583,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
-Decision input: every informative contig's scores stacked in contig order (not a record). contigs: informative contigs (C); arrays carry a leading contig axis C. edges: int64 [E, 2] the eligible (child, parent) edges, child-major with parents ascending (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [C, E] on this axis: the chromosome records' [N, N] entries off the eligible edges (M1 -inf, exposure of non-edges and self coverage) are never read by the decision or the report. zero float64 [C, N]; two, pair_explained, pair_exposed float64 [C, T] (panel rows); total_bins float64 [C]; informative_markers int64 [C]; junctions / callable_bins float64 [C, N]; junction_dyads int64 [D, 2] and transmission_log_likelihood float64 [C, D] in nats (ChromosomeScores); scored_morgans float64 [C] (NaN where unknown); working_morgans float64 [C]: sum of -0.5 ln(1 - 2 theta) over scored components' selector boundaries, the configured working-map distance of PS04. It is NOT measured exposure, and never enters a gate or decision; reports alone use it to describe painted junctions per Morgan. edge_exposed_morgans float64 [C, E] and pair_exposed_morgans float64 [C, T] (ChromosomeScores; 0 in earlier records).
+Decision input: the run's material units, summed from every informative contig's pieces (not a record). contigs: one name per material unit (H rows, "unit:<k>"); real_contigs: the informative contigs (C) in configured order. Each unit is consecutive working-map material of about 1 Morgan (MaterialParameters) and may straddle components and contigs; every array below carries the leading unit axis H. edges: int64 [E, 2] the eligible (child, parent) edges, child-major with parents ascending (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [H, E] on this axis. zero float64 [H, N]; two, pair_explained, pair_exposed float64 [H, T] (panel rows); total_bins float64 [H]; informative_markers int64 [H]; junctions / callable_bins float64 [H, N]; junction_dyads int64 [D, 2] and transmission_log_likelihood float64 [H, D] in nats (sums of the pieces' per-bin increments); working_morgans float64 [H]: each unit's working length (Morgans of the configured working map: sum of -0.5 ln(1 - 2 theta) over its selector boundaries); it sets the unit's direction failure probability (orientation.unit_failure) and is reported. material_morgans: U, the working Morgans of the informative components (the regime reads it alone). regime: "standard" or "low_material" (material.classify of U). pieces / piece_contig / piece_unit: every contig-component piece of the units (report and audit only). contig_*: per informative contig sums of the pieces (reports: evidence summary, painted junction rates).
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
@@ -1591,27 +1591,33 @@ Decision input: every informative contig's scores stacked in contig order (not a
 | `contigs` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
 | `panel` | `CandidatePanel` | evidence | () | 1 | CandidatePanel | True | `required` |
 | `edges` | `np.ndarray` | evidence | ('E', '2') | 1 | int64 | True | `required` |
-| `zero` | `np.ndarray` | evidence | ('C', 'N') | nats | float64 | True | `required` |
-| `one` | `np.ndarray` | evidence | ('C', 'E') | nats | float64 | True | `required` |
-| `two` | `np.ndarray` | evidence | ('C', 'T') | nats | float64 | True | `required` |
-| `edge_matched` | `np.ndarray` | evidence | ('C', 'E') | painting bins | float64 | True | `required` |
-| `edge_exposed` | `np.ndarray` | evidence | ('C', 'E') | painting bins | float64 | True | `required` |
-| `pair_explained` | `np.ndarray` | evidence | ('C', 'T') | painting bins | float64 | True | `required` |
-| `pair_exposed` | `np.ndarray` | evidence | ('C', 'T') | painting bins | float64 | True | `required` |
-| `total_bins` | `np.ndarray` | evidence | ('C',) | painting bins | float64 | True | `required` |
-| `junctions` | `np.ndarray` | evidence | ('C', 'N') | painting bins | float64 | True | `required` |
-| `callable_bins` | `np.ndarray` | evidence | ('C', 'N') | painting bins | float64 | True | `required` |
-| `informative_markers` | `np.ndarray` | obs | ('C',) | 1 | int64 | True | `required` |
+| `zero` | `np.ndarray` | evidence | ('H', 'N') | nats | float64 | True | `required` |
+| `one` | `np.ndarray` | evidence | ('H', 'E') | nats | float64 | True | `required` |
+| `two` | `np.ndarray` | evidence | ('H', 'T') | nats | float64 | True | `required` |
+| `edge_matched` | `np.ndarray` | evidence | ('H', 'E') | painting bins | float64 | True | `required` |
+| `edge_exposed` | `np.ndarray` | evidence | ('H', 'E') | painting bins | float64 | True | `required` |
+| `pair_explained` | `np.ndarray` | evidence | ('H', 'T') | painting bins | float64 | True | `required` |
+| `pair_exposed` | `np.ndarray` | evidence | ('H', 'T') | painting bins | float64 | True | `required` |
+| `total_bins` | `np.ndarray` | evidence | ('H',) | painting bins | float64 | True | `required` |
+| `junctions` | `np.ndarray` | evidence | ('H', 'N') | painting bins | float64 | True | `required` |
+| `callable_bins` | `np.ndarray` | evidence | ('H', 'N') | painting bins | float64 | True | `required` |
+| `informative_markers` | `np.ndarray` | obs | ('H',) | 1 | int64 | True | `required` |
 | `junction_dyads` | `np.ndarray` | evidence | ('D', '2') | 1 | int64 | True | `required` |
-| `transmission_log_likelihood` | `np.ndarray` | evidence | ('C', 'D') | nats | float64 | True | `required` |
-| `scored_morgans` | `np.ndarray &#124; None` | evidence | ('C',) | Morgans | float64 | True | `None` |
-| `edge_exposed_morgans` | `np.ndarray &#124; None` | evidence | ('C', 'E') | Morgans | float64 | True | `None` |
-| `pair_exposed_morgans` | `np.ndarray &#124; None` | evidence | ('C', 'T') | Morgans | float64 | True | `None` |
-| `working_morgans` | `np.ndarray` | report | ('C',) | Morgans | float64 | True | `required` |
+| `transmission_log_likelihood` | `np.ndarray` | evidence | ('H', 'D') | nats | float64 | True | `required` |
+| `working_morgans` | `np.ndarray` | evidence | ('H',) | Morgans | float64 | True | `required` |
+| `material_morgans` | `float` | state | () | Morgans | float | True | `required` |
 | `regime` | `str` | state | () | 1 | str | True | `'standard'` |
 | `real_contigs` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `()` |
-| `block_chromosome` | `np.ndarray &#124; None` | obs | ('H',) | 1 | int64 | True | `None` |
-| `block_descriptors` | `tuple[MapBlock, ...]` | obs | () | 1 | tuple[MapBlock, ...] | True | `()` |
+| `pieces` | `tuple[MapBlock, ...]` | obs | () | 1 | tuple[MapBlock, ...] | True | `()` |
+| `piece_contig` | `np.ndarray &#124; None` | obs | ('P',) | 1 | int64 | True | `None` |
+| `piece_unit` | `np.ndarray &#124; None` | obs | ('P',) | 1 | int64 | True | `None` |
+| `piece_bins` | `np.ndarray &#124; None` | obs | ('P',) | 1 | int64 | True | `None` |
+| `piece_markers` | `np.ndarray &#124; None` | obs | ('P',) | 1 | int64 | True | `None` |
+| `contig_junctions` | `np.ndarray &#124; None` | report | ('C', 'N') | 1 | float64 | True | `None` |
+| `contig_callable_bins` | `np.ndarray &#124; None` | report | ('C', 'N') | 1 | float64 | True | `None` |
+| `contig_total_bins` | `np.ndarray &#124; None` | report | ('C',) | 1 | float64 | True | `None` |
+| `contig_working_morgans` | `np.ndarray &#124; None` | report | ('C',) | Morgans | float64 | True | `None` |
+| `contig_markers` | `np.ndarray &#124; None` | report | ('C',) | 1 | int64 | True | `None` |
 | `chromosome_summary` | `tuple[ChromosomeSummaryView, ...]` | obs | () | 1 | tuple[ChromosomeSummaryView, ...] | True | `()` |
 
 ## pedigree.ExclusionEvidence
@@ -1627,7 +1633,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `markers` | `int` | obs | () | 1 | int | True | `required` |
 | `pattern_fallback_samples` | `int` | diagnostic | () | 1 | int | True | `required` |
 | `log_e_upper` | `np.ndarray &#124; None` | state | ('D',) | nats | float64 | True | `None` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
+| `log_weight` | `float` | state | () | 1 | float | True | `float('nan')` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
 
 ## pedigree.PedigreeCalls
 
@@ -1658,17 +1665,16 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `informative_contigs` | `int` | obs | () | 1 | int | True | `required` |
-| `minimum_exposed_contigs` | `int` | report | () | 1 | int | True | `required` |
-| `max_bootstrap_support` | `float` | report | () | 1 | float | True | `required` |
-| `max_loco_support` | `float` | report | () | 1 | float | True | `required` |
+| `informative_morgans` | `float` | obs | () | Morgans | float | True | `required` |
+| `informative_units` | `int` | obs | () | 1 | int | True | `required` |
+| `regime` | `str` | report | () | 1 | str | True | `required` |
 | `tier_a_reachable` | `bool` | report | () | 1 | bool | True | `required` |
 | `tier_b_reachable` | `bool` | report | () | 1 | bool | True | `required` |
-| `minimum_contigs_tier_a` | `int` | report | () | 1 | int | True | `required` |
-| `minimum_contigs_tier_b` | `int` | report | () | 1 | int | True | `required` |
+| `unit_morgans` | `float` | report | () | Morgans | float | True | `required` |
+| `assessable_morgans` | `float` | report | () | Morgans | float | True | `required` |
+| `standard_morgans` | `float` | report | () | Morgans | float | True | `required` |
+| `tier_a_morgans` | `float` | report | () | Morgans | float | True | `required` |
 | `statement` | `str` | report | () | 1 | str | True | `required` |
-| `informative_units` | `float` | report | () | map units | float | True | `float('nan')` |
-| `unit_morgans` | `float` | report | () | Morgans | float | True | `float('nan')` |
 
 ## pedigree.Alternatives
 
@@ -1691,13 +1697,15 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `junctions` | `np.ndarray` | evidence | ('C', 'N') | painting bins | float64 | True | `required` |
-| `callable_bins` | `np.ndarray` | evidence | ('C', 'N') | painting bins | float64 | True | `required` |
-| `total_bins` | `np.ndarray` | evidence | ('C',) | painting bins | float64 | True | `required` |
+| `junctions` | `np.ndarray` | evidence | ('H', 'N') | painting bins | float64 | True | `required` |
+| `callable_bins` | `np.ndarray` | evidence | ('H', 'N') | painting bins | float64 | True | `required` |
+| `total_bins` | `np.ndarray` | evidence | ('H',) | painting bins | float64 | True | `required` |
 | `pair_child` | `np.ndarray` | evidence | ('U',) | 1 | int64 | True | `required` |
 | `pair_parent` | `np.ndarray` | evidence | ('U',) | 1 | int64 | True | `required` |
-| `pair_log_odds` | `np.ndarray` | evidence | ('C', 'U') | nats | float64 | True | `required` |
-| `compared` | `np.ndarray` | evidence | ('C', 'U') | 1 | bool | True | `required` |
+| `pair_log_odds` | `np.ndarray` | evidence | ('H', 'U') | nats | float64 | True | `required` |
+| `compared` | `np.ndarray` | evidence | ('H', 'U') | 1 | bool | True | `required` |
+| `window` | `np.ndarray &#124; None` | evidence | ('H',) | 1 | int64 | True | `None` |
+| `window_cap` | `float` | evidence | () | nats | float | True | `float('inf')` |
 
 ## pedigree.Orientation
 
@@ -1716,15 +1724,12 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `edge_exposed` | `np.ndarray` | evidence | ('C', 'E') | painting bins | float64 | True | `required` |
-| `pair_exposed` | `np.ndarray` | evidence | ('C', 'T') | painting bins | float64 | True | `required` |
-| `total_bins` | `np.ndarray` | evidence | ('C',) | painting bins | float64 | True | `required` |
-| `edge_present` | `np.ndarray` | evidence | ('ceil(C/64)', 'E') | 1 | uint64 | True | `required` |
-| `pair_present` | `np.ndarray` | evidence | ('ceil(C/64)', 'T') | 1 | uint64 | True | `required` |
+| `edge_exposed` | `np.ndarray` | evidence | ('H', 'E') | painting bins | float64 | True | `required` |
+| `pair_exposed` | `np.ndarray` | evidence | ('H', 'T') | painting bins | float64 | True | `required` |
+| `total_bins` | `np.ndarray` | evidence | ('H',) | painting bins | float64 | True | `required` |
+| `edge_present` | `np.ndarray` | evidence | ('ceil(H/64)', 'E') | 1 | uint64 | True | `required` |
+| `pair_present` | `np.ndarray` | evidence | ('ceil(H/64)', 'T') | 1 | uint64 | True | `required` |
 | `row_edges` | `np.ndarray` | evidence | ('A', '2') | 1 | int64 | True | `required` |
-| `units` | `np.ndarray` | evidence | ('C',) | 1 | float64 | True | `required` |
-| `edge_units` | `np.ndarray` | evidence | ('C', 'E') | 1 | float64 | True | `required` |
-| `pair_units` | `np.ndarray` | evidence | ('C', 'T') | 1 | float64 | True | `required` |
 
 ## pedigree.OmissionTotals
 
@@ -1994,7 +1999,9 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `reach` | `TierReach` | state | () | 1 | TierReach | True | `required` |
 | `family_solve` | `FamilySolveRecord` | state | () | 1 | FamilySolveRecord | True | `required` |
 | `tie_events` | `TieCounts` | diagnostic | () | 1 | TieCounts | True | `required` |
-| `informative_units` | `np.ndarray` | state | ('N',) | map units | float64 | True | `required` |
+| `informative_units` | `np.ndarray` | state | ('N',) | units | float64 | True | `required` |
+| `informative_morgans` | `np.ndarray` | report | ('N',) | Morgans | float64 | True | `required` |
+| `tier_a_assessed` | `bool` | state | () | 1 | bool | True | `required` |
 
 ## pedigree.EdgeFamily
 
@@ -2075,7 +2082,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `retained` | `PedigreeRetained &#124; None` | state | () | 1 | PedigreeRetained &#124; None | True | `required` |
 | `reports_complete` | `bool` | diagnostic | () | 1 | bool | True | `required` |
 | `regime` | `str` | state | () | 1 | str | True | `'standard'` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `8` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `9` |
 
 ## pedigree.PedigreeResult
 
@@ -2154,7 +2161,7 @@ Extends `SummaryMapping`.
 | `contigs` | `int` | obs | () | 1 | int | True | `required` |
 | `status` | `str` | report | () | 1 | str | True | `required` |
 | `released` | `int` | report | () | 1 | int | True | `required` |
-| `chromosomes` | `list[dict[str, str &#124; int]] &#124; None` | report | () | 1 | list[dict[str, str &#124; int]] &#124; None | True | `None` |
+| `chromosomes` | `list[dict[str, str &#124; int &#124; float]] &#124; None` | report | () | 1 | list[dict[str, str &#124; int &#124; float]] &#124; None | True | `None` |
 
 ## pedigree.RelativeContrasts
 
@@ -2322,8 +2329,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `callable_ancestry_haplotype_bin_count` | `float` | report | () | 1 | float64 | True | `required` |
 | `adjusted_ancestry_junction_burden` | `float` | report | () | 1 | float64 | True | `required` |
 | `ancestry_painting_callability_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `informative_contig_count` | `int` | report | () | 1 | int | True | `required` |
-| `informative_map_units` | `float` | report | () | 1 | float64 | True | `required` |
+| `informative_unit_count` | `int` | report | () | 1 | int | True | `required` |
+| `informative_morgans` | `float` | report | () | Morgans | float64 | True | `required` |
 | `local_state_bootstrap_fraction` | `float` | report | () | 1 | float64 | True | `required` |
 | `local_configuration_bootstrap_fraction` | `float` | report | () | 1 | float64 | True | `required` |
 | `graph_configuration_bootstrap_fraction` | `float` | report | () | 1 | float64 | True | `required` |
@@ -2332,14 +2339,14 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `selected_graph_parent2_bootstrap_fraction` | `float` | report | () | 1 | float64 | True | `required` |
 | `parent1_bootstrap_fraction` | `float` | report | () | 1 | float64 | True | `required` |
 | `parent2_bootstrap_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `local_state_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `local_configuration_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `graph_configuration_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `selected_graph_configuration_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `selected_graph_parent1_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `selected_graph_parent2_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `parent1_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `parent2_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `local_state_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `local_configuration_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `graph_configuration_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `selected_graph_configuration_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `selected_graph_parent1_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `selected_graph_parent2_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `parent1_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `parent2_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
 | `state_winner_margin` | `float` | report | () | nats | float64 | True | `required` |
 | `conditional_identity_margin` | `float` | report | () | nats | float64 | True | `required` |
 | `unconstrained_winner_margin` | `float` | report | () | nats | float64 | True | `required` |
@@ -2425,7 +2432,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `state_winner_margin` | `float` | report | () | nats | float64 | True | `required` |
 | `conditional_identity_margin` | `float` | report | () | nats | float64 | True | `required` |
 | `local_state_bootstrap_fraction` | `float` | report | () | 1 | float64 | True | `required` |
-| `local_state_loco_fraction` | `float` | report | () | 1 | float64 | True | `required` |
+| `local_state_lobo_fraction` | `float` | report | () | 1 | float64 | True | `required` |
 | `eligible_m2_pairs` | `int` | report | () | 1 | int | True | `required` |
 | `scored_m2_pairs` | `int` | report | () | 1 | int | True | `required` |
 | `incomplete_m2_search` | `bool` | report | () | 1 | bool | True | `required` |
@@ -2501,6 +2508,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `scored_component_count` | `int` | report | () | 1 | int | True | `required` |
 | `informative_markers` | `int` | report | () | 1 | int | True | `required` |
 | `omitted_reason` | `str &#124; None` | report | () | 1 | str &#124; None | True | `required` |
+| `configured_morgans` | `float` | report | () | Morgans | float | True | `float('nan')` |
 
 ## pedigree.ExclusionEvidenceView
 
@@ -2662,6 +2670,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `target_count` | `int` | state | () | 1 | int64 | True | `required` |
 | `before_edges` | `ParentEdges` | state | () | 1 | ParentEdges | True | `required` |
 | `relationship` | `RelationshipRequest` | state | () | 1 | RelationshipRequest | True | `required` |
+| `log_weights` | `tuple[float, ...]` | state | () | 1 | tuple[float, ...] | True | `()` |
 
 ## pedigree.PedigreePrecheck
 
@@ -2670,10 +2679,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
 | `samples` | `int` | obs | () | 1 | int64 | True | `required` |
-| `contigs` | `int` | obs | () | 1 | int64 | True | `required` |
-| `minimum_scored_contigs` | `int` | state | () | 1 | int64 | True | `required` |
-| `tier_b_minimum_contigs` | `int` | state | () | 1 | int64 | True | `required` |
-| `tier_b_warning` | `bool` | diagnostic | () | 1 | bool | True | `required` |
 | `basis` | `str` | diagnostic | () | 1 | str | True | `required` |
 
 ## pedigree.ReleasedDecision
@@ -2728,7 +2733,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `factors` | `SourceFactors` | state | () | 1 | SourceFactors | True | `required` |
 | `robustness_epsilon` | `float` | state | () | 1 | float64 | True | `required` |
 | `selector_switch_probability` | `np.ndarray` | state | ('B-1',) | 1 | float64 | True | `required` |
-| `measured_morgans` | `np.ndarray` | state | ('B-1',) | Morgans | float64 | True | `required` |
 | `genotype_likelihoods` | `np.ndarray` | state | ('N', 'M', '3') | probability | float64 | True | `required` |
 | `observed` | `np.ndarray` | state | ('N', 'M') | 1 | bool | True | `required` |
 | `state_classes` | `np.ndarray` | state | ('N', 'B', '2') | 1 | int16 | True | `required` |
@@ -2744,37 +2748,28 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `component_count` | `int` | state | () | 1 | int64 | True | `required` |
 | `components` | `tuple[PreparedComponent, ...]` | state | ('components',) | 1 | tuple[PreparedComponent, ...] | True | `required` |
 | `omitted_reason` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
+| `configured_morgans` | `float` | state | () | Morgans | float64 | True | `float('nan')` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
 
 ## pedigree.ChromosomeScores
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
-Composite evidence of one informative contig, summed over its components (``pedigree/scores``). zero [N], one [N, N], two [T]: M0 / M1 / M2 log likelihoods (panel row order); -inf where ineligible. edge_matched, edge_exposed: float64 [N, N] symmetric posterior-expected painting bins in which the pair shares an anchored founder / is testable for one (diagnostic / gate). pair_explained, pair_exposed: float64 [T] the same for a child and both panel parents. total_bins: painting bins of the scored components. junctions: int64 [N] minimum founder switches of each painting (phase-invariant). callable_bins: int64 [N] observed haplotype-bin labels behind the junction count. informative_markers: selected markers of the scored components. component_count, scored_component_count: painting components / prepared components. junction_dyads: int64 [D, 2] (child c, parent p) dyads the decision orients: both directions of every eligible edge, in row-major order (the same for every chromosome of a run). transmission_log_likelihood: float64 [D] joint log likelihood (nats) of the two samples' scheduled homologues under c <- p (science.pedigree.transmission.log_likelihood). scored_morgans: measured map length (Morgans) between adjacent bins of the scored components (PreparedComponent.measured_morgans; each interval at most ExposureParameters.unit_morgans; 0 without a measured map). working_morgans: configured working-map distance, sum of -0.5 ln(1 - 2 theta) over the scored components' selector boundaries (PS04). This is NOT measured exposure and never enters a gate or decision; it is retained only for reports. edge_exposed_morgans: float64 [N, N] symmetric, pair_exposed_morgans: float64 [T]: the measured map length over which the pair (child and both panel parents) is exposed: each measured interval between adjacent bins counts as far as it is exposed at both ends.
+Composite evidence of one informative contig as its pieces of the genome's material units (record ``pedigree/floored_scores``, schema 5; DESIGN_417 I1). A piece is the run of a painting component's bins between two whole-Morgan cuts of the genome axis (MaterialParameters.unit_morgans); ``offset_morgans`` is the genome coordinate of the contig's first scored bin (the working Morgans of every earlier informative contig, configured order) and ``end_morgans`` the coordinate after its last component. Every piece field is a sum of per-bin increments of one never-restarted chain, so the stacking sums pieces into units exactly; the units (and the tail rule) never enter this record. floor: float64 [N] the screen's M1 floor of each child on this contig (CompactM1.floors); the stacking spreads the genome deficit of the floors over all units by bins (DESIGN_417 D7). component_count, scored_component_count: painting components / prepared components. junction_dyads: int64 [D, 2] (child c, parent p) dyads the decision orients: both directions of every eligible edge, in row-major order (the same for every contig of a run). working_morgans: the contig's configured working-map distance (its scored components' Haldane length).
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
 | `contig` | `str` | state | () | 1 | str | True | `required` |
-| `zero` | `np.ndarray` | state | ('N',) | nats | float64 | True | `required` |
-| `one_floored` | `np.ndarray` | state | ('N', 'N') | nats | float64 | True | `required` |
-| `two` | `np.ndarray` | state | ('T',) | nats | float64 | True | `required` |
-| `edge_matched` | `np.ndarray` | state | ('N', 'N') | painting bins | float64 | True | `required` |
-| `edge_exposed` | `np.ndarray` | state | ('N', 'N') | painting bins | float64 | True | `required` |
-| `pair_explained` | `np.ndarray` | state | ('T',) | painting bins | float64 | True | `required` |
-| `pair_exposed` | `np.ndarray` | state | ('T',) | painting bins | float64 | True | `required` |
-| `total_bins` | `float` | state | () | painting bins | float64 | True | `required` |
-| `junctions` | `np.ndarray` | state | ('N',) | painting bins | int64 | True | `required` |
-| `callable_bins` | `np.ndarray` | state | ('N',) | painting bins | int64 | True | `required` |
+| `offset_morgans` | `float` | state | () | Morgans | float64 | True | `required` |
+| `end_morgans` | `float` | state | () | Morgans | float64 | True | `required` |
 | `informative_markers` | `int` | state | () | 1 | int64 | True | `required` |
 | `component_count` | `int` | state | () | 1 | int64 | True | `required` |
 | `scored_component_count` | `int` | state | () | 1 | int64 | True | `required` |
 | `junction_dyads` | `np.ndarray` | state | ('D', '2') | 1 | int64 | True | `required` |
-| `transmission_log_likelihood` | `np.ndarray` | state | ('D',) | nats | float64 | True | `required` |
-| `scored_morgans` | `float` | state | () | Morgans | float64 | True | `required` |
-| `edge_exposed_morgans` | `np.ndarray` | state | ('N', 'N') | Morgans | float64 | True | `required` |
-| `pair_exposed_morgans` | `np.ndarray` | state | ('T',) | Morgans | float64 | True | `required` |
+| `floor` | `np.ndarray` | state | ('N',) | nats | float64 | True | `required` |
 | `working_morgans` | `float` | report | () | Morgans | float64 | True | `required` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `4` |
+| `pieces` | `BlockScores` | state | () | 1 | BlockScores | True | `required` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `5` |
 
 ## pedigree.MapBlock
 
@@ -2796,30 +2791,18 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 |---|---|---|---|---|---|---|---|
 | `descriptors` | `tuple[MapBlock, ...]` | obs | () | 1 | tuple[MapBlock, ...] | True | `required` |
 | `retained_pairs` | `np.ndarray` | state | ('R', '2') | 1 | int64 | True | `required` |
-| `one_raw` | `np.ndarray` | evidence | ('H', 'R') | nats | float64 | True | `required` |
-| `floors` | `np.ndarray` | evidence | ('H', 'N') | nats | float64 | True | `required` |
-| `zero` | `np.ndarray` | evidence | ('H', 'N') | nats | float64 | True | `required` |
-| `two` | `np.ndarray` | evidence | ('H', 'T') | nats | float64 | True | `required` |
-| `edge_matched` | `np.ndarray` | evidence | ('H', 'E') | painting bins | float64 | True | `required` |
-| `edge_exposed` | `np.ndarray` | evidence | ('H', 'E') | painting bins | float64 | True | `required` |
-| `pair_explained` | `np.ndarray` | evidence | ('H', 'T') | painting bins | float64 | True | `required` |
-| `pair_exposed` | `np.ndarray` | evidence | ('H', 'T') | painting bins | float64 | True | `required` |
-| `total_bins` | `np.ndarray` | obs | ('H',) | painting bins | float64 | True | `required` |
-| `informative_markers` | `np.ndarray` | obs | ('H',) | 1 | int64 | True | `required` |
-| `junctions` | `np.ndarray` | evidence | ('H', 'N') | painting bins | float64 | True | `required` |
-| `callable_bins` | `np.ndarray` | evidence | ('H', 'N') | painting bins | float64 | True | `required` |
-| `transmission_log_likelihood` | `np.ndarray` | evidence | ('H', 'D') | nats | float64 | True | `required` |
-
-## pedigree.LowMaterialChromosomeScores
-
-Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
-
-Extends `ChromosomeScores`.
-
-| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
-|---|---|---|---|---|---|---|---|
-| `blocks` | `BlockScores` | state | () | 1 | BlockScores | True | `required` |
-| `form` | `str` | state | () | 1 | str | True | `'low_material'` |
+| `one_raw` | `np.ndarray` | evidence | ('P', 'R') | nats | float64 | True | `required` |
+| `zero` | `np.ndarray` | evidence | ('P', 'N') | nats | float64 | True | `required` |
+| `two` | `np.ndarray` | evidence | ('P', 'T') | nats | float64 | True | `required` |
+| `edge_matched` | `np.ndarray` | evidence | ('P', 'E') | painting bins | float64 | True | `required` |
+| `edge_exposed` | `np.ndarray` | evidence | ('P', 'E') | painting bins | float64 | True | `required` |
+| `pair_explained` | `np.ndarray` | evidence | ('P', 'T') | painting bins | float64 | True | `required` |
+| `pair_exposed` | `np.ndarray` | evidence | ('P', 'T') | painting bins | float64 | True | `required` |
+| `total_bins` | `np.ndarray` | obs | ('P',) | painting bins | float64 | True | `required` |
+| `informative_markers` | `np.ndarray` | obs | ('P',) | 1 | int64 | True | `required` |
+| `junctions` | `np.ndarray` | evidence | ('P', 'N') | painting bins | float64 | True | `required` |
+| `callable_bins` | `np.ndarray` | evidence | ('P', 'N') | painting bins | float64 | True | `required` |
+| `transmission_log_likelihood` | `np.ndarray` | evidence | ('P', 'D') | nats | float64 | True | `required` |
 
 ## pedigree.CompactM1
 
@@ -3410,7 +3393,7 @@ Source: [haplotype_reconstruction/contracts/refit.py](../../haplotype_reconstruc
 
 Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
 
-Full-sib families with aligned parent-slot/support and half-sib tables. Families are numbered by smallest member; half_sib and gains share one sorted row order. ``parents`` holds sequenced slot samples whose genotypes serve the family model as a parent's would. A slot sample may be a parent, child (the two directions tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. NaN slot support denotes a latent slot, and search_margin may be NaN when the alternate search was not measured. Canonicalisation is RL1 science.
+Full-sib families with aligned parent-slot/support and half-sib tables. Families are numbered by smallest member; half_sib and gains share one sorted row order. ``parents`` holds sequenced slot samples whose genotypes serve the family model as a parent's would. A slot sample may be a parent, child (the two directions tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. NaN slot support denotes a latent slot, and search_margin may be NaN when the alternate search was not measured. Canonicalisation is RL1 science. member_support / parent_support (FamilySupport, ParentSlot*Support): Morgan-weighted shares of the ``support_units`` pooled 1-Morgan units of the family sites' working map (DESIGN_417 D5).
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|

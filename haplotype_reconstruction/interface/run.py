@@ -148,15 +148,48 @@ def _existing_store(paths: RunPaths) -> CheckpointStore | None:
     return store
 
 
+def _configured_material(source: Any, maps: Any, contigs: tuple[str, ...]) -> tuple[float | None, str]:
+    """Configured working-map Morgans of the analysed contigs over their configured lengths (VCF header lengths,
+    or the simulation design's), and the rate source; None when a length is unknown."""
+    if source is None or maps is None:
+        return None, ""
+    inner = getattr(source, "inner", source)
+    lengths: dict[str, int] = {}
+    if getattr(inner, "kind", None) == "vcf":
+        lengths = dict(getattr(inner.header, "lengths", {}) or {})
+    else:
+        length = getattr(getattr(inner, "config", None), "contig_length", None)
+        if length is not None:
+            from ..core.errors import SettingsError
+
+            try:
+                lengths = {c: int(length(c)) for c in contigs}
+            except SettingsError:  # a design without lengths states no material; the check is advisory
+                lengths = {}
+    if not contigs or any(lengths.get(c) is None for c in contigs):
+        return None, ""
+    total = 0.0
+    for c in contigs:
+        genetic_map = maps.for_contig(c)
+        total += float(genetic_map.cumulative_morgans(float(lengths[c])) - genetic_map.cumulative_morgans(0.0))
+    mapped = any(maps.for_contig(c).has_map for c in contigs)
+    rate = f" ({'map file and ' if mapped else ''}{maps.default_rate_cm_per_mb:g} cM/Mb rate)"
+    return total, rate
+
+
 def _run_checks(
-    settings: Settings, parameters: StageConfigs, command: str, analysis: AnalysisContigs
+    settings: Settings, parameters: StageConfigs, command: str, analysis: AnalysisContigs,
+    source: Any = None, maps: Any = None,
 ) -> tuple[str, ...]:
-    """Delegate the configured-contig gate to the stage graph before creating outputs."""
+    """Delegate the configured-material check to the stage graph before creating outputs."""
     from ..stages.graph import run_checks
 
+    configured, rate = _configured_material(source, maps, analysis.included)
     return run_checks(
         analysis.included,
         parameters=parameters.pedigree,
+        configured_morgans=configured,
+        rate=rate,
         genome_wide=command in {"run", "pedigree"}
         and not settings.run.stop_after
         and not settings.execution.max_contigs,
@@ -201,7 +234,7 @@ def check_run(
         raise SettingsError("selected contigs must be unique members of the initialized contig list")
     analysis = AnalysisContigs(tuple(settings.input.contigs), tuple(settings.run.exclude_contigs))
     check_command = command if contigs is None or set(contigs) == set(settings.input.contigs) else "reconstruct"
-    for warning in _run_checks(settings, parameters, check_command, analysis):
+    for warning in _run_checks(settings, parameters, check_command, analysis, source, maps):
         print(f"WARNING: {warning}", flush=True)
     if command not in {"init", "run"} and manifest is None:
         raise SettingsError(f"{paths.output}: run has not been initialized; use haplotypes init")

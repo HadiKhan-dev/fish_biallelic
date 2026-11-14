@@ -170,20 +170,29 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 Cost and scope: O(N M) screen workspace and O(N²) proposal-cache storage; exact fallback preserves decisions.
 
 <a id="rl16"></a>
-## rl16 Support units on the measured map
+## rl16 Support units on the working map
 
-Divide measured map length into support units and map cuts to the first site at or above each cut. Drop empty units from the denominator. Without positive measured length, use one nonempty unit; fallback genetic distance is not invented measured support.
+Pool the family sites of every contig into one axis in configured contig order: each contig's sites at their
+working-map coordinates (the configured map, or its rate where it applies), its first family site at the running
+offset, with no gap between contigs. Cut the axis into consecutive units of `support_unit_morgans`; a final piece
+shorter than `support_tail_morgans` joins the unit before it; a site exactly at a cut belongs to the unit on its
+right; empty units are omitted. A unit may straddle contigs. Each unit is weighted by its working Morgans: the
+coordinate of its last site minus that of the previous unit's last site, so a gap without family sites is carried by
+the next unit and the weights sum to the axis length. An axis of no length is one unit of weight 1. Unit composition
+depends on the configured contig order, a deterministic convention; shifting the grid by half a unit moves
+individual supports but no measured guard decision.
 
-Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py).
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py),
+[science/shared/material.py](../../haplotype_reconstruction/science/shared/material.py).
 
-Parameters by name: `support_unit_morgans`, `rate_is_measured`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `support_unit_morgans`, `support_tail_morgans`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(M_c log M_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(M log M). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="rl17"></a>
 ## rl17 Member support and parent-slot support
 
-For each nonempty support unit, compare a member’s stay likelihood with other families/new singleton and compare each named parent slot with its latent replacement. Count strict supported gains and divide by nonempty units. Latent-slot support is missing. A slot sample is a sequenced sample whose genotypes serve the family model as a parent's would. It may be a parent, a child (for a one-member family the two directions tie), a sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. These support comparisons have their own target exclusions, distinct from search-cycle rules.
+For each nonempty support unit, compare a member’s stay likelihood with other families/new singleton and compare each named parent slot with its latent replacement. Weight each strict supported gain by its unit's working Morgans and divide by the total: member and parent-slot support (`FamilySupport`, `ParentSlot*Support`) are Morgan-weighted shares. Latent-slot support is missing. A slot sample is a sequenced sample whose genotypes serve the family model as a parent's would. It may be a parent, a child (for a one-member family the two directions tie), a sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. These support comparisons have their own target exclusions, distinct from search-cycle rules.
 
 Implementation: [science/relatedness/support.py](../../haplotype_reconstruction/science/relatedness/support.py).
 

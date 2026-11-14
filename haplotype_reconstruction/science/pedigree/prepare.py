@@ -21,7 +21,7 @@ from numba import prange
 from haplotype_reconstruction.science.painting.parameters import PaintingParameters
 
 from ...contracts.evidence import ContigEvidence
-from ...contracts.genetic_map import ChromosomeGeneticMap, measured_coordinates
+from ...contracts.genetic_map import ChromosomeGeneticMap
 from ...contracts.likelihoods import gather_likelihoods, likelihood_window_sites
 from ...contracts.painting import ComponentPainting, Painting, TrackStatus
 from ...contracts.pedigree import HammingTransition, PreparedChromosome, PreparedComponent, SourceFactors
@@ -191,7 +191,6 @@ def _prepare_component(
     chromosome_map: ChromosomeGeneticMap,
     config: PreparationParameters,
     claim_threads: Callable[[], None],
-    rate_is_measured: bool = False,
     *,
     contig: str = "unknown",
 ) -> PreparedComponent | None:
@@ -243,9 +242,6 @@ def _prepare_component(
         factors=factors,
         robustness_epsilon=float(painting_config.robustness_epsilon),
         selector_switch_probability=np.ascontiguousarray(theta),
-        measured_morgans=np.ascontiguousarray(
-            np.diff(measured_coordinates(chromosome_map, bins.centers, rate_is_measured))
-        ),
         genotype_likelihoods=gl,
         observed=observed,
         state_classes=np.ascontiguousarray(np.transpose(state_classes, (0, 2, 1))),
@@ -282,11 +278,12 @@ def prepare_chromosome(
     chromosome_map: ChromosomeGeneticMap,
     config: PreparationParameters,
     claim_threads: Callable[[], None] = lambda: None,
-    rate_is_measured: bool = False,
 ) -> PreparedChromosome:
     """Prepared components of one contig from its painting (ChromosomePainting) and evidence
-    (ContigEvidence, all samples), with the chromosome-wide information exponents. ``rate_is_measured``: see
-    measured_coordinates."""
+    (ContigEvidence, all samples), with the chromosome-wide information exponents, and the contig's configured
+    material (configured_morgans: m(L) - m(0) of ChromosomeGeneticMap.cumulative_morgans, L its last evidence
+    position: the configured map and its fallback-rate tails, fixed before any genotype is read)."""
+    configured = configured_morgans(chromosome_map, evidence.positions)
     prepared = []
     for index, painted in enumerate(painting.components):
         if painted.states.n_sites == 0 or painted.bins.n_bins == 0:
@@ -300,13 +297,12 @@ def prepare_chromosome(
             chromosome_map,
             config,
             claim_threads,
-            rate_is_measured,
             contig=painting.contig,
         )
         if component is not None:
             prepared.append(component)
     if not prepared:
-        return PreparedChromosome(painting.contig, len(painting.components), (), OMITTED)
+        return PreparedChromosome(painting.contig, len(painting.components), (), OMITTED, configured)
     claim_threads()
     exponent = _information_exponents(prepared, config, claim_threads)
     components = []
@@ -318,4 +314,15 @@ def prepare_chromosome(
             )
         )
         offset += component.n_bins
-    return PreparedChromosome(painting.contig, len(painting.components), tuple(components))
+    return PreparedChromosome(painting.contig, len(painting.components), tuple(components), None, configured)
+
+
+def configured_morgans(chromosome_map: ChromosomeGeneticMap, positions: np.ndarray) -> float:
+    """Working-map Morgans of [0, L] for a contig whose last evidence position is L (0 without evidence):
+    m(L) - m(0), m = ChromosomeGeneticMap.cumulative_morgans (DESIGN_417 rev 4, S10). The VCF header length is
+    not recorded in any checkpoint the pedigree stage reads, so L is always the last evidence position (the
+    rule's fallback); it depends on the site set, not on any dyad's genotypes."""
+    if not len(positions):
+        return 0.0
+    last = float(np.max(positions))
+    return float(chromosome_map.cumulative_morgans(last) - chromosome_map.cumulative_morgans(0.0))
