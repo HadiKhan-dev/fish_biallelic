@@ -245,7 +245,8 @@ def round_expansion(
     # The round's stragglers start on a minimum lane team, one thread per 64-sample lane block (engine
     # minimum_teams); a cohort within one lane block has no team. A teamed block is a chunk of its own, never
     # grouped, so its team is its own.
-    teams = minimum_teams(costs, [-(-observed_rows // LANE_WIDTH)] * len(pending), threads)
+    lane_team = -(-observed_rows // LANE_WIDTH)
+    teams = minimum_teams(costs, [lane_team] * len(pending), threads)
     chunks: list[list[BlockTask]] = []
     weights: list[float] = []
     chunk_teams: list[int] = []
@@ -283,15 +284,16 @@ def round_expansion(
                 _run_blocks,
                 args=(tuple(chunk), settings, evidence, scope),
                 kwargs=dict(reverse=reverse, census_sink=census_sink, memo_scope=memo_scope, retain_memos=retain_memos),
-                # Small-cohort chunks may grow within their useful-width cap.
-                # At larger sample counts only singleton chunks may grow;
-                # grouped chunks share the node through one CPU apiece. A
-                # straggler's chunk starts on its minimum team.
+                # Small-cohort chunks may grow within their useful-width cap. At larger sample counts singleton chunks
+                # may grow to the allocation and grouped chunks to their lane team, one thread per 64-sample lane
+                # block (each block re-reads its team). A straggler's chunk starts on its minimum team; any chunk that
+                # runs long beside waiting peers widens to its lane team at runtime (engine.cpu runtime widening).
                 resources=ResourceRequest(
                     team,
-                    max(team, block_threads if small_cohort or len(chunk) == 1 else 1),
+                    max(team, block_threads if small_cohort or len(chunk) == 1 else min(lane_team, block_threads)),
                     max(block_task_bytes(b, observed_rows) for b in chunk),
                     cost=weight,
+                    width=1 if small_cohort else lane_team,
                 ),
                 outputs=outputs,
                 thread_argument="threads",

@@ -38,7 +38,7 @@ from .compute import paint_chromosome
 from ...store.container import CheckpointFile
 from ...store.protocol import claim, mark_complete, publish, read_items, resume
 from ...store.slices import WindowArray
-from ..evidence.records import SUPPORTED_SCHEMAS
+from ..evidence.records import SCHEMA as EVIDENCE_SCHEMA
 from ..evidence.records import open_arrays as evidence_windows
 from ..framework import RecordKey, ResourceRequest, Task
 from . import records
@@ -66,7 +66,7 @@ def read_evidence(file: CheckpointFile, expected: str) -> Iterator[WindowEvidenc
     if found is None:
         raise InvariantError("painting requires the evidence record")
     payload = found.payload
-    require_schema(payload, SUPPORTED_SCHEMAS)
+    require_schema(payload, EVIDENCE_SCHEMA)
     with evidence_windows(file, ("likelihoods", "observed"), expected_identity=expected) as arrays:
         if arrays is None:
             raise InvariantError("evidence disappeared before painting windows opened")

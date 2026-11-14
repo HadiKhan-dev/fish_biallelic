@@ -85,6 +85,8 @@ class ResourceRequest:
     working_set_bytes: int = 0
     scratch_bytes: int = 0
     cost: float = 0.0  # Estimated work for longest-first dispatch; never a scientific budget.
+    # Useful team width for runtime straggler widening (engine.cpu PoolSeat.runtime_team); 1: never widened.
+    width: int = 1
 
 
 @dataclass(frozen=True)
@@ -163,7 +165,7 @@ def dependency_order(tasks: Sequence[Task]) -> tuple[TaskKey, ...]:
     writers: dict[RecordKey, TaskKey] = {}
     for task in tasks:
         request = task.resources
-        if request.min_cores < 1 or request.max_cores < request.min_cores:
+        if request.min_cores < 1 or request.max_cores < request.min_cores or request.width < 1:
             raise SettingsError(f"{task.key}: invalid CPU range {request.min_cores}..{request.max_cores}")
         if request.cost < 0:
             raise SettingsError(f"{task.key}: task cost must be nonnegative")

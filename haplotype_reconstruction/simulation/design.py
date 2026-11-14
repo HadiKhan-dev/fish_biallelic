@@ -282,19 +282,19 @@ class SiteSpec:
 
 @dataclass(frozen=True)
 class SimulationConfig:
-    """A known-pedigree simulation from founder templates.
+    """A known-pedigree simulation from founder templates or a coalescent source.
 
-    templates: directory of ``<contig>.npz`` founder templates (``positions`` int64[L],
-    ``allele_probabilities`` float[H, L, 2]: H founder haplotypes, consecutive pairs form the
-    founders). contigs: simulated contigs, in this order (the order is part of the random
-    streams). seed: None = drawn at random once and bound in the store. cohorts: cohort sizes
+    source: the founder source; ``source.file`` (kind "file") is a directory of ``<contig>.npz``
+    founder templates (``positions`` int64[L], ``alleles`` int8[H, L] or ``allele_probabilities``
+    float[H, L, 2]: H founder haplotypes, consecutive pairs form the founders). contigs: simulated
+    contigs, in this order (the order is part of the random streams). seed: None = drawn at random
+    once and bound in the store. cohorts: cohort sizes
     (cohort 1 descends from the founders). depth: read depth at an unimpaired site; site loss reduces the mean by (1 - site_loss_fraction / 2) * (1 - site_loss_fine_fraction / 2).
     generating_rate_cm_per_mb /
     generating_map: the generating genetic map (map file contigs; others the rate).
     mutation_rate_per_bp: per-site mutation probability per meiosis (internal constant).
     """
 
-    templates: Path | None = None
     contigs: tuple[str, ...] = ()
     seed: int | None = 400
     cohorts: tuple[int, ...] = (20, 100, 200)
@@ -313,13 +313,8 @@ class SimulationConfig:
     artefacts: ArtefactModel = field(default_factory=ArtefactModel)
 
     def __post_init__(self):
-        if self.templates is not None:
-            object.__setattr__(self, "templates", Path(self.templates))
         if self.source is None:
-            object.__setattr__(self, "source", SourceSpec(file=self.templates))
-        elif self.templates is not None and (self.source.kind != "file" or self.source.file != self.templates):
-            raise SettingsError("templates and source.file disagree")
-        object.__setattr__(self, "templates", self.source.file)
+            object.__setattr__(self, "source", SourceSpec())
         object.__setattr__(self, "contigs", tuple(map(str, self.contigs)))
         object.__setattr__(self, "cohorts", tuple(int(size) for size in self.cohorts))
         if self.generating_map is not None:

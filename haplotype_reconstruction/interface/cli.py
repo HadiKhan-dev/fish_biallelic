@@ -27,10 +27,6 @@ def _add_run_options(command):
     )
     command.add_argument("--preset", choices=("tromau", "generic"), help="Built-in base configuration.")
     command.add_argument("--vcf", help="Input VCF/BCF with FORMAT/AD ([input] vcf).")
-    command.add_argument(
-        "--templates",
-        help='Legacy alias for [simulation.source] kind = "file", file = DIR; sets simulation input.',
-    )
     command.add_argument("--output", help="Run directory ([run] output).")
     command.add_argument("--checkpoints", help="Checkpoint directory ([run] checkpoints).")
     command.add_argument("--cores", type=int, help="CPU ceiling ([execution] cores; default: affinity).")
@@ -125,9 +121,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluate.add_argument("--truth", type=Path, help="Bound observation-package truth directory.")
     evaluate.add_argument("--output", type=Path, help="Evaluation destination with --truth.")
-    evaluate.add_argument("--release-tree", type=Path, help="Source root of the run's release, with --truth.")
-    evaluate.add_argument("--release-python", type=Path, help="Interpreter for the release reader, with --truth.")
-    evaluate.add_argument("--timeout", type=float, default=600.0, help="Release-reader timeout in seconds.")
 
     observations = commands.add_parser("observations", help="Publish simulated BCF observations and bound truth.")
     observations.add_argument("config", type=Path, metavar="CONFIG")
@@ -186,10 +179,7 @@ def run_options(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
         if value is not None:
             options.setdefault(section, {})[key] = value
 
-    if args.templates is not None:
-        put("input", "kind", "simulation")
-        put("simulation", "templates", args.templates)
-    elif args.vcf is not None:
+    if args.vcf is not None:
         put("input", "kind", "vcf")
     put("input", "vcf", args.vcf)
     put("input", "contigs", args.contigs)

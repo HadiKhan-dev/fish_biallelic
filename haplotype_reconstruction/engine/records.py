@@ -179,7 +179,7 @@ def record_tasks(record: Path, data: dict | None = None) -> list[dict]:
     """
     data = json.loads(record.read_text()) if data is None else data
     require_current_release(data, record)
-    if data.get("schema") != "run-record-v5" or "tasks" in data:
+    if data.get("schema") != "run-record-v5":
         raise unsupported_release(record, data.get("release"))
     try:
         lines = task_log_path(record).read_text().splitlines()
@@ -221,7 +221,7 @@ def _add_task_summary(summaries: dict, entry: dict) -> None:
 def task_summaries(data: dict) -> dict[str, dict]:
     """Read this release's bounded per-stage aggregates without opening task detail."""
     require_current_release(data, "invocation record")
-    if data.get("schema") != "run-record-v5" or "tasks" in data:
+    if data.get("schema") != "run-record-v5":
         raise unsupported_release("invocation record", data.get("release"))
     return data["task_summaries"]
 

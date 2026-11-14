@@ -269,7 +269,7 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 Cost and scope: the final product stores O(N L) calls and O(E M) chain values. The partial container additionally retains both solved model states, every release batch and the assembled component until final readback. Serialization and durability add stage work; the scientific iteration and candidate limits remain the named parameters above.
 
 <a id="fp24"></a>
-## fp24 Diagnostics, summary and legacy fields (coverage, zero frames)
+## fp24 Diagnostics and summary fields (coverage; no always-zero frames)
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 

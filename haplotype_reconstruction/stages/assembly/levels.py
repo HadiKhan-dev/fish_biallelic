@@ -135,7 +135,9 @@ def expand_level(
                 key,
                 execute_join,
                 args=(item, evidence.scoring if scoring_ref is None else scoring_ref, records, identities[item.index]),
-                resources=ResourceRequest(team, max(team, max_cores), batch_memory_bytes(item), cost=work),
+                resources=ResourceRequest(
+                    team, max(team, max_cores), batch_memory_bytes(item), cost=work, width=batch_team_width(item)
+                ),
                 thread_argument="cores",
             )
         )

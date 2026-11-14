@@ -23,7 +23,8 @@ from ...core.digest import json_digest
 from ...core.errors import InputError
 from ...store.protocol import read_items
 from ...store.store import CheckpointStore
-from ..evidence.records import SUPPORTED_SCHEMAS, load_likelihoods, load_observed
+from ..evidence.records import SCHEMA as EVIDENCE_SCHEMA
+from ..evidence.records import load_likelihoods, load_observed
 from ..evidence.records import result_reader as evidence_reader
 
 __all__ = ["EvidenceInput", "EvidenceArrays", "evidence_pass", "upstream_identities", "bound_upstream"]
@@ -74,7 +75,7 @@ def _read(store: CheckpointStore, item: EvidenceInput, sample_ids: tuple[str, ..
     record = read_items(file, _EVIDENCE_KEY, item.evidence_identity, ("schema", "sample_ids", "positions"))
     if record is None:
         raise InputError(f"relatedness needs evidence for {item.contig}")
-    require_schema(record.payload, SUPPORTED_SCHEMAS)
+    require_schema(record.payload, EVIDENCE_SCHEMA)
     names = tuple(record.payload["sample_ids"])
     if names != sample_ids:
         raise InputError(f"relatedness sample axis differs on {item.contig}")

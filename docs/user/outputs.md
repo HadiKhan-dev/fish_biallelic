@@ -188,6 +188,7 @@ base column, position, meaning and unit, including all 17 pedigree tables.
 | `painting/sample_switches.csv` | Input sample order |
 | `painting/sample_segments.csv` | Input sample, component, track, maximal run of one status/label/member set |
 | `painting/label_continuity.csv`, `painting_model.csv` | Accepted relabellings in recorded order; model rows by component |
+| `painting/pair_sharing.csv`, `pair_sharing_chromosomes.csv` | Written only with `[painting] pair_sharing`; sample pairs in input order (the first sample is the earlier one); the chromosome table repeats the pairs for each contig in configuration order |
 | `relatedness/families.csv` | Input sample order; each member repeats its family's parent slots and support |
 | `relatedness/half_sib_links.csv` | Recorded sorted family-pair order |
 | `pedigree/*.csv` | Stable input order where a `sample` column exists; otherwise recorded order |
@@ -218,6 +219,13 @@ Painting segment status is one of `INELIGIBLE_NO_EVIDENCE`,
 `LOW_POSTERIOR_ABSTENTION`, `SINGLETON_NAMED`, `POOLED_EQUIVALENCE`, `BACKGROUND`,
 `UNANCHORED_TRAJECTORY`, `LOCAL_ALLELE_EQUIVALENCE`, `SWITCH_INTERVAL`. `label` is
 populated only for a singleton named run; `rows` joins row indices with semicolons.
+Pair sharing ([PR20](../methods/painting.md#pr20)) counts the founder rows two samples' tracks share in bins
+where all four tracks are `SINGLETON_NAMED`. `ibd0`, `ibd1` and `ibd2` are shares of that jointly named
+length (`named_morgans`, working-map Morgans) and are empty when it is zero. `coverage`, `candidates`,
+`unidentified` and `abstained` split the painted length by the pair's worst track (named; candidate rows;
+background or unanchored; abstention) and sum to 1. The shares are relative to the panel's founder rows:
+founders that assembly could not separate count as one row.
+
 Switch ratios use the median over samples painted in at least one component,
 without generation groups; a nonpositive median gives an empty ratio. Model
 `error_run_bins_keeping_label` is reciprocal error-exit probability, empty at zero.
@@ -339,8 +347,7 @@ keys; they are documents rather than table cells.
 ### Relatedness JSON
 
 The stage publishes families, their parent slots and half-sib links; it reports no pairwise
-identity-by-descent shares ([why](../methods/relatedness.md#pairwise-identity-by-descent)), and report
-publication removes a `relatedness/pairs.csv` left in the output directory. Family IDs are canonical dense
+identity-by-descent shares ([why](../methods/relatedness.md#pairwise-identity-by-descent)). Family IDs are canonical dense
 ranks ordered by the family's smallest canonical member index. They are not that minimum index itself. Empty parent-slot cells denote latent
 slots. `relatedness/summary.json` contains exactly these keys, in order.
 
@@ -814,7 +821,7 @@ no inference step reads them. `simulation/truth_pedigree.csv` is the public summ
 ## D9: founder templates
 
 `CONTIG.npz` contains `positions` int64[L], strictly increasing positions, and
-`alleles` int8[H,L] in REF/ALT coding or legacy `allele_probabilities`
+`alleles` int8[H,L] in REF/ALT coding or `allele_probabilities`
 float64[H,L,2]. Unknown alleles (-1) require the explicit draw policy. Consecutive
 haplotype rows form diploid founders, so H is even. Templates supply founder
 material to simulations; they do not contain inferred family labels. A coalescent configuration generates its panel internally and stores stable source IDs with compact rows.
@@ -827,7 +834,7 @@ material to simulations; they do not contain inferred family labels. A coalescen
 |---|---|
 | `observations.bcf` | Indexed multi-contig REF/ALT AD observations, including zero-depth and monomorphic sites |
 | `observations.bcf.csi` | BCF coordinate index |
-| `inference.toml` | Explicit inference settings accepted by the previous release, with `run.stop_after` empty |
+| `inference.toml` | Every setting outside `[simulation]`, explicit, for a VCF run of the package, with `run.stop_after` empty |
 | `truth/manifest.json` | Generator version, truth schema, stock records, sample/site axes and content bindings |
 | `truth/contig_INDEX.npz` | Pickle-free truth record; INDEX is a six-digit contig ordinal starting at 000000 |
 
@@ -853,6 +860,11 @@ Absent optional products return the documented optional result; incompatible
 schema or derivation is an error. `stage_panels` supplies original component/row
 axes for evaluation, including founder refit; the export release is a distinct
 view with carrier/ambiguity withholding and segment-local row names.
+`haplotype_reconstruction.results.pair_sharing.pair_sharing(results, genetic_maps)` computes the
+pair-sharing product (PR20) from the published paintings for one contig or the included contigs; the
+caller supplies the run's configured maps, whose identities must equal the bound ones, and lengths are measured on
+the run's working map (with an adopted `infer_rate` estimate, [rl20](../methods/relatedness.md#rl20), contigs
+without a map file use it).
 
 
 Collection-file schemas are generated alongside the parent columns:

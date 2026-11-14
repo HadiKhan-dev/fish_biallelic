@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from ...engine.graph import ResourceRequest, ResultRef, Task, TaskKey
 from .painting import contig_painting, write_painting
+from .pair_sharing import contig_pair_sharing, write_pair_sharing
 from .pedigree import write_pedigree
 from .quality import contig_quality, write_quality
 from .recombination import contig_recombination, write_recombination
@@ -20,6 +21,7 @@ from .tables import write_family_phase, write_founder_refit, write_truth_pedigre
 from .ties import contig_ties, write_ties
 
 if TYPE_CHECKING:
+    from ...contracts.genetic_map import GeneticMapSet
     from ...results.reader import Results
 
 __all__ = ["make_task", "run_tasks"]
@@ -76,11 +78,14 @@ def run_tasks(
     reverse_conventions: bool = False,
     recombination_bytes: int = 0,
     recombination_seconds: Mapping[str, float] | None = None,
+    pair_sharing: GeneticMapSet | None = None,
 ) -> tuple[Task, ...]:
     """Declare collectors and gathers without probing products or traversing the store.
 
     Quality, painting and recombination dependencies follow results.contigs. Other
     keys are truth, relatedness, pedigree, refit, phase, complete and optional science.
+    ``pair_sharing`` (the run's configured maps, given only when the output is selected) adds the pair-sharing
+    collectors, one per painted contig, and their writer; they read paintings and feed nothing back.
     """
     tasks: list[Task] = []
     writer: Callable[..., list[Path]]
@@ -112,6 +117,27 @@ def run_tasks(
                 (output, tuple(ResultRef(task.key) for task in readers)),
                 depends_on=tuple(task.key for task in readers),
                 working_set_bytes=recombination_bytes if family == "recombination" else 0,
+            )
+        )
+    if pair_sharing is not None and "painting" in dependencies:
+        readers = tuple(
+            make_task(
+                "pair_sharing",
+                contig_pair_sharing,
+                (output, results, contig),
+                contig=contig,
+                depends_on=(dependency,),
+                kwargs={"genetic_maps": pair_sharing},
+            )
+            for contig, dependency in zip(results.contigs, dependencies["painting"], strict=True)
+        )
+        tasks.extend(readers)
+        tasks.append(
+            make_task(
+                "pair_sharing",
+                write_pair_sharing,
+                (output, results, tuple(ResultRef(task.key) for task in readers)),
+                depends_on=tuple(task.key for task in readers),
             )
         )
     for name, writer in (

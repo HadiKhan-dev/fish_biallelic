@@ -17,6 +17,19 @@ _LOG = logging.getLogger(__name__)
 
 
 CPU_POLL_SECONDS = 0.2
+# Runtime straggler widening (PoolSeat.runtime_team). A running unit that declares a useful team width is a runtime
+# straggler once it has run RUNTIME_RATIO times the upper-median wall of its round's finished widenable units (at
+# least RUNTIME_MIN_FINISHED of them, the last RUNTIME_SAMPLE kept per pool; at least RUNTIME_MIN_SECONDS, so short
+# units never churn) while peers wait for CPUs: from then on its minimum is a team of its width (capped as minimum
+# teams are), and CPUs that free go to it before a waiting task starts. Runtime teams hold or reserve at most
+# RUNTIME_CPU_SHARE of the pool's CPUs (the first team always fits: it is at most half the pool), which bounds what
+# their serial sections can idle. Scheduling only: thread counts never decide a result.
+RUNTIME_RATIO = 3.0  # above declared costs' STRAGGLER_RATIO (engine.lanes): a unit near 2x its peers is usually ending
+RUNTIME_MIN_FINISHED = 8
+RUNTIME_SAMPLE = 64
+RUNTIME_MIN_SECONDS = 60.0
+RUNTIME_CHECK_SECONDS = 1.0  # a running unit re-tests its runtime team at most this often (seconds)
+RUNTIME_CPU_SHARE = 0.25
 
 
 def _numba():
@@ -156,6 +169,15 @@ class PoolCounters:
         # Begun tasks that have not yet taken their first owning share (under admission): until they have, their
         # fair entitlements are unclaimed, not free, so no peer borrows them (PoolSeat.share).
         self.unshared = value("i", 0, lock=False)
+        # Runtime straggler widening (under admission): the current round's label, its finished widenable units and
+        # their last RUNTIME_SAMPLE walls, the CPUs reserved for runtime teams but not yet claimed (no waiting task
+        # starts on them), and the CPUs runtime teams hold or reserve.
+        self.pending = value("i", 0, lock=False)  # ready tasks of the lane's owner not yet started (coordinator)
+        self.round_label = value("i", 0, lock=False)
+        self.finished_units = value("i", 0, lock=False)
+        self.finished_walls = context.Array("d", RUNTIME_SAMPLE, lock=False)
+        self.reserved = value("i", 0, lock=False)
+        self.runtime_cpus = value("i", 0, lock=False)
 
     @staticmethod
     def _store(counter, number):
@@ -238,18 +260,28 @@ class PoolSeat:
         self.last_generation: int | None = None
         self.last_applied: int | None = None
         self.last_logged: int | None = None
+        # Runtime widening state of the running task (runtime_team): its start, declared width and round label, its
+        # runtime team (0: none) and the CPUs it has reserved but not yet claimed.
+        self.started_at = 0.0
+        self.width = 1
+        self.label = 0
+        self.runtime = 0
+        self.reserved = 0
+        self.next_check = 0.0
 
-    def begin_task(self, minimum: int = 1, *, dispatched: bool = False) -> None:
+    def begin_task(self, minimum: int = 1, *, width: int = 1, label: int = 0, dispatched: bool = False) -> None:
         """Reserve one CPU before admission (waiting meanwhile counts as a contender, so peers above their fair
         share give back at their boundaries), then register the task with the start-up gate. ``dispatched``: the
-        graph coordinator counted this task as arriving when it sent it (dispatch_contender); it now waits instead."""
+        graph coordinator counted this task as arriving when it sent it (dispatch_contender); it now waits instead.
+        ``width``: the task's useful team width for runtime widening (1: never widened); ``label``: its round.
+        CPUs reserved for runtime teams are not free for a starting task."""
         c = self.counters
         with c.admission:
             if dispatched:
                 c.begun.value += 1  # from now on it counts as waiting, not as arriving
             c.waiting.value += 1
             try:
-                while read_counter(c.claimed) + minimum > read_counter(c.total):
+                while read_counter(c.claimed) + c.reserved.value + minimum > read_counter(c.total):
                     c.admission.wait()
             finally:
                 c.waiting.value -= 1
@@ -258,6 +290,9 @@ class PoolSeat:
             self.first_share = True
             c.unshared.value += 1
             self.task_thread = threading.get_ident()
+            self.started_at, self.width, self.label = time.monotonic(), max(1, int(width)), int(label)
+            self.runtime = self.reserved = 0
+            self.next_check = 0.0
             with c.active.get_lock():
                 c.active.get_obj().value += 1
         with c.started.get_lock():
@@ -275,11 +310,22 @@ class PoolSeat:
             with c.startup_ready.get_lock():
                 c.startup_ready.get_obj().value = 1
 
-    def end_task(self) -> None:
-        """Release this finished task's claims and wake workers waiting for admission."""
+    def end_task(self, *, sample: bool = True) -> None:
+        """Release this finished task's claims and wake workers waiting for admission. ``sample``: the task did its
+        work (not deferred to another invocation's claim), so a widenable task's wall joins its round's sample."""
         c = self.counters
         with c.admission:
             self._release_extra()
+            c.reserved.value -= self.reserved
+            c.runtime_cpus.value -= self.runtime
+            if sample and self.width >= 2 and self.task_thread is not None:
+                # A finished widenable unit's wall joins its round's sample; a new round label starts a new sample.
+                if c.round_label.value != self.label:
+                    c.round_label.value, c.finished_units.value = self.label, 0
+                c.finished_walls[c.finished_units.value % RUNTIME_SAMPLE] = time.monotonic() - self.started_at
+                c.finished_units.value += 1
+            self.reserved = self.runtime = 0
+            self.width = 1
             c.claimed.get_obj().value -= self.claimed
             c.short.value -= self.short
             if self.first_share:
@@ -299,6 +345,60 @@ class PoolSeat:
     def owns_team(self) -> bool:
         """Whether the calling thread owns this task's claim; nested work publishes explicit holds."""
         return self.task_thread == threading.get_ident()
+
+    def runtime_team(self, minimum: int) -> int:
+        """The running task's runtime team (0: none), decided at its boundaries (owning thread).
+
+        A task with a useful width of two or more becomes a runtime straggler once peers wait for CPUs and it has run
+        RUNTIME_RATIO times the upper-median wall of the RUNTIME_SAMPLE latest finished widenable units of its round
+        (at least RUNTIME_MIN_FINISHED of them, and at least RUNTIME_MIN_SECONDS). Its team is its width, capped as
+        minimum teams are (one contig lane's CPUs, half the pool), while runtime teams stay within RUNTIME_CPU_SHARE of
+        the pool. The team holds until the task ends; widen() fills it as CPUs free."""
+        if self.runtime or self.width < 2 or not self.claimed:
+            return self.runtime
+        now = time.monotonic()
+        elapsed = now - self.started_at
+        if elapsed < RUNTIME_MIN_SECONDS or now < self.next_check:
+            return 0
+        self.next_check = now + RUNTIME_CHECK_SECONDS
+        from .lanes import CONTIG_LANE_CORES  # lanes imports this module: resolved at call time
+
+        c = self.counters
+        with c.admission:
+            total = self._total()
+            team = min(self.width, CONTIG_LANE_CORES, total // 2)
+            if team <= max(self.claimed, int(minimum)) or not (c.waiting.value or c.arriving() or c.pending.value):
+                return 0
+            count = min(c.finished_units.value, RUNTIME_SAMPLE) if c.round_label.value == self.label else 0
+            if count < RUNTIME_MIN_FINISHED:
+                return 0
+            walls = sorted(c.finished_walls[:count])
+            if elapsed < RUNTIME_RATIO * walls[count // 2]:
+                return 0
+            if c.runtime_cpus.value and c.runtime_cpus.value + team > int(RUNTIME_CPU_SHARE * total):
+                return 0  # the first runtime team always fits (at most half the pool)
+            c.runtime_cpus.value += team
+            self.runtime = team
+        _LOG.debug(f"[threads pid={os.getpid()}] runtime straggler after {elapsed:.0f} s: team {team}")
+        return team
+
+    def widen(self, target: int) -> int:
+        """Grow the running task's claim toward its runtime team ``target`` from free CPUs (none that another runtime
+        team reserved), and reserve the rest so no waiting task starts on CPUs as they free; return the claim."""
+        if self.claimed >= target and not self.reserved:
+            return self.claimed
+        c = self.counters
+        with c.admission:
+            free = read_counter(c.total) - read_counter(c.claimed) - (c.reserved.value - self.reserved)
+            take = max(0, min(free, target - self.claimed))
+            if take:
+                c.claimed.get_obj().value += take
+                self.claimed += take
+                self.peak = max(self.peak, self.claimed)
+            want = max(0, target - self.claimed)
+            c.reserved.value += want - self.reserved
+            self.reserved = want
+            return self.claimed
 
     def _claim_extra(self, remainder: int) -> None:
         if self.has_extra:
@@ -363,7 +463,8 @@ class PoolSeat:
             if not give_back:
                 target = max(target, self.claimed)
             others = read_counter(c.claimed) - self.claimed
-            available = read_counter(c.total) - others
+            # CPUs reserved for another task's runtime team are not available (widen).
+            available = read_counter(c.total) - others - (c.reserved.value - self.reserved)
             if (
                 give_back
                 and read_counter(c.startup_ready)
@@ -747,7 +848,7 @@ def idle_lane_cpus() -> int:
     counters = seat.counters
     if counters.waiting.value:
         return 0
-    return max(0, read_counter(counters.total) - read_counter(counters.claimed))
+    return max(0, read_counter(counters.total) - read_counter(counters.claimed) - counters.reserved.value)
 
 
 @contextmanager
@@ -1001,10 +1102,19 @@ class TaskBudget(CpuBudget):
     def claim(self, maximum: int | None = None, *, hold: int = 0) -> int:
         ceiling = self.maximum if maximum is None else min(self.maximum, max(1, maximum))
         floor = min(self.minimum, ceiling)
+        # A runtime straggler's team (PoolSeat.runtime_team) is decided and filled only at the owning thread's own
+        # boundaries; like the declared minimum it then stays claimed through give-backs.
+        seat = pool_seat() if isinstance(self.budget, PoolShareBudget) else None
+        runtime = 0
+        if seat is not None and getattr(_THREAD_BUDGET, "value", None) is self and seat.owns_team():
+            runtime = min(seat.runtime_team(self.minimum), self.maximum)
         # The declared minimum stays claimed through give-backs, as running children's CPUs do (hold): begin_task
         # reserved it, and a minimum returned at one boundary would have to be won back from peers at the next.
         # A phase capped below the minimum runs fewer threads but keeps the reservation.
-        team = capped_threads(self.budget, ceiling, hold=max(int(hold), min(self.minimum, self.maximum)))
+        team = capped_threads(self.budget, ceiling, hold=max(int(hold), min(self.minimum, self.maximum), runtime))
+        if runtime:
+            assert seat is not None
+            team = max(team, min(ceiling, seat.widen(runtime)))
         if isinstance(self.budget, PoolShareBudget) and team < floor:
             seat = pool_seat()
             assert seat is not None

@@ -41,7 +41,7 @@ def check_directory_release(directory: Path) -> None:
     for path in sorted((directory / "run_records").glob("*.json")):
         document = json.loads(path.read_text())
         require_current_release(document, path)
-        if document.get("schema") != "run-record-v5" or "tasks" in document:
+        if document.get("schema") != "run-record-v5":
             raise unsupported_release(path, document.get("release"))
     checkpoints = directory / "checkpoints"
     if checkpoints.is_dir():

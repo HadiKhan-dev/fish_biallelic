@@ -1029,15 +1029,19 @@ def _assemble_one_bin(parent_c, background, bg, fz, m_i, f_i, penalty, out_n, ou
     return total
 
 
-@kernel(overloads=overloads_for(__name__, "_background_value"), cache=True, nogil=True)
-def _background_value(p_last, m, floors, suffix_b, bins, penalty):
-    """Closed background value max(-pen, P_{t-1} - M, max_{l >= 1} (s_l - M + E_{l..t-1})).
+@kernel(overloads=overloads_for(__name__, "_background_at"), inline="always", nogil=True)
+def _background_at(p_last, m, floors, s, suffix, b, bins, penalty):
+    """Closed background value max(-pen, P_{t-1} - M, max_{l >= 1} (s_l - M + E_{l..t-1})) of sample s and background
+    state b, with floors[s, l] = s_l and suffix[s, b, l] = E_{l..t-1}. Inlined and read in place: it runs for every
+    sample and background state of a dominance test, and passing it the rows floors[s] and suffix[s, b] would form two
+    array views per call, each an atomic reference-count increment and decrement around O(b) work (several times the
+    arithmetic on some processors, e.g. Sapphire Rapids).
 
     O(b) time.
     """
     v = p_last - m
     for l in range(1, bins):
-        w = floors[l] - m + suffix_b[l]
+        w = floors[s, l] - m + suffix[s, b, l]
         if w > v:
             v = w
     if -penalty > v:
@@ -1096,8 +1100,8 @@ def _same_parent_bounds(
                 if floor0 > v0:
                     v0 = floor0
                 p_last = v0 + prefix[s, b, bins - 1]
-                v = _background_value(p_last, a, si[s], suffix[s, b], bins, penalty) - _background_value(
-                    p_last, b2, sj[s], suffix[s, b], bins, penalty
+                v = _background_at(p_last, a, si, s, suffix, b, bins, penalty) - _background_at(
+                    p_last, b2, sj, s, suffix, b, bins, penalty
                 )
                 if v > lb:
                     lb = v
@@ -1180,7 +1184,7 @@ def _cross_lower_bound(m_i, f_i, t_i, background, fz, probe, n_j, t_j, penalty, 
                 x = lo
             v = (x - m) - n_j[s, z]
         else:
-            v = _background_value(background[s, z], m, s_i[s], suffix[s, b], bins, penalty) - n_j[s, z]
+            v = _background_at(background[s, z], m, s_i, s, suffix, b, bins, penalty) - n_j[s, z]
         if v > best:
             best = v
         d += best
@@ -1265,7 +1269,7 @@ def _dominance_multi_bin(m_i, f_i, s_i, t_i, p_last, suffix, fz, bg, n_j, t_j, t
                 best = v
         for b in range(len(bg)):
             z = bg[b]
-            v = _background_value(p_last[s, z], m, s_i[s], suffix[s, b], bins, penalty) - n_j[s, z]
+            v = _background_at(p_last[s, z], m, s_i, s, suffix, b, bins, penalty) - n_j[s, z]
             if v > best:
                 best = v
         d += best
@@ -3151,7 +3155,7 @@ class WindowSolver:
         return tables + frontier + coarse + search
 
     def _template(
-        self, emissions, bins, cols, sizes, start, end, focals=None, convention=False, team=None, stage1=None
+        self, emissions, bins, cols, sizes, start, end, focals=None, convention=False, team=None, stage1=None, split=1
     ):
         """Every (listed) founder's problem of one window in one nogil call (bins: the largest
         unit's bins). Returns [(focal, unit choices or None, diagnostic)].
@@ -3161,7 +3165,9 @@ class WindowSolver:
         each with its own account, and merge_focal_chunks merges them into the one-call result; when the merged
         account shows the one-call account exhausted, the template is solved in one call, which gives its
         exhaustion receipt. stage1: this window problem's convention-free stage (WindowSolver.stage1, all focals),
-        or None; it is then finished in this convention (solve_template_stage2: the same results and account)."""
+        or None; it is then finished in this convention (solve_template_stage2: the same results and account).
+        split: the chunks the caller's map wants this template in (SweepEngine.proposals: a template that alone would
+        set the map's critical path), run on the team's map as its share grows; at most focal_chunks."""
         # The exact objective's backward messages end with a per-homologue transition
         # (up to 2c below the maximum, c map-derived), while the surrogate's bounds and dominance
         # assume a flank closed under its own flat switch (entries >= max - penalty). Close the end
@@ -3211,7 +3217,9 @@ class WindowSolver:
             chunks = 1
             if team is not None:
                 chunks = min(
-                    len(focals), int(team.threads()), focal_chunks(samples, width, bins, founders, len(focals))
+                    len(focals),
+                    max(int(team.threads()), int(split)),
+                    focal_chunks(samples, width, bins, founders, len(focals)),
                 )
             solution = None
             if chunks > 1:
@@ -3416,6 +3424,7 @@ class WindowSolver:
         team=None,
         stage1=None,
         completion=False,
+        split=1,
     ):
         """Proposals of every (listed) founder on blocks [a, c): [(kind, a, c, k, rows | None,
         diagnostic)]; team: the solve's CPU share or None (_template); completion: no work receipt is recorded
@@ -3425,7 +3434,7 @@ class WindowSolver:
         sizes = self.sizes[a:c]
         bins = max(self.arrays[b].shape[2] for b in range(a, c))
         solved = self._template(
-            emissions, bins, X[:, a:c].T, sizes, fwd[a], bwd[c], focals, convention, team, stage1=stage1
+            emissions, bins, X[:, a:c].T, sizes, fwd[a], bwd[c], focals, convention, team, stage1=stage1, split=split
         )
         if not completion:
             self.work.finish_bound(
@@ -3447,6 +3456,7 @@ class WindowSolver:
         stage1=None,
         focals=None,
         completion=False,
+        split=1,
     ):
         """Proposals of every founder over L1 spans [i, j). A span's alphabet: the distinct row
         tuples the founders use there and the L1 context paths, sorted lexicographically. The
@@ -3457,7 +3467,17 @@ class WindowSolver:
         emissions, cols, sizes, alphabets, a, c = self._coarse_problem(X, i, j)
         bins = max(sum(self.arrays[b].shape[2] for b in range(*groups[unit])) for unit in range(i, j))
         solved = self._template(
-            emissions, bins, cols, sizes, fwd[a], bwd[c], focals, convention=convention, team=team, stage1=stage1
+            emissions,
+            bins,
+            cols,
+            sizes,
+            fwd[a],
+            bwd[c],
+            focals,
+            convention=convention,
+            team=team,
+            stage1=stage1,
+            split=split,
         )
         if not completion:
             self.work.finish_bound(ordinal, solved, X, "coarse", groups[i:j], sizes, alphabets, bool(convention))
@@ -3484,6 +3504,7 @@ class WindowSolver:
         stage1=None,
         focals=None,
         completion=False,
+        split=1,
     ):
         """The proposals of template `index` for panel X with messages fwd, bwd (a pure function of
         X's rows in the window and the flank messages fwd[a], bwd[c], within its work account);
@@ -3506,6 +3527,7 @@ class WindowSolver:
                 team=team,
                 stage1=stage1,
                 completion=completion,
+                split=split,
             )
         return self.coarse_window(
             X,
@@ -3519,6 +3541,7 @@ class WindowSolver:
             stage1=stage1,
             focals=focals,
             completion=completion,
+            split=split,
         )
 
 

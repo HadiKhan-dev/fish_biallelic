@@ -22,7 +22,6 @@ These are algebraic factors, not measured operation counts or timings. See [cost
 | engine / [ENG-12](../methods/execution.md#eng-12) | Environment switches (hidden state) | ambient NUMBA_* code-generation inputs key the kernel cache but are not part of the numerical policy (environment reference lists them). |
 | engine / [ENG-28](../methods/execution.md#eng-28) | Kernel manifest and compile audit | compile manifest and audit decide no scientific value. |
 | engine / [ENG-08](../methods/execution.md#eng-08) (part) | Completion markers | Carried as workflow markers for external workflow tools, written after the cut checks its products; a marker never authorises reuse. |
-| engine / [ENG-09](../methods/execution.md#eng-09) (part) | Removed-section handling | Carried: removed metadata sections and the old preset are refused with a reason by the loader. |
 | engine / [ENG-18](../methods/execution.md#eng-18) (part) | Layout guard | Carried: the store rejects foreign or earlier checkpoint layouts before any publication. |
 | engine / [ENG-25](../methods/execution.md#eng-25) (part) | Byte-reservation interface | working-set estimates are diagnostics and admission follows measured memory pressure. |
 | evidence-core / [EC02](../methods/evidence.md#ec02) | Observation-source identity (VCF path, size, mtime_ns, header order; simulation content identity) | the consumed-source digest protects evidence reuse; the path/stat tuple only keys the digest cache. |
@@ -43,7 +42,7 @@ These are algebraic factors, not measured operation counts or timings. See [cost
 | pedigree-decision / [PD26](../methods/pedigree.md#pd26) | Relative-proxy contrasts | report-only contrasts; no parent, count or release decision reads them. |
 | pedigree-scoring / [PS13](../methods/pedigree.md#ps13) | Robust screen utilities and search diagnostics | screen utilities and diagnostics feed search_diagnostics only; no panel membership or call reads them. |
 | phase-recombination / [FP22](../methods/phase.md#fp22) | Storage routes and release scheduling (resident/windowed, serial/pooled, spool, mapped outputs) | both storage and both execution routes kept; release scheduling is explicit. |
-| phase-recombination / [FP24](../methods/phase.md#fp24) | Diagnostics, summary and legacy fields (coverage, zero frames) | diagnostics also supply recombination's convergence report without deciding events. |
+| phase-recombination / [FP24](../methods/phase.md#fp24) | Diagnostics and summary fields (coverage; no always-zero frames) | diagnostics also supply recombination's convergence report without deciding events. |
 | phase-recombination / [FP25](../methods/phase.md#fp25) | Full-objective enumeration and threshold reference checks | The model evaluates the full objective for ascent history and uses local row differences for proposals. |
 | refinement-count / [RC04](../methods/refinement.md#rc04) | Evidence windows: resident or streamed route, leases, cover, exact fallback | execution route with exact fallback, no candidate filter. |
 | refinement-count / [RC07](../methods/refinement.md#rc07) | SW5 message storage route: dense or 16-block checkpoints; reconstruction reader and view lifetimes | exact recurrences in both storage routes. |

@@ -26,11 +26,7 @@ IN_PROGRESS, COMPLETE = "in_progress", "complete"
 
 
 def require_simulation_schema(record) -> None:
-    """Refuse old simulation products with the release's regeneration instruction."""
-    if record.get("schema") == 1:
-        raise InputError(
-            "simulation schema 1 is unsupported by release 4.15; regenerate the simulation in a new output root"
-        )
+    """Require the current simulation record schema."""
     require_schema(record, SCHEMA)
 
 
@@ -191,7 +187,7 @@ class ContigTruth:
 
     @property
     def founder_haplotypes(self) -> np.ndarray:
-        """Computed compatibility view for released evaluation consumers; never stored."""
+        """The cross-founder allele axis (founder_alleles), computed for evaluation; never stored."""
         return founder_alleles(self)
 
 

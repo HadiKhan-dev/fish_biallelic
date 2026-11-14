@@ -1,11 +1,10 @@
 """Loading the run configuration: preset, TOML file, command-line options and `--set` overrides, strictly.
 
 Precedence (later wins): schema defaults < preset (interface/settings/presets/<name>.toml) < TOML file < command-line
-options < `--set section.key=value`. Unknown sections and keys are errors naming the valid ones (a section removed
-from the schema names its removal: REMOVED_SECTIONS); values are type-checked by their field kind; relative paths
-resolve against the working directory. The resolved configuration is written back as TOML (`settings_text`) to
-OUTPUT/config.toml and into the run record. The nested simulation.reads preset is expanded after
-merging these layers, with every explicit read key taking precedence over its values.
+options < `--set section.key=value`. Unknown sections and keys are errors naming the valid ones; values are
+type-checked by their field kind; relative paths resolve against the working directory. The resolved configuration
+is written back as TOML (`settings_text`) to OUTPUT/config.toml and into the run record. The nested simulation.reads
+preset is expanded after merging these layers, with every explicit read key taking precedence over its values.
 """
 
 from __future__ import annotations
@@ -25,15 +24,6 @@ from .schema import NAMED_SECTIONS, Settings, schema_fields
 
 PRESETS = ("tromau", "generic")
 
-# The pipeline uses no sample metadata. Inference reads only the observations (VCF/BCF, or the simulated
-# reads) and the genetic map, and sample names are identifiers; every sequenced sample is a candidate parent of every
-# other. A configuration (file, preset, option or --set) that still sets one of these sections fails at load.
-REMOVED_SECTIONS = {
-    ("samples",): "the [samples] workbook and its generation and sex labels",
-    ("pedigree", "eligibility"): "parent eligibility is every sequenced sample: no cohort or constraints policy and "
-    "no opposite-sex pair rule",
-    ("reports",): "the reference-consistency report ([reports] reference_consistency), which read generation labels",
-}
 _MEMORY_SIZE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)(?:I?B)?\s*$", re.IGNORECASE)
 _MEMORY_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
 
@@ -221,100 +211,8 @@ def _build(cls, mapping, prefix: tuple, cwd: Path):
     return cls(**values)
 
 
-def _check_removed(mapping: dict) -> None:
-    """Refuse a mapping that sets any of REMOVED_SECTIONS, naming all of them at once."""
-    found = []
-    for path, reason in REMOVED_SECTIONS.items():
-        table: Any = mapping
-        for part in path[:-1]:
-            table = table.get(part) if isinstance(table, dict) else None
-        if isinstance(table, dict) and path[-1] in table:
-            found.append((".".join(path), reason))
-    if found:
-        names = ", ".join(f"[{name}]" for name, _ in found)
-        reasons = "; ".join(reason for _, reason in found)
-        raise SettingsError(
-            f"{names}: removed in 3.4: the pipeline uses no sample metadata ({reasons}); delete "
-            f"{'it' if len(found) == 1 else 'them'} from the configuration"
-        )
-
-
-def _migrate_templates(mapping: dict) -> dict:
-    """Canonicalise each precedence layer before merging old and new field names."""
-    import copy
-
-    mapping = copy.deepcopy(mapping)
-    simulation = mapping.get("simulation", {})
-    if isinstance(simulation, dict) and "templates" in simulation:
-        import warnings
-
-        legacy = simulation.pop("templates")
-        proposed = {"kind": "file", "file": legacy}
-        current = simulation.get("source", {})
-        if not isinstance(current, dict) or any(k in current and current[k] != v for k, v in proposed.items()):
-            raise SettingsError("simulation.templates conflicts with simulation.source")
-        simulation["source"] = {**proposed, **current}
-        warnings.warn(
-            "[simulation] templates / --templates is deprecated in 4.15; "
-            'use [simulation.source] kind = "file", file = DIR',
-            FutureWarning,
-            stacklevel=2,
-        )
-    return mapping
-
-
-# Keys whose computation a release removed, in sections the schema no longer has. A configuration that still sets
-# one loads with one FutureWarning per key and the value is ignored (it must still be a value the key accepted); a
-# section left empty is dropped.
-_RETIRED_KEYS = {
-    ("pedigree", "evidence_calibration"): (
-        lambda value: isinstance(value, str) and value in ("off", "predictive"),
-        'expects "off" or "predictive"',
-        "removed in 4.15.2; the pedigree stage uses the composite evidence at unit weight",
-    ),
-    ("relatedness", "pairwise_ibd"): (
-        lambda value: isinstance(value, bool),
-        "expects true or false",
-        "removed in 4.17.2: its pairwise IBD chain treated alleles not shared by descent as independent "
-        "population draws, which they are not in a cross; relatedness/pairs.csv is no longer written",
-    ),
-}
-
-
-def _drop_legacy(mapping: dict) -> tuple[dict, frozenset[tuple[str, str]]]:
-    """Remove retired keys before schema validation without changing the caller's mapping."""
-    removed = set()
-    for section in dict.fromkeys(name for name, _ in _RETIRED_KEYS):
-        table = mapping.get(section)
-        if not isinstance(table, dict):
-            continue
-        table = dict(table)
-        for (owner, key), (accepts, expects, _) in _RETIRED_KEYS.items():
-            if owner == section and key in table:
-                if not accepts(table.pop(key)):
-                    raise SettingsError(f"[{section}] {key} {expects}")
-                removed.add((section, key))
-        mapping = dict(mapping)
-        if table:
-            mapping[section] = table
-        else:
-            mapping.pop(section)
-    return mapping, frozenset(removed)
-
-
-def _warn_removed(removed: Set[tuple[str, str]]) -> None:
-    import warnings
-
-    for (section, key), (_, _, reason) in _RETIRED_KEYS.items():
-        if (section, key) in removed:
-            warnings.warn(f"[{section}] {key} {reason}", FutureWarning, stacklevel=3)
-
-
 def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
     """A typed Settings from a merged mapping (paths resolved against ``cwd``); no cross-key validation."""
-    _check_removed(mapping)
-    mapping = _migrate_templates(mapping)
-    mapping, removed = _drop_legacy(mapping)
     simulation = mapping.get("simulation", {})
     artefacts = simulation.get("artefacts", {}) if isinstance(simulation, dict) else {}
     if isinstance(artefacts, dict) and artefacts.get("preset") == "reference_blocks":
@@ -344,7 +242,6 @@ def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
         raise SettingsError(
             f"settings version {settings.version!r} is not 4; current TOML settings require version = 4"
         )
-    _warn_removed(removed)
     return settings
 
 
@@ -375,11 +272,9 @@ def load_settings(
     for text in overrides:
         name, value = parse_override(text)
         _assign(sets, name, value)
-    migrated = tuple(_drop_legacy(_migrate_templates(layer)) for layer in (user, options or {}, sets))
-    layers = tuple(layer for layer, _ in migrated)
+    layers = (user, options or {}, sets)
     chosen = preset or next((layer["preset"] for layer in reversed(layers) if layer.get("preset")), "")
-    merged, removed_preset = _drop_legacy(preset_mapping(chosen) if chosen else {})
-    removed = removed_preset.union(*(names for _, names in migrated))
+    merged = preset_mapping(chosen) if chosen else {}
     given = set()
     for layer in layers:
         merged = _merge(merged, layer)
@@ -387,10 +282,9 @@ def load_settings(
     merged["preset"] = chosen
     config = build_settings(merged, cwd=cwd)
     if fallback_contigs is not None and not config.input.contigs:
-        merged.setdefault("input", {})["contigs"] = list(fallback_contigs)
+        merged = _merge(merged, {"input": {"contigs": list(fallback_contigs)}})  # never mutates a caller's layer
         config = build_settings(merged, cwd=cwd)
     validate(config, given)
-    _warn_removed(removed)
     return config
 
 
@@ -642,8 +536,6 @@ def _validate_simulation(config: Settings) -> None:
 
 
 def _value(config, path):
-    if path == ("simulation", "templates"):
-        path = ("simulation", "source", "file")
     value = config
     for part in path:
         value = getattr(value, part, None)

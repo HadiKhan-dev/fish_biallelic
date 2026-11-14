@@ -4058,22 +4058,6 @@ _SIGNATURES = {
             ),
         },
     ),
-    "haplotype_reconstruction.science.assembly.refinement.proposals._background_value": (
-        {
-            "text": (
-                "(float64, float64, Array(float64, 1, 'C', False, aligned=True), Array(float64, 1, 'C', F"
-                "alse, aligned=True), int64, float64)"
-            ),
-            "pickle": (
-                "fCQC=0RR910000ej2UiqZDL_AV{dY0E_8WtWpgfJVsmtIVPkZZj1ymUd2nT4a%E$0ZgX^Ubz^jIa+H&lj0a<HaCv"
-                "fNXOxT%Uvgz*Z*FsRa&=>LZ*r8Al#Cc|b!}o{E@N+UWiE7iaAk8Yb7Ns_VRCbnj0Hw)Z(($lla!1IVs&Y3bZKsLl"
-                "#B*%Vrpe$bd-~nPKT6zlqie@ZeeX@l#B;vY;R$7HZ+us2x4h;cWGpFXp~Dpj0Im~Z)9bZOB{8Flv0#v6KDcx1&kS"
-                "Pb!}o{E@N+UWiE7iaAk8YZg6>Yd2nTOl#B&Ia&lpLl#`Tb3r>fWeUvDS1!Q!2aAlNe6O06IWNB@bO96}qY+-qCb#"
-                "#=B0Yj9G1a4t%Wt5B+VRCX|c_?OVZ((#cG%O%7WGo;<DU^%_Ut@1%Wt2^S0d<FzQj};RXaZ;jXa<Z2Np5syXJvAf"
-                "lay!+PKT6zlqhHpj0I_KbT%}UXb?+4j0SUQXKrO=l!#~%OB!{Dlv0#v6Lgd="
-            ),
-        },
-    ),
     "haplotype_reconstruction.science.assembly.refinement.proposals._charge_window": (
         {
             "text": (
@@ -5693,6 +5677,7 @@ _SIGNATURES = {
         },
     ),
     "haplotype_reconstruction.science.assembly.refinement.proposals._diff_max": (),
+    "haplotype_reconstruction.science.assembly.refinement.proposals._background_at": (),
     "haplotype_reconstruction.science.assembly.refinement.proposals._dominance": (
         {
             "text": (

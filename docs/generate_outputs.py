@@ -32,6 +32,8 @@ FILES = {
     "painting.SEGMENT_COLUMNS": "painting/sample_segments.csv",
     "painting.CONTINUITY_COLUMNS": "painting/label_continuity.csv",
     "painting.MODEL_COLUMNS": "painting/painting_model.csv",
+    "pair_sharing.PAIR_SHARING_COLUMNS": "painting/pair_sharing.csv",
+    "pair_sharing.CHROMOSOME_COLUMNS": "painting/pair_sharing_chromosomes.csv",
     "tables.TRUTH_PEDIGREE_COLUMNS": "simulation/truth_pedigree.csv",
     "tables.REFIT_EXCLUDED_COLUMNS": "founder_refit/excluded_samples.csv",
     "tables.REFIT_SUMMARY_COLUMNS": "founder_refit/summary.csv",

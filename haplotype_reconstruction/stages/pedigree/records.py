@@ -219,7 +219,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         )
         if evidence is None or painting is None:
             raise InvariantError(f"pedigree requires evidence and painting for {c}")
-        _header(file, evidence.key, evidence.identity, schemas=evidence_records.SUPPORTED_SCHEMAS)
+        _header(file, evidence.key, evidence.identity, schemas=evidence_records.SCHEMA)
         _header(file, painting.key, painting.identity)
         prepared_identity = prepare.derivation(
             parameters.preparation,

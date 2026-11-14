@@ -71,19 +71,25 @@ def transposition(founders, a, b):
 
 
 # A parallel region wakes and joins every thread of its team: tens of microseconds of CPU each, up to ~165 us on nodes
-# whose idle cores sleep deeply, whatever the thread computes. One junction's exchange work is about 4 ns per sample and
-# K**3 (measured 3-6 ns, K = 8-12), so a junction's exchanges open a parallel region only when every thread of the
-# pass's team gets at least EXCHANGE_THREAD_WORK of it (about 1 ms); otherwise they run in the pass's own thread (a
-# junction of 116 samples at K = 8 takes 0.2 ms). The pass's caller decides (parallel_exchanges): a kernel that reads or
-# sets its team cannot be cached (Numba binds the threading layer's functions as ctypes pointers), and neither can any
-# kernel that calls it.
-EXCHANGE_THREAD_WORK = 250_000
+# whose idle cores sleep deeply, whatever the thread computes. One junction's exchange work is about 2-6 ns per sample
+# and K**3 (measured 3-6 ns at K = 8-12, 1.9 ns at K = 28 on Sapphire Rapids), so a junction's exchanges open a
+# parallel region on the pass's team whenever that work reaches EXCHANGE_PARALLEL_WORK (about 0.2-0.6 ms in one
+# thread); smaller junctions run in the pass's own thread (a junction of 116 samples at K = 8 takes 0.2 ms). The region
+# costs the team's wake-up on top of the work, but its wall time is the work divided by the team plus one wake-up:
+# measured at 52 samples and K = 28, 2.18 ms in one thread against 1.12, 0.57, 0.31, 0.19 and 0.15 ms on 2, 4, 8, 16 and
+# 52 threads (K = 16: 0.50 ms against 0.07-0.11 ms on 8-52 threads). A wide team is the live share of a search whose
+# peers have finished or never started (start and polish fits, lone replays, the tail of a count round), so the wake-up
+# spends CPUs nothing else uses while the pass's sequential junction walk gets shorter. The pass's caller decides
+# (parallel_exchanges): a kernel that reads or sets its team cannot be cached (Numba binds the threading layer's
+# functions as ctypes pointers), and neither can any kernel that calls it. The gains are summed in sample order either
+# way, so the choice is a schedule only.
+EXCHANGE_PARALLEL_WORK = 100_000
 
 
 def parallel_exchanges(samples: int, founders: int, team: int) -> bool:
     """Whether a pass on ``team`` threads runs each junction's exchanges (``samples`` samples, K = ``founders``) as one
-    parallel region: when every thread of the team gets at least EXCHANGE_THREAD_WORK."""
-    return team > 1 and samples * founders**3 >= EXCHANGE_THREAD_WORK * team
+    parallel region: on two or more threads, when the junction's work (samples x K^3) reaches EXCHANGE_PARALLEL_WORK."""
+    return team > 1 and samples * founders**3 >= EXCHANGE_PARALLEL_WORK
 
 
 @kernel(overloads=overloads_for(__name__, "_exchange_sample"), cache=True, nogil=True)

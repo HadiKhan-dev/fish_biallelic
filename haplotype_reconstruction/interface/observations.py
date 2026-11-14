@@ -11,22 +11,9 @@ from pathlib import Path
 
 from ..core.errors import InputError
 
-# Only keys accepted by unmodified release 4.14.0 belong in inference.toml.
-# New simulation settings can evolve independently of this compatibility surface.
-_RELEASE_414_KEYS = {
-    "run": ("output", "checkpoints", "exclude_contigs", "stop_after"),
-    "execution": ("cores", "contig_lanes", "memory_limit", "serial", "max_contigs", "profile", "scratch"),
-    "input": ("kind", "vcf", "contigs"),
-    "quality": ("site_filter", "sample_filter", "read_calibration"),
-    "genetic_map": ("rate_cm_per_mb", "file"),
-    "family_phase": ("protected_intervals",),
-    "recombination": ("order_breakpoints",),
-    "export": ("enabled", "full_length"),
-}
-
 
 def inference_configuration(settings, output):
-    """Expand the simulation's effective inference choices using the 4.14 keys.
+    """Expand the simulation's effective inference choices: every setting outside [simulation].
 
     Auto filters are resolved for the simulation source before switching the input
     kind. External inference maps/intervals are copied into the frozen package.
@@ -37,7 +24,8 @@ def inference_configuration(settings, output):
 
     output = Path(output).expanduser().resolve()
     mapping = to_dict(settings)
-    sections = {section: {key: mapping[section][key] for key in keys} for section, keys in _RELEASE_414_KEYS.items()}
+    sections = {section: dict(values) for section, values in mapping.items() if isinstance(values, dict)}
+    sections.pop("simulation")
     sections["input"].update(kind="vcf", vcf=str(output / "observations.bcf"))
     sections["run"].update(output="", checkpoints="", stop_after="")
     sections["execution"]["scratch"] = ""
@@ -117,22 +105,17 @@ def write_observations(config, output):
         )
 
 
-def evaluate_with_truth(
-    run, truth_dir, *, output=None, stages=("available",), contigs=None, release_tree=None, python=None, timeout=600
-):
-    """Score a VCF-route run with bound truth, using its release's checked reader.
+def evaluate_with_truth(run, truth_dir, *, output=None, stages=("available",), contigs=None):
+    """Score a VCF-route run of this release with bound truth, through its checked Results.
 
-    Supply ``release_tree`` to decode a 4.14.0 run in a separate interpreter. The
-    current-release path uses ordinary Results. Reports go to RUN/evaluation unless
-    an explicit output is given. Truth never enters an inference call.
+    Reports go to RUN/evaluation unless an explicit output is given. Truth never
+    enters an inference call.
     """
     from ..evaluation.evaluate import collect, write_evaluation
     from ..evaluation.tasks import evaluate_task, plan_evaluation
-    from ..results.old_products import OldProducts, RunProducts
+    from ..results.products import RunProducts
 
-    reader = (
-        RunProducts(run) if release_tree is None else OldProducts(run, release_tree, python=python, timeout=timeout)
-    )
+    reader = RunProducts(run)
     report, tasks, evaluation_reader = plan_evaluation(reader, truth=truth_dir, stages=stages, contigs=contigs)
     evaluated = [evaluate_task(task, evaluation_reader) for task in tasks]
     components, matches = collect(report, [result.parts() for result in evaluated])

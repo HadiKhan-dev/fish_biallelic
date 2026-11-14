@@ -1,5 +1,97 @@
 # Changelog
 
+## 4.18.2 (14 November 2026)
+
+This release removes the code that was kept for earlier versions, adds an optional report of the founder sharing of
+every sample pair computed from the paintings, makes founder refinement faster and widens long assembly units while
+they run. Released results are identical to 4.18.1.
+
+**Removed compatibility code.** The package has had no public release, so nothing is kept for earlier versions:
+
+- Settings: the warnings that let configurations keep `[pedigree] evidence_calibration` (removed in 4.15.2) and
+  `[relatedness] pairwise_ibd` (removed in 4.17.2), the alias `[simulation] templates = DIR` for
+  `[simulation.source] kind = "file", file = DIR`, and the removal message for the sections `[samples]`,
+  `[pedigree.eligibility]` and `[reports]`. All of these are now unknown keys or sections, refused like any other.
+- Command line: `--templates` (use `[simulation.source]`), and `evaluate --release-tree`, `--release-python` and
+  `--timeout`, which scored a run root of release 4.14.0 by decoding it with that release's code.
+- Python API: the `templates` argument and attribute of `SimulationConfig` (use `source`), the `release_tree`,
+  `python` and `timeout` arguments of `evaluate_with_truth`, the module `results.old_products` (`RunProducts` is now
+  in `results.products`) and the unused `nthreads` argument of the evidence record loader.
+- Readers: evidence checkpoint records of schema 1 (only schema 2 is written), the removal of a stale
+  `relatedness/pairs.csv` when an output root of 4.17.1 or earlier is published again, a separate refusal message for
+  simulation truth of schema 1 and a check for an earlier form of the run record.
+
+Run roots, checkpoints and exports written by earlier versions are refused: re-run them in a new output root. The
+`inference.toml` of an observation package now holds every setting outside `[simulation]`, where it held only the
+keys release 4.14.0 accepted, so it now also records `[genetic_map] infer_rate` and `[painting] pair_sharing`.
+
+**Pair sharing from the paintings (optional report).** The pairwise IBD report that 4.17.2 removed is back where it
+is valid: on the paintings ([PR20](docs/methods/painting.md#pr20)). With `[painting] pair_sharing = true` the report
+step writes `painting/pair_sharing.csv` (one row per sample pair, over the included contigs) and
+`painting/pair_sharing_chromosomes.csv` (one row per pair and contig). In every painting bin where all four tracks
+of the two samples name one founder row, the pair shares 0, 1 or 2 founder rows (the multiset intersection of the
+two row pairs). `ibd0`, `ibd1` and `ibd2` are the shares of that jointly named length, weighted by its length in
+Morgans on the run's working map: this equals physical-length weighting with a constant-rate map, and it follows an
+adopted `infer_rate` estimate. `coverage`, `candidates`, `unidentified` and `abstained` split the painted length by
+the pair's worst track, so the support of every estimate is explicit. The shares are identity by descent relative
+to the panel's founder rows: founders that assembly cannot separate count as one row. The report reads the published
+paintings and feeds nothing back. It has no checkpoint record, no other product or identity changes, and
+`output_selection.json` records the choice. `haplotype_reconstruction.results.pair_sharing.pair_sharing(results,
+genetic_maps)` gives the same product from a run's paintings and the run's configured maps. The report is off by
+default because its tables grow as N(N - 1)/2: for up to 116 samples the counting takes under a second per run
+(reading the paintings takes longer), but at 2,800 samples one contig's table is about 700 MB.
+
+On simulated crosses (16 crosses of the release matrix, at depths 5 and 10.5) the per-bin agreement of the named
+share with the simulated founder transmission is 0.986 to 1.000, and the IBD0 share of parent-offspring pairs is
+0.000 (0.02 for the largest pair). On 60 simulated genomes from two closed founder stocks at depths 1 and 5 the
+agreement is 0.90 to 0.97 by design and depth, lower because founders identical by state count as one row there;
+parent-offspring IBD0 is at most 0.003 on average. On a real cichlid cross the 69 child-parent pairs that the
+pedigree stage calls have IBD0 shares of 0.00 to 0.04.
+
+**Founder refinement: faster, with identical results.** Every count decision, fit, record and released call is the
+one 4.18.1 produces.
+
+- *Background values read in place.* The dominance tests of the exact window programme computed each closed
+  background value through a helper that received two rows of its inputs as array views, once per sample and
+  background state. Each view costs an atomic reference-count increment and decrement around a few additions, and on
+  Sapphire Rapids processors these took half of a coarse window's solve time. The helper now reads the rows in place
+  (`proposals._background_at`, the same operations in the same order). A coarse window of a 28-founder component of
+  a real cross solves 3.7 times faster on a Sapphire Rapids core (30.6 to 8.3 s), and as before on an Ice Lake core.
+- *Replays of tied roots advance with the nominal pass.* A tied incoming root of the nominal count follows the nominal
+  pass's adopted deletions, one fit per deletion. These fits now run in the nominal round, after each adopted
+  deletion, instead of as a chain of lone fits after the pass. What they produce is held until the nominal pass is
+  known to be replayable and is otherwise discarded, so records, tie counts and work counters are those of the
+  sequential order.
+- *Scheduling of lone searches.* A window template whose estimated work exceeds an even share of a sweep's window map
+  is split into focal chunks that run as the search's share frees CPUs, and a junction's exchange gains open one
+  parallel region whenever their work reaches 100,000 sample-state cells (before: only when every thread of the
+  pass's team got 250,000). Both change scheduling only.
+
+On 112-core Sapphire Rapids nodes the first deletion round of that 28-founder component takes 3,948 s instead of
+5,726 s, and the start and first seven refits of a 27-founder component of the same cross 2,344 s instead of 4,141 s
+(CPU -43 %). Ice Lake nodes gain much less, because the first change does nothing there. Every solve of 80 window
+problems captured from the 28-founder component gives the same outputs and work accounts bit for bit, and replays of
+captured components (four from simulated crosses at levels 2 and 3, both real components above and a 30-founder
+component) give identical records, fit by fit, and identical decisions.
+
+**Long assembly units widen while they run (scheduling only).** A selection chunk or join batch that has run three
+times the upper-median wall time of the finished units of its round, while units of its lane wait to start, takes a
+team of its useful width (selection: one thread per 64-sample lane block; joins: their minimum team width; at most
+16 threads and half the pool). CPUs that free go to it before a waiting unit starts, and runtime teams hold or
+reserve at most a quarter of the pool. Grouped selection chunks, whose blocks run in turn, may now grow to their lane
+team: in large rounds the chunk planner pairs heavy blocks that the rule on declared costs does not team. Units
+deferred to another invocation's claim do not enter the runtime sample. New: `ResourceRequest.width`; `engine.cpu`
+`RUNTIME_RATIO` 3, `RUNTIME_CPU_SHARE` 1/4, `RUNTIME_MIN_FINISHED` 8 and `RUNTIME_MIN_SECONDS` 60. On a replay of a
+level-2 selection round of a real cross of 304 samples (203 blocks in 114 chunks grouped as the planner groups them,
+56 cores), the longest unit, two heavy blocks of one chunk on one thread, now takes 5,739 s on five threads instead
+of 8,372 s, and the round 5,745 s instead of 8,378 s (-31 %; 90th-percentile unit -8 %, CPU +3 %). With the heavy
+blocks as single chunks the longest unit is 35 % shorter and the round is unchanged; on a real cichlid cross nothing
+changes. Every record is identical.
+
+**Validation.** The default suite and the stage tier (four shards) pass. Each of the four parts passed the suite and
+the stage tier on its own; removing the compatibility code left the release matrix of 17 crosses identical to
+4.17.3. On the release matrix of 17 crosses the released results of this release are those of 4.18.1.
+
 ## 4.18.1 (14 November 2026)
 
 The relatedness stage estimates one genome-wide recombination rate from its full-sib families. By default it is a

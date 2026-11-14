@@ -183,6 +183,18 @@ class GeneticMapSection:
 
 
 @dataclass(frozen=True)
+class PaintingSection:
+    pair_sharing: bool = setting(
+        False,
+        "bool",
+        "Write painting/pair_sharing.csv and pair_sharing_chromosomes.csv: per sample pair, the shares of the "
+        "jointly named painted length (working-map Morgans) sharing 0, 1 or 2 founder rows, with coverage; "
+        "N(N-1)/2 rows per table and contig, O(N^2) in samples.",
+        affects_results=False,
+    )
+
+
+@dataclass(frozen=True)
 class FamilyPhaseSection:
     protected_intervals: Path | None = setting(
         None,
@@ -398,6 +410,7 @@ class Settings:
     input: InputSection = section(InputSection, "Observations and contigs.")
     quality: QualitySection = section(QualitySection, "Evidence quality control and read model.")
     genetic_map: GeneticMapSection = section(GeneticMapSection, "Inference genetic map.")
+    painting: PaintingSection = section(PaintingSection, "Optional painting outputs.")
     family_phase: FamilyPhaseSection = section(FamilyPhaseSection, "Family phase.")
     recombination: RecombinationSection = section(RecombinationSection, "Recombination maps.")
     export: ExportSection = section(ExportSection, "Final products: founder and sample VCFs.")
@@ -470,6 +483,7 @@ __all__ = [
     "InputSection",
     "QualitySection",
     "GeneticMapSection",
+    "PaintingSection",
     "FamilyPhaseSection",
     "RecombinationSection",
     "ExportSection",

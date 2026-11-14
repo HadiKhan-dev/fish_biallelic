@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import tempfile
 import traceback
@@ -313,7 +312,7 @@ def _match_bound_configuration(
 
 def _output_selection(output: Path, settings: Settings) -> None:
     """Keep formatting choices beside their outputs, outside the checkpoint root."""
-    payload = dict(schema=1, export_enabled=settings.export.enabled)
+    payload = dict(schema=1, export_enabled=settings.export.enabled, pair_sharing=settings.painting.pair_sharing)
     with atomic_path(output / "output_selection.json") as temporary:
         temporary.write_text(json.dumps(payload, indent=2) + "\n")
 
@@ -731,7 +730,13 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
     dependencies["science"] = dependencies["complete"]
     if prepared.settings.export.enabled:
         dependencies["complete"] += (manifest_key,)
-    for task in run_tasks(reader, output, dependencies, reverse_conventions=reader.manifest["ties"]["reverse"]):
+    for task in run_tasks(
+        reader,
+        output,
+        dependencies,
+        reverse_conventions=reader.manifest["ties"]["reverse"],
+        pair_sharing=prepared.genetic_maps if prepared.settings.painting.pair_sharing else None,
+    ):
         if task.key.round == "recombination" and task.key.unit == "contig":
             task = replace(task, function=_recombination_contig, kwargs={})
         elif task.key.round == "phase":
@@ -762,7 +767,7 @@ def _attach_reports(graph: RunGraph, cut: Cut) -> Cut:
         if not (
             key.stage == "report"
             and key.unit == "contig"
-            and key.round in {"quality", "painting", "recombination", "ties", "export_manifest"}
+            and key.round in {"quality", "painting", "pair_sharing", "recombination", "ties", "export_manifest"}
             and TaskKey("report", "run", "run", key.round) not in selected
         )
     }
@@ -1128,22 +1133,13 @@ def evaluate_command(args: argparse.Namespace) -> int:
         from .observations import evaluate_with_truth
 
         configure_worker(affinity_cpus() if args.cores is None else args.cores)
-        if not math.isfinite(args.timeout) or args.timeout <= 0:
-            raise SettingsError("evaluate timeout must be finite and positive")
         evaluate_with_truth(
-            args.run_directory,
-            args.truth,
-            output=args.output,
-            stages=tuple(args.stages),
-            contigs=args.contigs,
-            release_tree=args.release_tree,
-            python=args.release_python,
-            timeout=args.timeout,
+            args.run_directory, args.truth, output=args.output, stages=tuple(args.stages), contigs=args.contigs
         )
         print("Evaluation with bound truth completed", flush=True)
         return 0
-    if any(getattr(args, key, None) is not None for key in ("output", "release_tree", "release_python")):
-        raise SettingsError("evaluate --output, --release-tree and --release-python require --truth")
+    if getattr(args, "output", None) is not None:
+        raise SettingsError("evaluate --output requires --truth")
     settings = _load_recorded_settings(args.run_directory, args.cores)
     prepared, _ = _recorded_run(settings, args.run_directory)
     from ..evaluation.evaluate import collect, plan_evaluation, write_evaluation

@@ -9,10 +9,8 @@ half_sib_links.csv: latent families better explained as sharing one latent paren
 summary.json: the fit (with the family search kept and its margin) and, under recombination_rate, the genome-wide
 recombination rate estimated from the families (rl20): estimate and 95 % interval (cM/Mb), meioses, the families used
 and dropped with reasons, the gate and the working-map decision, and the warning printed in the run log (null when
-none). These are inferences from genotype likelihoods alone, not pedigree truth. Releases up to 4.17.0 could also
-write pairs.csv, a pairwise IBD table whose model does
-not hold in a cross (docs/methods/relatedness.md, "Pairwise IBD"); a stale copy is removed when the tables are
-rewritten.
+none). These are inferences from genotype likelihoods alone, not pedigree truth. No pairwise IBD table is written:
+its model does not hold in a cross (docs/methods/relatedness.md, "Pairwise IBD").
 """
 
 from __future__ import annotations
@@ -55,8 +53,6 @@ def write_relatedness(
     )
     rate = getattr(product, "rate", None)  # absent from records built outside the relatedness stage
     written = [write_frame(directory / "families.csv", frame_in_input_order(families, input_ids))]
-    # Written only by earlier releases (an output run resumed under this one would otherwise keep it).
-    (directory / "pairs.csv").unlink(missing_ok=True)
     written.append(write_frame(directory / "half_sib_links.csv", links))
     written.append(
         write_json(

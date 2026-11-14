@@ -219,6 +219,41 @@ Source: [`SAMPLE_SWITCH_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 6 | `cohort_median_switches` | cohort median switches (1). |
 | 7 | `switches_over_cohort_median` | painted switches divided by the cohort median; NaN if median is not positive (1). |
 
+## painting/pair_sharing.csv
+
+Source: [`PAIR_SHARING_COLUMNS`](../../haplotype_reconstruction/outputs/reports/pair_sharing.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `sample_a` | first sample identifier, earlier in the input sample order (text). |
+| 2 | `sample_b` | second sample identifier (text). |
+| 3 | `ibd0` | share of the jointly named length on which the two samples' released tracks share no founder row; empty when that length is zero (1). |
+| 4 | `ibd1` | share of the jointly named length on which they share one founder row (1). |
+| 5 | `ibd2` | share of the jointly named length on which they share two founder rows (1). |
+| 6 | `named_morgans` | jointly named length, painted bins where all four tracks name one founder row, on the working map (Morgans). |
+| 7 | `coverage` | jointly named share of the painted length (1). |
+| 8 | `candidates` | share of the painted length where a track names candidate rows (pooled or local allele equivalence, or a switch interval) and none is unidentified or abstains (1). |
+| 9 | `unidentified` | share of the painted length where a track is background or an unanchored class and none abstains (1). |
+| 10 | `abstained` | share of the painted length where a track abstains (no evidence or low posterior); Coverage, Candidates, Unidentified and Abstained sum to 1 (1). |
+
+## painting/pair_sharing_chromosomes.csv
+
+Source: [`CHROMOSOME_COLUMNS`](../../haplotype_reconstruction/outputs/reports/pair_sharing.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `contig` | contig identifier (text). |
+| 2 | `sample_a` | first sample identifier, earlier in the input sample order (text). |
+| 3 | `sample_b` | second sample identifier (text). |
+| 4 | `ibd0` | share of the contig's jointly named length on which the pair shares no founder row; empty when that length is zero (1). |
+| 5 | `ibd1` | share on which the pair shares one founder row (1). |
+| 6 | `ibd2` | share on which the pair shares two founder rows (1). |
+| 7 | `named_morgans` | the contig's jointly named length on the working map (Morgans). |
+| 8 | `coverage` | jointly named share of the contig's painted length (1). |
+| 9 | `candidates` | share of the painted length where a track names candidate rows and none is unidentified or abstains (1). |
+| 10 | `unidentified` | share of the painted length where a track is background or an unanchored class and none abstains (1). |
+| 11 | `abstained` | share of the painted length where a track abstains; the four shares sum to 1 (1). |
+
 ## pedigree/tier_b_relationships.csv
 
 Source: [`TIER_B_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/outputs/reports/pedigree.py).

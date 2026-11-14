@@ -34,8 +34,7 @@ KEY = "pedigree/exclusion"
 
 
 class ExclusionAdapter:
-    """Persist both certificate endpoints and the contig's log weight; a missing upper endpoint is invalid.
-    Schema 2 (4.18): 1/C records are refused."""
+    """Persist both certificate endpoints and the contig's log weight; a missing upper endpoint is invalid."""
 
     schema = 2
 

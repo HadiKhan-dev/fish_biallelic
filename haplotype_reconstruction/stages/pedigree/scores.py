@@ -30,8 +30,7 @@ KEY = "pedigree/floored_scores"
 
 
 class ScoresAdapter:
-    """Schema-5 piece record (one form for every run); 4.16.x chromosome-form and block-form records (schema 4)
-    are refused, so a resumed run re-scores its contigs."""
+    """Schema-5 piece record (one form for every run)."""
 
     schema = 5
 

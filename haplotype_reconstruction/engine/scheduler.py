@@ -686,6 +686,13 @@ class _GraphRun:
                 demand[owner] = min(self.cores, demand.get(owner, 0) + self.indexed[k].resources.max_cores)
             self.group.authority.limit(demand)
             self.group.authority.announce(dict.fromkeys(self.owners[k] for k in ready))
+            # Ready tasks per lane not yet started: while a lane has some, its long units may widen at runtime
+            # (PoolSeat.runtime_team); the counts are a hint, refreshed every pass.
+            waiting: dict[str | None, int] = {}
+            for k in ready:
+                waiting[self.owners[k]] = waiting.get(self.owners[k], 0) + 1
+            for owner, index in self.group.authority.owners.items():
+                self.group.authority.groups[index].pending.value = waiting.get(owner, 0)
             self.group.authority.refresh()  # every lane's total, once per pass
 
     def dispatch_pass(self, ready):

@@ -12,8 +12,6 @@ from dataclasses import dataclass, fields, replace
 from functools import partial
 from typing import Any
 
-import numpy as np
-
 from ...contracts.contigs import AnalysisContigs
 from ...contracts.evidence import ContigEvidence
 from ...contracts.genetic_map import ChromosomeGeneticMap, GeneticMapSet
@@ -27,8 +25,8 @@ from ...core.errors import InputError
 from ...engine.cpu import TASK_THREADS, thread_team
 from ...engine.graph import Expansion, ResultRef
 from ...science.pedigree import prepare as science
-from ...science.pedigree.parameters import PedigreeParameters, PreparationParameters
 from ...science.pedigree.blocks import ScorePlacement, cut_list
+from ...science.pedigree.parameters import PedigreeParameters, PreparationParameters
 from ...science.pedigree.regimes import Layout
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
@@ -42,7 +40,7 @@ KEY = "pedigree/prepared"
 
 class PreparedAdapter:
     """Lossless schema-3 prepared record with a small layout header (selectors, bins, markers) and the contig's
-    configured material; 4.16 records (schema 1-2, with measured map lengths) are refused and re-prepared."""
+    configured material."""
 
     schema = 3
 

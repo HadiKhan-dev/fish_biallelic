@@ -49,7 +49,7 @@ def write_truth(path: Path, truth: ContigTruth) -> None:
 
 
 def read_truth(path: Path) -> ContigTruth:
-    """Decode the shared truth-v2 schema; old schemas retain their refusal."""
+    """Decode a truth-v2 record (the current schema)."""
     with np.load(path, allow_pickle=False) as data:
 
         def restore(value):

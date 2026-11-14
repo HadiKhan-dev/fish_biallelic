@@ -49,7 +49,6 @@ __all__ = [
 ]
 EVIDENCE = "evidence"
 SCHEMA = 2
-SUPPORTED_SCHEMAS = (1, 2)
 GL_FIELDS = tuple(CodedLikelihoods.__dataclass_fields__)
 GL_ARRAYS = tuple(name for name in GL_FIELDS if name != "sites")
 GL_WINDOWS = ("pairs", "values", "codes8", "codes16", "codes32", "dense")
@@ -171,7 +170,7 @@ def complete(file: CheckpointFile, expected_identity: str | None = None) -> bool
     record = read_items(file, EVIDENCE, _identity(file, expected_identity), ("schema",))
     if record is None:
         return False
-    require_schema(record.payload, SUPPORTED_SCHEMAS)
+    require_schema(record.payload, SCHEMA)
     return True
 
 
@@ -186,13 +185,11 @@ def progress(file: CheckpointFile) -> dict[str, Any]:
     return dict(evidence=info is not None, **({} if info is None else dict(decoded_bytes=info.decoded_bytes)))
 
 
-def load(
-    file: CheckpointFile, *, counts: bool = False, expected_identity: str | None = None, nthreads: int | None = None
-) -> ContigEvidence:
+def load(file: CheckpointFile, *, counts: bool = False, expected_identity: str | None = None) -> ContigEvidence:
     """Read frozen evidence; omit count buffers unless explicitly requested.
 
     Identity/schema mismatches fail before constructing the record. The container's
-    configured decoder team is used; nthreads is retained for consumer compatibility.
+    configured decoder team is used.
     """
     version, encoding = _layout(file, expected_identity)
     request = Reader(_identity(file, expected_identity), "evidence", counts, schema=version, encoding=encoding)
@@ -206,9 +203,7 @@ def _layout(file: CheckpointFile, expected_identity: str | None) -> tuple[int, s
     record = read_items(file, EVIDENCE, _identity(file, expected_identity), ("schema",))
     if record is None:
         raise KeyError(EVIDENCE)
-    version = require_schema(record.payload, SUPPORTED_SCHEMAS)
-    if version == 1:
-        return version, "dense"
+    version = require_schema(record.payload, SCHEMA)
     record = read_items(file, EVIDENCE, _identity(file, expected_identity), ("gl_encoding",))
     if record is None:
         raise KeyError(EVIDENCE)
@@ -463,7 +458,7 @@ class PairWindows:
 
 @contextmanager
 def open_arrays(file: CheckpointFile, names: Sequence[str], *, expected_identity: str) -> Iterator[dict[str, Any]]:
-    """Checked v1/v2 GL/count/mask windows; paired fields share physical codes."""
+    """Checked GL/count/mask windows; paired fields share physical codes."""
     version, encoding = _layout(file, expected_identity)
     projections = tuple(
         name

@@ -1461,6 +1461,17 @@ Source: [haplotype_reconstruction/contracts/painting.py](../../haplotype_reconst
 | `switch_intervals` | `int` | report | () | 1 | int | True | `0` |
 | `interval_track_bins` | `int` | report | () | 1 | int | True | `0` |
 
+## pair_sharing.PairSharing
+
+Source: [haplotype_reconstruction/contracts/pair_sharing.py](../../haplotype_reconstruction/contracts/pair_sharing.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `__payload_view__` | `ClassVar[bool]` | — | () | 1 | See type | True | `True` |
+| `sample_ids` | `tuple[str, ...]` | obs | ('N',) | 1 | str | False | `required` |
+| `contigs` | `tuple[str, ...]` | obs | ('C',) | 1 | str | False | `required` |
+| `lengths` | `NDArray[np.float64]` | report | ('P', '6') | Morgans | float64 | False | `required` |
+
 ## panels.PreparedPanel
 
 Source: [haplotype_reconstruction/contracts/panels.py](../../haplotype_reconstruction/contracts/panels.py).

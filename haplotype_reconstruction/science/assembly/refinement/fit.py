@@ -83,6 +83,19 @@ from .work_limit import WindowWorkState
 from .workspace import sample_ranges, sample_threads
 
 
+def _template_splits(sizes, caps, threads):
+    """Focal chunks per template of one map (sizes: the templates' work estimates in map order; caps: the most chunks
+    each can use): templates above an even share of the whole map on threads threads get ceil(size / share)
+    chunks, at most their cap; every other template one. Chunks change scheduling only (merge_focal_chunks)."""
+    if threads < 2 or len(sizes) < 2:
+        return [1] * len(sizes)
+    share = sum(sizes) / threads
+    return [
+        min(int(cap), -(-int(size) // max(1, int(share)))) if size > share and cap > 1 else 1
+        for size, cap in zip(sizes, caps, strict=True)
+    ]
+
+
 def _top_class(values) -> np.ndarray:
     """Indices of the values in the closed band [max - q, max], q the refine_F floor quantum.
 
@@ -688,10 +701,18 @@ class SweepEngine:
         def stage1_of(index):
             return None if stage1 is None else stage1[index]
 
-        def run(index, team=None):
+        def run(index, team=None, split=1):
             if store is None:
                 return self.windows.solve(
-                    index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team, stage1=stage1_of(index)
+                    index,
+                    X,
+                    fwd,
+                    bwd,
+                    convention,
+                    ordinal=ordinals[index],
+                    team=team,
+                    stage1=stage1_of(index),
+                    split=split,
                 )
             a, c = self.windows.spans[index]
             key = store.key(index, a, c, X, fwd, bwd, convention)
@@ -702,7 +723,15 @@ class SweepEngine:
                 return result
             try:
                 result = self.windows.solve(
-                    index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team, stage1=stage1_of(index)
+                    index,
+                    X,
+                    fwd,
+                    bwd,
+                    convention,
+                    ordinal=ordinals[index],
+                    team=team,
+                    stage1=stage1_of(index),
+                    split=split,
                 )
                 store.store(key, result, tag)
             finally:
@@ -731,7 +760,7 @@ class SweepEngine:
                     # same results, so other fits meet them as without the restatement.
                     store.store(store.key(index, *spans[index], X, fwd, bwd, convention), results[index], tag)
 
-        def complete(index, team=None):
+        def complete(index, team=None, split=1):
             # A focal's result does not depend on which other focals share its call (merge_focal_chunks); the
             # completion's debits are at most the full solve's, which stayed within the account. The template's
             # receipt is its restated one (recorded with the merged result, in this map, before any stop is raised).
@@ -754,6 +783,7 @@ class SweepEngine:
                     team=team,
                     focals=completing[index],
                     completion=True,
+                    split=split,
                 )
                 merged = merge_focals(results[index], fresh)
                 if store is not None:
@@ -775,10 +805,14 @@ class SweepEngine:
         # solves; each result is stored at its own index, so the order changes timing only.
         order = sorted(range(len(work)), key=lambda i: (-sizes[i], i))
         caps = [windows.focal_chunk_cap(work[i][0], self.workspace.samples, len(X)) for i in order]
-        if max(caps, default=1) > 1 and int(budget.threads()) > len(work):
+        threads = int(budget.threads())
+        # A template whose estimated work exceeds an even share of this map's work on the share's threads would set the
+        # map's critical path on its own thread: it is split into focal chunks (up to its cap) that run as CPUs free.
+        splits = _template_splits([sizes[i] for i in order], caps, threads)
+        if max(caps, default=1) > 1 and (threads > len(work) or max(splits, default=1) > 1):
             solved = [None] * len(order)
             for position, value in budget.concurrent(
-                [partial(work[i][1], work[i][0]) for i in order],
+                [partial(work[i][1], work[i][0], split=splits[p]) for p, i in enumerate(order)],
                 [sizes[i] for i in order],
                 label="founder_refinement window solves",
                 caps=caps,

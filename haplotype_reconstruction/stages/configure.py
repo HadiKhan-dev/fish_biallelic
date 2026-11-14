@@ -372,8 +372,3 @@ def bind_resolved(file: Any, resolved: ResolvedConfiguration, *, key: str = "con
     from ..store.protocol import publish
 
     return publish(file, key, resolved.identity, resolved.manifest())
-
-
-# Field-by-field migration map. Every unlisted leaf has the identical dotted
-# field name. The archived
-# configuration extractor checks the expanded map; unknown or missing baseline leaves raise.

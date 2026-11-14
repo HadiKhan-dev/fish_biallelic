@@ -89,11 +89,11 @@ def read_pedigree_table(path: str | Path) -> tuple[PedigreeRow, ...]:
 
 
 def _read_template(config: SimulationConfig, contig: str) -> FounderTemplate:
-    assert config.templates is not None and config.source is not None
-    with np.load(config.templates / f"{contig}.npz", allow_pickle=False) as data:
+    assert config.source is not None and config.source.file is not None
+    with np.load(config.source.file / f"{contig}.npz", allow_pickle=False) as data:
         positions = data["positions"]
         values = {name: data[name] for name in ("alleles", "allele_probabilities") if name in data}
-    metadata = config.templates / "haplotypes.tsv"
+    metadata = config.source.file / "haplotypes.tsv"
     if not metadata.exists():
         if config.stocks:
             names = tuple(dict.fromkeys(stock.population for stock in config.stocks))
@@ -220,8 +220,8 @@ def _generation_bytes(config: SimulationConfig, contig: str, samples: int, sourc
     """
     assert config.source is not None
     if config.source.kind == "file":
-        assert config.templates is not None
-        with np.load(config.templates / f"{contig}.npz", allow_pickle=False) as panel:
+        assert config.source.file is not None
+        with np.load(config.source.file / f"{contig}.npz", allow_pickle=False) as panel:
             sites = len(panel["positions"])
     else:
         assert config.sites is not None
@@ -380,7 +380,6 @@ class SimulationSource:
         if self._identity is not None:
             return self._identity
         config = jsonable(self.config)
-        config.pop("templates")
         config.pop("generating_map")
         config["design"].pop("pedigree", None)
         maps = load_genetic_maps(self.config.generating_map, self.config.generating_rate_cm_per_mb)
@@ -388,13 +387,13 @@ class SimulationSource:
         upstream = dict(generating_map=json_digest(maps.identity()))
         assert self.config.source is not None
         if self.config.source.kind == "file":
-            assert self.config.templates is not None
-            templates = {
-                c: hashlib.sha256((self.config.templates / f"{c}.npz").read_bytes()).hexdigest()
-                for c in self.config.contigs
+            templates = self.config.source.file
+            assert templates is not None
+            digests = {
+                c: hashlib.sha256((templates / f"{c}.npz").read_bytes()).hexdigest() for c in self.config.contigs
             }
-            upstream["templates"] = json_digest(templates)
-            metadata = self.config.templates / "haplotypes.tsv"
+            upstream["templates"] = json_digest(digests)
+            metadata = templates / "haplotypes.tsv"
             if metadata.exists():
                 upstream["source_metadata"] = hashlib.sha256(metadata.read_bytes()).hexdigest()
         if self.config.sites is not None and self.config.sites.positions is not None:

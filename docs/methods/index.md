@@ -238,6 +238,7 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [PR17](painting.md#pr17) — Core
 - [PR18](painting.md#pr18) — Core
 - [PR19](painting.md#pr19) — Core
+- [PR20](painting.md#pr20) — Core
 
 ## [Pedigree scoring and release](pedigree.md)
 

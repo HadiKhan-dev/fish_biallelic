@@ -64,6 +64,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import math
+import threading
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
@@ -76,6 +77,7 @@ from numpy.typing import NDArray
 
 from haplotype_reconstruction.contracts.assembly import BestFReplacement, CountDecisionRecord, CountPass
 from haplotype_reconstruction.core import ties
+from haplotype_reconstruction.core.errors import InvariantError
 from haplotype_reconstruction.core.kernels import kernel
 
 from .. import orders as tie_rules
@@ -713,27 +715,54 @@ def _scores_many(engine, panels, budget, label):
     return results
 
 
-def _fit_many(engine, starts, labels, budget):
+def _fit_many(engine, starts, labels, budget, companions=()):
     """Converge several independent starts concurrently; results (Fits) in input order. Each fit's
     share of the budget is re-read within its phases, so the last fits take over the finished
     ones' cores; a fit splits its share between its two searches. Its two searches reserve their
-    message arrays (engine.converge: fit_bytes each, base's two per fit), so a fit reserves nothing more."""
+    message arrays (engine.converge: fit_bytes each, base's two per fit), so a fit reserves nothing more.
+    companions: further independent work of other count histories (functions of a child team returning nothing:
+    _SteppedReplay.next_work) run as more children of the same batch; their results are not returned."""
     results = [None] * len(starts)
     ordinals = engine.bind_fits(
         len(starts), [(label, start, "fit") for label, start in zip(labels, starts, strict=False)]
     )
-    for index, fit in budget.concurrent(
-        [
-            lambda child, start=start, label=label, ordinal=ordinal: engine.converge(
-                start, label, child, ordinal=ordinal
-            )
-            for start, label, ordinal in zip(starts, labels, ordinals, strict=False)
-        ],
-        0,
-        label="founder_refinement fits",
-    ):
-        results[index] = fit
+    functions = [
+        lambda child, start=start, label=label, ordinal=ordinal: engine.converge(start, label, child, ordinal=ordinal)
+        for start, label, ordinal in zip(starts, labels, ordinals, strict=False)
+    ]
+    failures = []
+    try:
+        for index, fit in budget.concurrent(
+            [*functions, *_companion_children(engine, companions, failures)], 0, label="founder_refinement fits"
+        ):
+            if index < len(starts):
+                results[index] = fit
+    except BaseException:
+        # Every child has joined; report a companion's own failure, not an abort it caused in the batch's fits.
+        if failures:
+            raise failures[0] from None
+        raise
     return results
+
+
+def _companion_children(engine, companions, failures):
+    """Companion work as children of a fit batch. The engine is marked speculative (fit ordinals of interleaved
+    histories are not the sequential driver order: refine_component reruns a component sequentially if its
+    window-work account stops), and a failing companion stops every other fit of the attempt at its next window
+    solve (count._concurrently's fail-fast rule); its failure is appended to ``failures``."""
+    if not companions:
+        return []
+    engine.speculative = True
+
+    def guarded(function, child):
+        try:
+            function(child)
+        except BaseException as error:
+            failures.append(error)
+            engine.windows.work.abort()
+            raise
+
+    return [partial(guarded, function) for function in companions]
 
 
 def _count_refit_endpoints(engine, chosen, refits):
@@ -1277,10 +1306,17 @@ class _DeletionPath:
 
     start: NDArray[np.int64] | None = None
     steps: list[tuple[str, int, NDArray[np.int64]]] = field(default_factory=list)
+    # Replays of tied roots that advance while this pass runs (_SteppedReplay): each fit batch of the pass also runs
+    # their next fits, whose inputs the steps adopted so far determine.
+    companions: list[Any] = field(default_factory=list)
 
     @property
     def end(self) -> NDArray[np.int64] | None:
         return self.steps[-1][2] if self.steps else self.start
+
+    def companion_work(self) -> list[Any]:
+        """The next fit of every companion replay whose inputs are known now (functions of a child team)."""
+        return [work for work in (replay.next_work() for replay in self.companions) if work is not None]
 
 
 # A root whose panels met the nominal root's: its history is the nominal history from there on.
@@ -1306,45 +1342,182 @@ def _corresponding_founder(reference, panel, founder):
     return int(nearest[founder])
 
 
-def _replayed_root(worker, start, point, path, budget):
+def _replayed_root(worker, start, point, path, budget, stepped=None):
     """A tied incoming root taken through the nominal pass's adopted deletions (module docstring).
 
     worker: the root's branch engine; start: its int64 K x B panel; point, path: the nominal root's
-    CountPass and _DeletionPath. Returns the root's terminal as a CountPass carrying the nominal decisions
+    CountPass and _DeletionPath; stepped: the root's replay as advanced during the nominal pass (_SteppedReplay,
+    confirmed), or None. Returns the root's terminal as a CountPass carrying the nominal decisions
     and the root's own fits, final panel, scores and F; _MERGED when its panels meet the nominal root's;
     None without an unambiguous founder correspondence or when one of its fits ends in tied endpoints."""
-    worker.ledger.start_count_pass()
-    fits = [worker.converge(start, "start", budget)]
-    for label, founder, _ in path.steps:
-        fit = fits[-1]
-        reference = path.start if len(fits) == 1 else path.steps[len(fits) - 2][2]
+    return (_SteppedReplay(worker, start, path) if stepped is None else stepped).finish(point, budget)
+
+
+class _SteppedReplay:
+    """_replayed_root one fit at a time, so that a replay can advance while the nominal pass runs (count_pass).
+
+    The replay's fit after the nominal pass's k-th adopted deletion depends only on the replay's previous fit, the
+    nominal panel that deletion was taken from and the deleted founder (_corresponding_founder), so each of its fits
+    can run as a companion of the nominal pass's next fit batch (_DeletionPath.companions): its start fit with the
+    nominal start fit, its k-th deletion fit with the nominal round after the k-th adopted deletion. Every fit is a
+    pure function of its start panel and the immutable component, and every check and fit is the one _replayed_root
+    makes, in the same order, so finish() returns what _replayed_root returns.
+
+    hold=True (a replay advanced during the nominal pass, before it is known whether the nominal pass is replayable):
+    the replay's fit records, tie counts, tie-census events and work counters are kept privately until confirm(),
+    which hands them on as the replay would have produced them after the nominal pass; discard() drops them and
+    removes the fits only this replay computed from the shared fit ledger, so that a complete pass of the root (the
+    sequential driver's course when the nominal pass is not replayable) computes and records them itself."""
+
+    def __init__(self, worker, start, path, hold=False):
+        self.worker = worker
+        self.start = np.asarray(start, np.int64)
+        self.path = path
+        self.fits = []
+        self.begun = False
+        self.ended = None  # None while running; "none" (no replay) or _MERGED once a check ends the replay
+        self._held = None
+        if hold:
+            self._hold()
+
+    def next_work(self):
+        """The replay's next fit as a function of a child team (it appends the Fit), or None when the replay has
+        ended or waits for the nominal pass's next adopted deletion. Called between the nominal pass's fit batches,
+        when the replay's previous fit has joined."""
+        if self.ended is not None:
+            return None
+        if not self.begun:
+            self.begun = True
+            self.worker.ledger.start_count_pass()
+            return partial(self._converge, self.start, "start")
+        step = len(self.fits) - 1
+        if step >= len(self.path.steps):
+            return None
+        label, founder, _ = self.path.steps[step]
+        fit = self.fits[-1]
+        reference = self.path.start if step == 0 else self.path.steps[step - 1][2]
         if len(fit.summary.tied_panels) > 1:
+            self.ended = "none"
             return None
         if np.array_equal(fit.rows, reference):
-            return _MERGED
+            self.ended = _MERGED
+            return None
         match = _corresponding_founder(reference, fit.rows, founder)
         if match is None:
+            self.ended = "none"
             return None
-        fits.append(worker.converge(np.delete(fit.rows, match, axis=0), f"{label}.del{match}", budget))
-    fit = fits[-1]
-    if len(fit.summary.tied_panels) > 1:
-        return None
-    if np.array_equal(fit.rows, path.end):
-        return _MERGED
-    scores = worker.fit_scores(fit.summary.label, fit.rows, budget)
-    return replace(
-        point,
-        rows=fit.rows,
-        scores=scores,
-        F=panel_objective(scores),
-        fits=tuple(item.summary for item in fits),
-        final_fit=fit.summary.label,
-        weak_junctions=fit.weak_junctions,
-        live_alternatives=(),
-        unresolved_alternatives=(),
-        continuation_families=(),
-        count_unverified=(),
-    )
+        return partial(self._converge, np.delete(fit.rows, match, axis=0), f"{label}.del{match}")
+
+    def _converge(self, start, label, team):
+        self.fits.append(self.worker.converge(start, label, team))
+
+    def finish(self, point, budget):
+        """The replay's outcome once the nominal pass (point, the complete path) has ended: its remaining fits run
+        now, then the terminal checks of _replayed_root."""
+        while True:
+            work = self.next_work()
+            if work is None:
+                break
+            work(budget)
+        if self.ended is not None:
+            return None if self.ended == "none" else _MERGED
+        fit = self.fits[-1]
+        if len(fit.summary.tied_panels) > 1:
+            return None
+        if np.array_equal(fit.rows, self.path.end):
+            return _MERGED
+        scores = self.worker.fit_scores(fit.summary.label, fit.rows, budget)
+        return replace(
+            point,
+            rows=fit.rows,
+            scores=scores,
+            F=panel_objective(scores),
+            fits=tuple(item.summary for item in self.fits),
+            final_fit=fit.summary.label,
+            weak_junctions=fit.weak_junctions,
+            live_alternatives=(),
+            unresolved_alternatives=(),
+            continuation_families=(),
+            count_unverified=(),
+        )
+
+    def _hold(self):
+        worker = self.worker
+        self._held = dict(
+            records=worker.records,
+            counter=worker.counter,
+            census=worker.census,
+            work_counters=worker._work_counters,
+            profile_lock=worker._profile_lock,
+            events=[],
+        )
+        if worker.records is not None:
+            worker.records = _HeldRecords(worker.records)
+        if worker.counter is not None:
+            worker.counter = ties.SharedCounter()
+        if worker.census is not None:
+            worker.census = self._held["events"].append
+        worker._work_counters = {}
+        worker._profile_lock = threading.Lock()
+
+    def confirm(self):
+        """Hand on what the held replay produced: its records to the branch's record scope (in save order), its tie
+        counts to the component's counter, its census events to the component's sink and its work counters to the
+        component's; the replay continues unheld."""
+        held, worker = self._held, self.worker
+        if held is None:
+            return
+        self._held = None
+        if held["records"] is not None:
+            worker.records.flush()
+        if held["counter"] is not None:
+            held["counter"].merge(worker.counter)
+        if held["census"] is not None:
+            for event in held["events"]:
+                held["census"](event)
+        with held["profile_lock"]:
+            for name, value in worker._work_counters.items():
+                held["work_counters"][name] = held["work_counters"].get(name, 0) + value
+        worker.records, worker.counter, worker.census = held["records"], held["counter"], held["census"]
+        worker._work_counters, worker._profile_lock = held["work_counters"], held["profile_lock"]
+
+    def discard(self, nominal_requests):
+        """Drop the held replay: nothing it produced is handed on, and the fits it requested that the nominal pass
+        did not are removed from the shared ledger (they are then computed afresh by whoever requests them)."""
+        held, worker = self._held, self.worker
+        if held is None:
+            raise InvariantError("only a held replay can be discarded")
+        self._held = None
+        worker.records, worker.counter, worker.census = held["records"], held["counter"], held["census"]
+        worker._work_counters, worker._profile_lock = held["work_counters"], held["profile_lock"]
+        nominal = set(nominal_requests)
+        with worker.ledger.lock:
+            for token in worker.ledger.requests:
+                if token not in nominal:
+                    worker.ledger.fits.pop(token, None)
+        self.ended = "none"
+
+
+class _HeldRecords:
+    """A branch's fit records kept in memory until flushed (_SteppedReplay): loads see the held saves first."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.saved: dict[str, Any] = {}
+
+    def load(self, name):
+        if name in self.saved:
+            return self.saved[name]
+        return self.inner.load(name)
+
+    def save(self, name, payload):
+        self.saved.pop(name, None)
+        self.saved[name] = payload
+
+    def flush(self):
+        for name, payload in self.saved.items():
+            self.inner.save(name, payload)
+        self.saved = {}
 
 
 def keep_margin(F):
@@ -1412,7 +1585,12 @@ def _count_pass_point(
                     )
                 )
 
-    fit = engine.converge(start, "start", budget)
+    companions = [] if path is None else path.companion_work()
+    if companions:
+        # Replays of tied roots start with the nominal start fit (_SteppedReplay): a batch of one fit.
+        fit = _fit_many(engine, [start], ["start"], budget, companions)[0]
+    else:
+        fit = engine.converge(start, "start", budget)
     capture(fit)
     adopt(fit)
     X = fit.rows
@@ -1525,9 +1703,12 @@ def _count_pass_point(
         # The private-cell eligibility rule is unchanged; admission fits the entire domain.
         # O(K) independent fits make the round cubic, and repeated deletion rounds quartic.
         chosen = list(without) or list(range(K))
-        refits = _fit_many(
-            engine, [np.delete(X, d, axis=0) for d in chosen], [f"{label}.del{d}" for d in chosen], budget
-        )
+        starts, labels = [np.delete(X, d, axis=0) for d in chosen], [f"{label}.del{d}" for d in chosen]
+        companions = [] if path is None else path.companion_work()
+        if companions:
+            refits = _fit_many(engine, starts, labels, budget, companions)
+        else:
+            refits = _fit_many(engine, starts, labels, budget)
         # Keep one work summary per actual convergence; the endpoint table
         # expands evidence already computed, not the number of searches run.
         fits.extend(refit.summary for refit in refits)
@@ -1837,9 +2018,11 @@ def count_pass(
 
     Independent histories run concurrently (concurrent=True): the complete passes of incoming roots of
     another count start with the nominal pass (they do not read it); the replays of roots of the nominal
-    count (and the complete passes of roots that cannot be replayed) start together as soon as the nominal
-    pass ends; and every history one breadth-first generation of continuation events starts runs together
-    (the expansion reads only histories of earlier generations, so its order and leaf budget are the
+    count advance with the nominal pass, each of their fits in the nominal fit batch that follows the adopted
+    deletion it needs (_SteppedReplay; what they produce is held until the nominal pass is known to be
+    replayable, and discarded otherwise); the complete passes of roots that cannot be replayed start together as
+    soon as the nominal pass ends; and every history one breadth-first generation of continuation events starts
+    runs together (the expansion reads only histories of earlier generations, so its order and leaf budget are the
     sequential driver's). Each history is a pure function of its root, forced choices and the immutable
     component; results are collected and selected in the sequential driver order, a fit requested by two
     histories at once is computed once (FitLedger.inflight), and the reported reuse is the sequential
@@ -1911,9 +2094,11 @@ def count_pass(
         if replayable and len(panel) == len(nominal_input):
             # A replay has its own branch identity, hence its own fit records: its fit labels name the
             # nominal pass's deletions, which a later complete pass of the same root may not repeat.
-            branch = branch_worker({}, {}, ("replay", panel))
+            # A replay advanced during the nominal pass (confirmed in nominal_history) runs its remaining fits now.
+            stepped = advanced.get(panel)
+            branch = branch_worker({}, {}, ("replay", panel)) if stepped is None else stepped.worker
             record["branches"].append(branch)
-            result = _replayed_root(branch, incoming, initial, nominal_path, team)
+            result = _replayed_root(branch, incoming, initial, nominal_path, team, stepped)
             if result is not None:
                 record["replayed"] = True
             if result is _MERGED:
@@ -1928,10 +2113,29 @@ def count_pass(
         record.update(result=run(branch, incoming, seed_key, team=team), engine=branch, evaluated=True)
         return record
 
+    # Replays of roots of the nominal count advance with the nominal pass (concurrent histories): each of their fits
+    # runs in the nominal fit batch after the adopted deletion it follows (_SteppedReplay). What they produce is held
+    # until the nominal pass is known to be replayable; otherwise it is discarded and the roots run their own complete
+    # passes, as in the sequential driver.
+    advanced = {}
+    if concurrent:
+        for panel in roots:
+            if len(panel) == len(nominal_input):
+                advanced[panel] = _SteppedReplay(
+                    branch_worker({}, {}, ("replay", panel)), np.asarray(panel, np.int64), nominal_path, hold=True
+                )
+        nominal_path.companions = [advanced[panel] for panel in roots if panel in advanced]
+
     def nominal_history(team):
         initial = run(engine, start, seed_key, nominal_path, team=team)
         # The returned panel must be the end of the adopted deletions: a restored best-F panel has no such path.
         replayable = initial.best_f_replacement is None and np.array_equal(initial.rows, nominal_path.end)
+        nominal_path.companions = []
+        for stepped in advanced.values():
+            if replayable:
+                stepped.confirm()
+            else:
+                stepped.discard(engine.ledger.requests)
         same = [panel for panel in roots if len(panel) == len(nominal_input)]
         records = _concurrently(
             team,

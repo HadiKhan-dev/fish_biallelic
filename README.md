@@ -41,6 +41,8 @@ Snakemake example.
 - Generated [settings](docs/reference/settings.md), [parameters](docs/reference/parameters.md)
   and [commands](docs/reference/commands.md).
 
+Pairwise founder sharing (`painting/pair_sharing.csv`) is **off by default**; enable it with
+`[painting] pair_sharing = true`. Its tables have one row per sample pair.
 Standalone export reads verified released products and has no `--vcf` option.
 
 See [LICENSE](LICENSE) for licensing and [CITATION.cff](CITATION.cff) for citation metadata.

@@ -923,6 +923,16 @@ def perform_task(task: Task, token: tuple[int, int], budget: CpuBudget, *, keep_
         _ACTIVE_AFFINITY = None
 
 
+def _round_label(key: Any) -> int:
+    """A process-independent label of a task's round (stage, scope, round and its unit name without numbers): runtime
+    widening compares a unit's wall only with finished units of the same label."""
+    import re
+    import zlib
+
+    name = f"{key.stage}|{key.scope}|{key.round}|{re.sub(r'[0-9]+', '', str(key.unit))}"
+    return zlib.crc32(name.encode()) & 0x7FFFFFFF
+
+
 def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ...], threshold: int) -> None:
     """Persistent forkserver child; failure is sent once, never respawned in a loop.
 
@@ -963,7 +973,9 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
 
                 seat = seats[lane]
                 cpu.set_pool_seat(seat)
-                seat.begin_task(task.resources.min_cores, dispatched=True)
+                seat.begin_task(
+                    task.resources.min_cores, width=task.resources.width, label=_round_label(task.key), dispatched=True
+                )
                 # Failed native descendants cannot be interrupted by Python unwind.
                 # The graph aborts and reaps this worker; keep its seat until then.
                 reply = perform_task(task, token, PoolShareBudget(), keep_gathers=True)
@@ -973,7 +985,9 @@ def _graph_worker(connection: Any, settings: Any, groups: tuple[PoolCounters, ..
                 # shared-memory transfer from holding up the contig.
                 team = cpu.authority_threads(_task_peak_threads())
                 packed = _pack_reply(replace(reply, retire=retire), copy_threads=team + cpu.idle_lane_cpus())
-                seat.end_task()
+                from .cooperation import Deferred
+
+                seat.end_task(sample=not isinstance(reply.value, Deferred))
                 connection.send(("result", packed))
                 # Idle workers retain only explicitly registered affinity state.
                 del reply, packed, task, token, message

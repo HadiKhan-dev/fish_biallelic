@@ -55,9 +55,7 @@ is schema defaults, preset, TOML, ordinary CLI options, then repeatable `--set`
 overrides. Unknown keys and invalid values are errors. See the generated
 [settings reference](../reference/settings.md).
 
-Pedigree decisions use the composite log likelihoods directly. Existing configurations carrying
-the pedigree table's `evidence_calibration` key with `"off"` or `"predictive"` load with one removal warning; the key is
-discarded and is absent from the resolved configuration. Other legacy values are errors.
+Pedigree decisions use the composite log likelihoods directly.
 The composite evidence is not claimed to give calibrated posterior probabilities.
 
 ```sh
@@ -67,10 +65,10 @@ haplotypes status run --json
 ```
 
 
-4.12 reads and resumes only checkpoints and exports written by 4.12. Earlier
-run directories and exports must be re-run with 4.12 in a new output root. A
-refusal names the recorded writer release; artifacts without that provenance
-are reported as having no recorded writer release.
+A release reads and resumes only checkpoints and exports written by the same
+release. Run directories and exports of any other release must be re-run in a
+new output root. A refusal names the recorded writer release; artifacts without
+that provenance are reported as having no recorded writer release.
 
 `run` initialises a new run automatically and resumes compatible publications on
 later invocations. An explicit `init` is needed before separate workflow step
@@ -155,7 +153,7 @@ appends; a missing, truncated or stale snapshot falls back to scanning headers.
 It writes nothing, so archived and read-only checkpoint roots remain usable.
 The status latency target is ten seconds for an N = 320 run with saved indexes.
 A long unpublished tail, missing indexes or slow storage can require a full
-header scan. Status reads only 4.12 invocation records and checkpoint layouts.
+header scan. Status reads only this release's invocation records and checkpoint layouts.
 
 The run log prints progress every ten minutes and at each chromosome/stage
 completion. It reports completed/known executor calls, running tasks, claimed CPU
@@ -234,9 +232,7 @@ original = Results("RUN", exclude_contigs=())
 An empty exclusion uses the ordinary output paths and identity parameters. Code
 source hashes still change when upgrading software; source identities are checked
 independently of the exclusion setting. Use the same software version while
-resuming and changing sets. Scientific checkpoints from 4.14 cannot be resumed
-with this implementation because changed source hashes change product identities;
-use a new run when upgrading from 4.14.
+resuming and changing sets.
 
 ## Re-export
 
