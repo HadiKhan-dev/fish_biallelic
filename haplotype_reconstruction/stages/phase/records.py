@@ -309,6 +309,7 @@ def expected(
     from ..painting import records as painting_records
     from ..pedigree import records as pedigree_records
     from ..refit import records as refit_records
+    from ..relatedness.working_map import map_identity
 
     if product not in ("phase", "phase_summary") or contig is None or contig not in manifest["contigs"]:
         raise InputError("phase reader requires a declared product and bound contig")
@@ -344,7 +345,7 @@ def expected(
         painting_request.identity,
         refit_request.identity,
         edges.identity,
-        manifest["map_identities"][contig],
+        map_identity(store, manifest, contig),
     )
     parameters = from_payload(PhaseParameters, manifest["parameters"]["family_phase"])
     from ...contracts.contigs import AnalysisContigs

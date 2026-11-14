@@ -211,6 +211,7 @@ def expected(
     from ...science.painting.parameters import PaintingParameters
     from ..assembly import records as assembly_records
     from ..evidence import records as evidence_records
+    from ..relatedness.working_map import map_identity
 
     if contig is None or contig not in manifest["contigs"]:
         raise InputError("painting reader requires a bound contig")
@@ -235,7 +236,7 @@ def expected(
         assembly_identity=assembled.identity,
         evidence_identity=evidence.identity,
         payload_identity=bound_payload_identity(file),
-        map_identity=manifest["map_identities"][contig],
+        map_identity=map_identity(store, manifest, contig),
         ties=TieSettings(reverse=bool(settings["reverse"]), keep=tuple(settings["keep"])),
         numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
     )

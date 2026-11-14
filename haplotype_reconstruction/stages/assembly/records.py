@@ -583,6 +583,7 @@ def expected(store, manifest, *, contig, round_name=None, upstream=None, levels=
     from ...core.errors import InputError
     from ...science.assembly.parameters import AssemblyParameters
     from ..evidence import records as evidence_records
+    from ..relatedness.working_map import map_identity
     from ..selection import records as selection_records
 
     file = store.contig(contig)
@@ -610,7 +611,7 @@ def expected(store, manifest, *, contig, round_name=None, upstream=None, levels=
             panels=selected.identity,
             evidence=evidence.identity,
             payload=bound_payload_identity(file),
-            map=manifest["map_identities"][contig],
+            map=map_identity(store, manifest, contig),
         )
     parameters = from_payload(AssemblyParameters, manifest["parameters"]["assembly"])
     root = assembly_identity(

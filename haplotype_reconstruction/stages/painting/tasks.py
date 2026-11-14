@@ -289,6 +289,7 @@ def run(
     from ..painting.tasks import run_contig
     from ..painting import records
     from ..evidence import records as evidence_records
+    from ..relatedness.working_map import working_maps
 
     reader, store = task_inputs(root)
     assembly = required_product(reader, assembly_records, "assembly", contig)
@@ -302,7 +303,7 @@ def run(
         file,
         expected,
         (assembly.prepared, assembly.components),
-        maps.for_contig(contig),
+        working_maps(store, reader.manifest, maps).for_contig(contig),
         resolved.parameters.painting,
         evidence_identity=evidence_id,
         payload_identity=payload,

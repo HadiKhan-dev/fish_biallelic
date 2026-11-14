@@ -22,7 +22,7 @@ from ..shared.material import partition_coordinates
 from .frequency import allele_frequency
 from .parameters import AlleleFrequencyParameters, FamilyParameters
 from .search import FamilyFit, fit
-from .terms import family_terms
+from .terms import family_terms, scaled_likelihoods
 
 _DEFAULT_FAMILY = FamilyParameters()
 _DEFAULT_FREQUENCY = AlleleFrequencyParameters()
@@ -57,18 +57,24 @@ class Evidence(Protocol):
 @dataclass(frozen=True)
 class ContigTerms:
     """One contig's float64 child/parent terms and its family sites' working-map coordinates (Morgans,
-    nondecreasing: the configured map, or the configured rate where it applies)."""
+    nondecreasing: the configured map, or the configured rate where it applies); the family sites' bp positions
+    (float64[M]), float32 scaled genotype likelihoods (unobserved cells 1) and observation mask feed the rate
+    estimate (rl20)."""
 
     child: np.ndarray
     log_prior: np.ndarray
     log_posterior: np.ndarray
     coordinates: np.ndarray
+    positions: np.ndarray | None = None
+    scaled: np.ndarray | None = None
+    observed: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
 class FamilyTerms:
     """Family input arrays on the bound concatenated site axis; all inputs read-only. ``ranges``: the support
-    units' site ranges, ``weights`` their working Morgans (DESIGN_417 D5)."""
+    units' site ranges, ``weights`` their working Morgans (DESIGN_417 D5). Positions (bp), float32 scaled
+    likelihoods and the observation mask serve only the rate estimate (rl20)."""
 
     sample_ids: tuple[str, ...]
     contigs: tuple[str, ...]
@@ -78,6 +84,9 @@ class FamilyTerms:
     ranges: tuple[tuple[int, int], ...]
     chromosome_sites: tuple[int, ...]
     weights: tuple[float, ...] = ()
+    positions: np.ndarray | None = None
+    scaled: np.ndarray | None = None
+    observed: np.ndarray | None = None
 
 
 def contig_terms(
@@ -93,16 +102,21 @@ def contig_terms(
     gl, observed, positions = evidence.likelihoods, evidence.observed, evidence.positions
     if not len(positions):
         n = len(evidence.sample_ids)
-        return ContigTerms(np.empty((n, 0, 9)), np.empty((0, 3)), np.empty((n, 0, 3)), np.empty(0))
+        return ContigTerms(
+            np.empty((n, 0, 9)), np.empty((0, 3)), np.empty((n, 0, 3)), np.empty(0), np.empty(0),
+            np.empty((n, 0, 3), dtype=np.float32), np.empty((n, 0), dtype=np.bool_),
+        )
     p = allele_frequency(gl, observed, frequency_parameters, map_work=map_work)
     keep = (np.minimum(p, 1 - p) >= family_parameters.minor_allele_frequency) & (
         observed.mean(axis=0) >= family_parameters.minimum_observed
     )
     sites = np.flatnonzero(keep)[:: family_parameters.family_site_step]
-    child, prior, post = family_terms(gather_likelihoods(gl, sites), observed[:, sites], p[sites], family_parameters)
-    coordinates = np.asarray(genetic_map.cumulative_morgans(np.asarray(positions[sites], dtype=np.float64)),
-                             dtype=np.float64).reshape(-1)
-    return ContigTerms(child, prior, post, coordinates)
+    site_likelihoods, site_observed = gather_likelihoods(gl, sites), np.asarray(observed[:, sites], dtype=np.bool_)
+    child, prior, post = family_terms(site_likelihoods, site_observed, p[sites], family_parameters)
+    site_positions = np.asarray(positions[sites], dtype=np.float64)
+    coordinates = np.asarray(genetic_map.cumulative_morgans(site_positions), dtype=np.float64).reshape(-1)
+    scaled = scaled_likelihoods(site_likelihoods, site_observed, family_parameters).astype(np.float32)
+    return ContigTerms(child, prior, post, coordinates, site_positions, scaled, site_observed)
 
 
 def support_axis(
@@ -151,6 +165,15 @@ def concatenate_terms(
         tuple(ranges),
         tuple(chromosome_sites),
         tuple(weights),
+        *(
+            (
+                np.concatenate([t.positions for t in terms]),
+                np.ascontiguousarray(np.concatenate([t.scaled for t in terms], axis=1)),
+                np.ascontiguousarray(np.concatenate([t.observed for t in terms], axis=1)),
+            )
+            if all(t.positions is not None and t.scaled is not None and t.observed is not None for t in terms)
+            else ()  # terms built for the family fit alone (no rate estimate)
+        ),
     )
 
 

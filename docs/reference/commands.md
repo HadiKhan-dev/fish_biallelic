@@ -25,6 +25,7 @@ Initialize if needed, then run or resume the graph.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--infer-rate` | 0 | `—` | — | Use the recombination rate estimated from relatives for contigs without a map file when it differs from the supplied rate ([genetic_map] infer_rate). |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
@@ -51,6 +52,7 @@ Validate inputs and initialize the run manifest.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--infer-rate` | 0 | `—` | — | Use the recombination rate estimated from relatives for contigs without a map file when it differs from the supplied rate ([genetic_map] infer_rate). |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
@@ -77,6 +79,7 @@ Record one contig's evidence.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--infer-rate` | 0 | `—` | — | Use the recombination rate estimated from relatives for contigs without a map file when it differs from the supplied rate ([genetic_map] infer_rate). |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
@@ -104,6 +107,7 @@ Gather relatedness from every contig's evidence.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--infer-rate` | 0 | `—` | — | Use the recombination rate estimated from relatives for contigs without a map file when it differs from the supplied rate ([genetic_map] infer_rate). |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
@@ -130,6 +134,7 @@ Reconstruct and refit one contig; concurrent invocations share unclaimed units.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--infer-rate` | 0 | `—` | — | Use the recombination rate estimated from relatives for contigs without a map file when it differs from the supplied rate ([genetic_map] infer_rate). |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
@@ -157,6 +162,7 @@ Gather the genome-wide pedigree.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--infer-rate` | 0 | `—` | — | Use the recombination rate estimated from relatives for contigs without a map file when it differs from the supplied rate ([genetic_map] infer_rate). |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
@@ -183,6 +189,7 @@ Phase, map and export one contig.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--infer-rate` | 0 | `—` | — | Use the recombination rate estimated from relatives for contigs without a map file when it differs from the supplied rate ([genetic_map] infer_rate). |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
@@ -210,6 +217,7 @@ Publish tables from available records.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--infer-rate` | 0 | `—` | — | Use the recombination rate estimated from relatives for contigs without a map file when it differs from the supplied rate ([genetic_map] infer_rate). |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |

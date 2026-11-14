@@ -452,6 +452,39 @@ def _analysis_reader(prepared, selection):
     )
 
 
+def _report_rate(prepared: PreparedRun) -> None:
+    """Print the relatedness stage's recombination-rate decision once in the run log (rl20), with its warning."""
+    from ..stages.relatedness.families_records import load, result_reader
+    from ..store.store import CheckpointStore
+
+    store = CheckpointStore(prepared.paths.checkpoints)
+    manifest = store.manifest("run")
+    reader = None if manifest is None else result_reader(store, manifest, product="families")
+    product = None if reader is None else load(store.run, reader.identity)
+    rate = None if product is None else product.rate
+    if rate is None:
+        return
+    if rate.gate_passed:
+        text = (
+            f"genome-wide recombination rate from relatives {rate.estimate_cm_per_mb:.3g} cM/Mb, 95 % "
+            f"{rate.interval_kind.replace('_', ' x ')} interval [{rate.interval_low_cm_per_mb:.2f}, "
+            f"{rate.interval_high_cm_per_mb:.2f}] ({rate.meioses} meioses, "
+            f"{sum(1 for status in rate.family_status if status == 'used')} families)"
+        )
+    else:
+        text = "genome-wide recombination rate from relatives not determined"
+    if rate.decision == "adopted":
+        text += (
+            f"; contigs without a map file use {rate.working_rate_cm_per_mb:g} cM/Mb instead of the supplied "
+            f"{rate.supplied_rate_cm_per_mb:g} cM/Mb ({rate.decision_reason})"
+        )
+    else:
+        text += f"; the supplied map is kept ({rate.decision_reason})"
+    print(f"Recombination rate: {text}", flush=True)
+    if rate.warning:
+        print(f"WARNING: {rate.warning}", flush=True)
+
+
 def _map_output(function, items):
     """Supply formatters an ordered map bounded by this task's live CPU claim."""
     from ..engine.cpu import current_budget
@@ -841,7 +874,12 @@ def execute(
 
         output_actions = _output_actions(prepared, resolved)
         output_nodes = tuple(Node(task.key, task.depends_on) for task in output_actions.values())
-        graph = build_graph(settings.input.contigs, output_nodes=output_nodes, analysis=resolved.analysis)
+        graph = build_graph(
+            settings.input.contigs,
+            output_nodes=output_nodes,
+            analysis=resolved.analysis,
+            infer_rate=resolved.parameters.relatedness.infer_rate,
+        )
         painted: tuple[str, ...] = ()
         if settings.execution.max_contigs:
             reader = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints, exclude_contigs=())
@@ -922,13 +960,18 @@ def execute(
         assert cut is not None
         if defer:
             tasks, scheduling = with_kernel_tasks(tasks, scheduling, kernels)
+        def on_task(task, reply, finished=recorder.task_finished):
+            finished(task, reply)
+            if task.key.stage == "relatedness" and task.key.round == "" and isinstance(reply.value, str):
+                _report_rate(prepared)  # once per invocation that runs or reuses the relatedness gather
+
         values = run_graph(
             tasks,
             cores=prepared.cores,
             in_process=in_process,
             initial_results=completed,
             **scheduling,
-            on_task=recorder.task_finished,
+            on_task=on_task,
             contig_lanes=None if settings.execution.contig_lanes == "auto" else int(settings.execution.contig_lanes),
             preload=preload,
         )
@@ -1256,6 +1299,7 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
         resolved.contigs,
         output_nodes=tuple(Node(task.key, task.depends_on) for task in outputs.values()),
         analysis=resolved.analysis,
+        infer_rate=resolved.parameters.relatedness.infer_rate,
     )
     cut = _attach_reports(graph, workflow_cut(graph, "recombination"))
     completed = _prerequisites(prepared, resolved, cut)

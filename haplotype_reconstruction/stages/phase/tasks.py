@@ -223,6 +223,7 @@ def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMa
     from ..phase import records
     from ..phase.tasks import publish_contig
     from ..refit import records as refit_records
+    from ..relatedness.working_map import working_maps
 
     reader, store = task_inputs(root)
     evidence = required_dense_evidence(reader, contig)
@@ -237,7 +238,7 @@ def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMa
         painting,
         refit,
         pedigree.edges,
-        maps.for_contig(contig),
+        working_maps(store, reader.manifest, maps).for_contig(contig),
         resolved.parameters.family_phase,
         identities,
         expected,

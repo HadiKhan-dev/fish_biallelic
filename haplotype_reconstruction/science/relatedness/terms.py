@@ -18,6 +18,14 @@ for _gu in range(3):
         TRANSMISSION[3 * _gu + _gv] = [(1 - _a) * (1 - _b), _a * (1 - _b) + (1 - _a) * _b, _a * _b]
 
 
+def scaled_likelihoods(
+    gl: np.ndarray, observed: np.ndarray, parameters: FamilyParameters = _DEFAULT_FAMILY
+) -> np.ndarray:
+    """Genotype likelihoods scaled to a maximum of 1 per cell, unobserved cells 1 (float64 [N, M, 3])."""
+    g = gl / np.maximum(gl.max(axis=2, keepdims=True), parameters.term_floor)
+    return np.where(observed[..., None], g, 1.0)
+
+
 def family_terms(
     gl: np.ndarray, observed: np.ndarray, p: np.ndarray, parameters: FamilyParameters = _DEFAULT_FAMILY
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -29,8 +37,7 @@ def family_terms(
     probabilities (a latent parent's law). Log posterior: each sample's genotype posterior from its own reads under
     that prior (its law as a sequenced parent; a family conditions on it, so its reads are counted once, in its
     own family)."""
-    g = gl / np.maximum(gl.max(axis=2, keepdims=True), parameters.term_floor)
-    g = np.where(observed[..., None], g, 1.0)
+    g = scaled_likelihoods(gl, observed, parameters)
     terms = np.log(np.maximum(np.einsum("nmg,kg->nmk", g, TRANSMISSION), parameters.term_floor))
     prior = np.stack([(1 - p) ** 2, 2 * p * (1 - p), p**2], axis=1)
     post = g * prior[None]
@@ -42,4 +49,4 @@ def family_terms(
     )
 
 
-__all__ = ["family_terms"]
+__all__ = ["family_terms", "scaled_likelihoods"]

@@ -209,6 +209,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     sample_ids = tuple(manifest["sample_ids"])
     contigs = AnalysisContigs.from_manifest(manifest).included
     eligibility = ParentEligibility.unrestricted(sample_ids)
+    from ..relatedness.working_map import map_identity
 
     def bind(c: str) -> tuple[str, str, Mapping[str, Any]]:
         file = store.contig(c)
@@ -222,7 +223,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         _header(file, painting.key, painting.identity)
         prepared_identity = prepare.derivation(
             parameters.preparation,
-            dict(painting=painting.identity, evidence=evidence.identity, genetic_map=manifest["map_identities"][c]),
+            dict(painting=painting.identity, evidence=evidence.identity, genetic_map=map_identity(store, manifest, c)),
             reverse=parameters.reverse_conventions,
             numerical_policy=policy,
         )
@@ -307,7 +308,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     family_reader = families_records.result_reader(store, manifest, product="families")
     if family_reader is None:
         raise InvariantError("pedigree requires relatedness/families")
-    _header(store.run, family_reader.key, family_reader.identity)
+    _header(store.run, family_reader.key, family_reader.identity, schemas=families_records.SCHEMA)
     dependencies = PedigreeDependencies(
         eligibility.identity(),
         panel_identity,

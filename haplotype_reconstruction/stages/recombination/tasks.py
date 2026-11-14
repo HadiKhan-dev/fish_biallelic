@@ -99,6 +99,7 @@ def run(
     from ..phase import records as phase_records
     from ..recombination import records
     from ..recombination.tasks import publish_contig
+    from ..relatedness.working_map import working_maps
 
     reader, store = task_inputs(root)
     phase = required_product(reader, phase_records, "phase", contig)
@@ -111,7 +112,7 @@ def run(
         phase,
         pedigree.edges,
         resolved.parameters.recombination,
-        maps.for_contig(contig),
+        working_maps(store, reader.manifest, maps).for_contig(contig),
         expected,
         reverse=reverse,
     )

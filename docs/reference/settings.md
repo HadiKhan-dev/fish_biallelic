@@ -51,6 +51,7 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 |---|---|---|---|---|---|
 | `rate_cm_per_mb` | float | `5.0` | — | yes | Fallback recombination rate (cM/Mb) without a map or beyond its knots. Provenance: Fallback recombination rate (cM/Mb) without a map or beyond its knots. |
 | `file` | path | `""` | — | yes | Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). Provenance: Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). |
+| `infer_rate` | bool | `false` | — | yes | Use the genome-wide recombination rate estimated from full-sib families in the relatedness stage as the fallback rate of contigs without a map file, when its gate passes, rate_cm_per_mb lies outside its 95 % interval and at least five informative families were used. Off (keep the supplied rate): the estimate is reported, with a warning when rate_cm_per_mb lies outside the interval, and nothing downstream changes. Map files are always kept. Provenance: Use the genome-wide recombination rate estimated from full-sib families in the relatedness stage as the fallback rate of contigs without a map file, when its gate passes, rate_cm_per_mb lies outside its 95 % interval and at least five informative families were used. Off (keep the supplied rate): the estimate is reported, with a warning when rate_cm_per_mb lies outside the interval, and nothing downstream changes. Map files are always kept. |
 ## family_phase
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |

@@ -13,7 +13,7 @@ from typing import Any
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.relatedness import RelatednessFamilies
 from ...core.errors import InputError
-from ...science.relatedness.parameters import AlleleFrequencyParameters, FamilyParameters
+from ...science.relatedness.parameters import AlleleFrequencyParameters, FamilyParameters, RateParameters
 from ...store.container import CheckpointFile, RecordInfo
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy
@@ -23,9 +23,10 @@ from .evidence_pass import EvidenceInput, bound_upstream, upstream_identities
 
 __all__ = ["KEY", "SCHEMA", "CODE_ROOTS", "Adapter", "identity", "write", "load", "Reader", "expected", "result_reader"]
 KEY = "relatedness/families"
-SCHEMA = 1
+SCHEMA = 2
 CODE_ROOTS = (
     "stages.relatedness.families_task",
+    "science.relatedness.rate",
     "stages.relatedness.families_records",
     "stages.evidence.records",
     "contracts.payload",
@@ -46,6 +47,7 @@ class Adapter:
 
 
 _ADAPTER = Adapter()
+_DEFAULT_RATE = RateParameters()
 
 
 def identity(
@@ -53,6 +55,7 @@ def identity(
     sample_ids: tuple[str, ...],
     parameters: FamilyParameters,
     frequency: AlleleFrequencyParameters,
+    rate: RateParameters = _DEFAULT_RATE,
     *,
     numerical_policy: NumericalPolicy | None = None,
     reverse: bool = False,
@@ -63,6 +66,7 @@ def identity(
         sample_ids,
         parameters,
         frequency,
+        rate,
         upstream_identities(inputs),
         numerical_policy=numerical_policy,
         reverse=reverse,
@@ -74,6 +78,7 @@ def _bound_identity(
     sample_ids: tuple[str, ...],
     parameters: FamilyParameters,
     frequency: AlleleFrequencyParameters,
+    rate: RateParameters,
     upstream: Mapping[str, str],
     *,
     numerical_policy: NumericalPolicy | None = None,
@@ -84,6 +89,7 @@ def _bound_identity(
         parameters=dict(
             families=parameters,
             frequency=frequency,
+            rate=rate,
             sample_ids=sample_ids,
             contigs=contigs,
         ),
@@ -122,6 +128,8 @@ def expected(
     # A run manifest records only configurable stage parameters; allele-frequency estimation is not configurable,
     # so a run-level request rebuilds the derivation with its defaults (task manifests record them explicitly).
     frequency = AlleleFrequencyParameters(**manifest["parameters"].get("allele_frequency", {}))
+    # The rate estimator's constants are not configurable either (rl20).
+    rate = from_payload(RateParameters, manifest["parameters"].get("rate", to_payload(RateParameters())))
     reverse = bool(manifest["ties"]["reverse"])
     return Reader(
         _bound_identity(
@@ -129,6 +137,7 @@ def expected(
             tuple(manifest["sample_ids"]),
             parameters,
             frequency,
+            rate,
             upstream,
             reverse=reverse,
             numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),

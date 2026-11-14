@@ -412,6 +412,7 @@ def expected(
     from ...science.selection.parameters import SelectionParameters
     from ..discovery import records as discovery_records
     from ..evidence import records as evidence_records
+    from ..relatedness.working_map import map_identity
 
     if contig is None or contig not in manifest["contigs"]:
         raise InputError("selection reader requires a bound contig")
@@ -436,13 +437,14 @@ def expected(
     discovery_parameters = from_payload(DiscoveryParameters, manifest["parameters"]["discovery"])
     assembly_parameters = from_payload(AssemblyParameters, manifest["parameters"]["assembly"])
     settings = manifest["ties"]
+    genetic_map = map_identity(store, manifest, contig)
     identities, scopes = dict(upstream), []
     for round_name in ROUNDS:
         expected = round_identity(
             round_name,
             parameters,
             discovery_parameters,
-            manifest["map_identities"][contig],
+            genetic_map,
             identities,
             assembly_parameters if round_name != "initial" else None,
             reverse=bool(settings["reverse"]),

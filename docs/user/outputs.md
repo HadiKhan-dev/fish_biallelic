@@ -356,6 +356,31 @@ slots. `relatedness/summary.json` contains exactly these keys, in order.
 | `search_margin` | That search's objective minus the other search's, nats; null when the other search was not measured |
 | `family_sites` | sites on the family evidence axis |
 | `chromosome_sites` | Object: family sites per contig, in configuration order |
+| `recombination_rate` | Object: the genome-wide recombination rate estimated from the families and the working-map decision ([rl20](../methods/relatedness.md#rl20)), keys below |
+
+`recombination_rate` has these keys, in order. Rates are cM/Mb; a value that does not exist is null.
+
+| Key | Meaning |
+|---|---|
+| `estimate_cm_per_mb` | One genome-wide rate from the used families' pairs; null without an informative family |
+| `interval_cm_per_mb` | 95 % percentile-bootstrap interval `[low, high]` of the kind below |
+| `interval_kind` | `family_chromosome` (two-level bootstrap: families, then their chromosomes; five or more contigs), `family` (else five or more families) or `none` |
+| `meioses` | Meioses of the used families (two per member) |
+| `determined_sites_per_pair` | Meiosis-weighted mean of the used families' median selected sites per pair |
+| `families_used` | Informative families the estimate uses; `infer_rate` adopts only with at least five |
+| `error_rate` | The fitted isolated genotype-error mixture |
+| `artefact_rate_per_mb`, `artefact_length_kb` | The fitted artefact-stretch nuisance |
+| `at_grid_edge` | Whether the estimate lies at an edge of the rate grid |
+| `gate_passed`, `gate_reason` | The adoption gate and why it passed or failed |
+| `supplied_rate_cm_per_mb` | `[genetic_map] rate_cm_per_mb` |
+| `infer_rate` | The `[genetic_map]` switch the decision read |
+| `decision` | `adopted` (contigs without a map file use the working rate) or `kept` (the supplied map is the working map) |
+| `decision_reason` | Why |
+| `working_rate_cm_per_mb` | The fallback rate of contigs without a map file used by every later stage |
+| `contigs_using_working_rate` | Contigs whose map changed (empty unless adopted) |
+| `warning` | The warning printed once in the run log; null when none |
+| `families` | Array, one object per family of two or more members: `family`, `members`, `model` (`two_indicator` with a sequenced slot, `xor` with two latent slots), `pairs`, `determined_sites_per_pair`, `estimate_cm_per_mb`, `status` (`used`, `inconsistent`, `no_informative_sites`, `too_little_information`), `inconsistency_nats` (dropped families) |
+| `per_chromosome_cm_per_mb_diagnostic` | Object: the rate per contig at the shared nuisance; a diagnostic only, never a map |
 
 ### Pedigree tables and JSON
 

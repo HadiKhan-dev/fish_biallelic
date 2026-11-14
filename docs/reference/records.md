@@ -3389,15 +3389,51 @@ Source: [haplotype_reconstruction/contracts/refit.py](../../haplotype_reconstruc
 | `components` | `tuple[ComponentRefit, ...]` | call | ('C',) | 1 | ComponentRefit | True | `required` |
 | `excluded_samples` | `tuple[str, ...]` | state | () | 1 | str | True | `required` |
 
+## relatedness.RecombinationRateEstimate
+
+Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `estimate_cm_per_mb` | `float` | diagnostic | () | cM/Mb | float | True | `required` |
+| `interval_low_cm_per_mb` | `float` | diagnostic | () | cM/Mb | float | True | `required` |
+| `interval_high_cm_per_mb` | `float` | diagnostic | () | cM/Mb | float | True | `required` |
+| `interval_kind` | `str` | diagnostic | () | 1 | str | True | `required` |
+| `meioses` | `int` | diagnostic | () | count | int | True | `required` |
+| `determined_sites` | `float` | diagnostic | () | site | float | True | `required` |
+| `error_rate` | `float` | diagnostic | () | share | float | True | `required` |
+| `artefact_rate_per_mb` | `float` | diagnostic | () | 1/Mb | float | True | `required` |
+| `artefact_length_kb` | `float` | diagnostic | () | kb | float | True | `required` |
+| `at_grid_edge` | `bool` | diagnostic | () | 1 | bool | True | `required` |
+| `contigs` | `tuple[str, ...]` | obs | ('C',) | 1 | str | True | `required` |
+| `per_chromosome_cm_per_mb` | `NDArray[np.float64]` | diagnostic | ('C',) | cM/Mb | float64 | True | `required` |
+| `family` | `NDArray[np.int64]` | diagnostic | ('R',) | 1 | int64 | True | `required` |
+| `family_members` | `NDArray[np.int64]` | diagnostic | ('R',) | count | int64 | True | `required` |
+| `family_model` | `tuple[str, ...]` | diagnostic | ('R',) | 1 | str | True | `required` |
+| `family_pairs` | `NDArray[np.int64]` | diagnostic | ('R',) | count | int64 | True | `required` |
+| `family_sites` | `NDArray[np.float64]` | diagnostic | ('R',) | site | float64 | True | `required` |
+| `family_estimate_cm_per_mb` | `NDArray[np.float64]` | diagnostic | ('R',) | cM/Mb | float64 | True | `required` |
+| `family_status` | `tuple[str, ...]` | diagnostic | ('R',) | 1 | str | True | `required` |
+| `family_inconsistency` | `NDArray[np.float64]` | diagnostic | ('R',) | nats | float64 | True | `required` |
+| `gate_passed` | `bool` | call | () | 1 | bool | True | `required` |
+| `gate_reason` | `str` | diagnostic | () | 1 | str | True | `required` |
+| `supplied_rate_cm_per_mb` | `float` | obs | () | cM/Mb | float | True | `required` |
+| `infer_rate` | `bool` | obs | () | 1 | bool | True | `required` |
+| `map_free_contigs` | `tuple[str, ...]` | obs | () | 1 | str | True | `required` |
+| `decision` | `str` | call | () | 1 | str | True | `required` |
+| `decision_reason` | `str` | diagnostic | () | 1 | str | True | `required` |
+| `working_rate_cm_per_mb` | `float` | call | () | cM/Mb | float | True | `required` |
+| `warning` | `str` | report | () | 1 | str | True | `required` |
+
 ## relatedness.RelatednessFamilies
 
 Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
 
-Full-sib families with aligned parent-slot/support and half-sib tables. Families are numbered by smallest member; half_sib and gains share one sorted row order. ``parents`` holds sequenced slot samples whose genotypes serve the family model as a parent's would. A slot sample may be a parent, child (the two directions tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. NaN slot support denotes a latent slot, and search_margin may be NaN when the alternate search was not measured. Canonicalisation is RL1 science. member_support / parent_support (FamilySupport, ParentSlot*Support): Morgan-weighted shares of the ``support_units`` pooled 1-Morgan units of the family sites' working map (DESIGN_417 D5).
+Full-sib families with aligned parent-slot/support and half-sib tables. Families are numbered by smallest member; half_sib and gains share one sorted row order. ``parents`` holds sequenced slot samples whose genotypes serve the family model as a parent's would. A slot sample may be a parent, child (the two directions tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. NaN slot support denotes a latent slot, and search_margin may be NaN when the alternate search was not measured. Canonicalisation is RL1 science. member_support / parent_support (FamilySupport, ParentSlot*Support): Morgan-weighted shares of the ``support_units`` pooled 1-Morgan units of the family sites' working map (DESIGN_417 D5). ``rate`` is the genome-wide recombination-rate estimate from these families (rl20); records built outside the relatedness stage may omit it.
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
 | `sample_ids` | `tuple[str, ...]` | obs | ('N',) | 1 | str | True | `required` |
 | `contigs` | `tuple[str, ...]` | obs | ('C',) | 1 | str | True | `required` |
 | `family` | `NDArray[np.int64]` | call | ('N',) | 1 | int64 | True | `required` |
@@ -3414,6 +3450,7 @@ Full-sib families with aligned parent-slot/support and half-sib tables. Families
 | `support_units` | `int` | diagnostic | () | 1 | int | True | `0` |
 | `search` | `str` | state | () | 1 | str | True | `''` |
 | `search_margin` | `float` | diagnostic | () | nats | float | True | `float('nan')` |
+| `rate` | `RecombinationRateEstimate &#124; None` | diagnostic | () | 1 | RecombinationRateEstimate | True | `None` |
 
 ## relatedness.RelatednessDiagnostics
 

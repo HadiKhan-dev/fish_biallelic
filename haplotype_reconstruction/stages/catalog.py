@@ -49,7 +49,7 @@ STAGES = {
         "stages.relatedness.families_records",
         "families",
         owners=("stages.relatedness.families_task",),
-        kernel_roots=("science.relatedness.run", "science.evidence.likelihoods"),
+        kernel_roots=("science.relatedness.run", "science.relatedness.rate", "science.evidence.likelihoods"),
         kernels=("relatedness",),
         steps=("relatedness",),
         prefix="relatedness",

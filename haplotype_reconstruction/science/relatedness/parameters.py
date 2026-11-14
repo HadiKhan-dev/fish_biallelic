@@ -109,6 +109,17 @@ class FamilyParameters:
             ),
         },
     )
+    infer_rate: bool = field(
+        default=False,
+        metadata={
+            "provenance": (
+                "Use the estimated genome-wide recombination rate as the working fallback rate of contigs "
+                "without a map file when its gate passes, the supplied rate lies outside its 95 % interval and "
+                "at least minimum_adoption_families informative families were used (boolean); off: the "
+                "estimate is a diagnostic and nothing downstream reads it."
+            ),
+        },
+    )
     gain_tolerance: float = field(
         default=1e-6,
         metadata={
@@ -200,6 +211,151 @@ class FamilyParameters:
     )
 
 
+@dataclass(frozen=True)
+class RateParameters:
+    """Genome-wide recombination-rate estimate from relatives and its adoption gate (rl20).
+
+    Measured on 85 simulated runs and the TroMau cross (estimator version 5 of the 4.18 rate study); not user
+    settings. Rates are in cM/Mb, likelihood thresholds in nats, probabilities dimensionless.
+    """
+
+    site_posterior: float = field(
+        default=0.99,
+        metadata={
+            "provenance": (
+                "Minimum leave-pair-out posterior of a family's parental genotype pair for a site to enter a "
+                "pair's inheritance chain (probability); the pair's chain conditions on that pair exactly."
+            ),
+        },
+    )
+    segregation_posterior: float = field(
+        default=0.9,
+        metadata={
+            "provenance": (
+                "Minimum posterior of the same unordered parental pair from the other members alone, both slots "
+                "latent (probability); a sequenced slot's confident false heterozygous calls cannot select sites "
+                "its children do not segregate at."
+            ),
+        },
+    )
+    minimum_information: int = field(
+        default=2,
+        metadata={
+            "provenance": (
+                "Minimum family information, members - 2 + 2 x sequenced slots (count); a family below it cannot "
+                "determine its parents' genotypes without the pair."
+            ),
+        },
+    )
+    rate_low: float = field(
+        default=0.2,
+        metadata={"provenance": "Lowest rate of the likelihood grid (cM/Mb)."},
+    )
+    rate_high: float = field(
+        default=50.0,
+        metadata={"provenance": "Highest rate of the likelihood grid (cM/Mb)."},
+    )
+    rate_points: int = field(
+        default=48,
+        metadata={
+            "provenance": "Log-spaced rate grid points (count); the maximiser is refined by a parabola on log rate."
+        },
+    )
+    artefacts: tuple[tuple[float, float], ...] = field(
+        default=((0.0, 20.0), (0.1, 20.0), (0.1, 200.0), (1.0, 20.0), (1.0, 200.0), (10.0, 20.0), (10.0, 200.0)),
+        metadata={
+            "provenance": (
+                "Artefact-stretch nuisance grid: (start rate per Mb, mean length kb) pairs, fitted with the "
+                "rate by maximum likelihood and shared by the data set; simulations select 0-0.1 per Mb, TroMau "
+                "0.1-1 per Mb."
+            ),
+        },
+    )
+    error_rates: tuple[float, ...] = field(
+        default=(0.0, 0.001, 0.003, 0.01, 0.03, 0.1),
+        metadata={
+            "provenance": (
+                "Isolated genotype-error grid (probability per site): each selected site's state emissions are "
+                "mixed with their state mean, e' = (1 - eps) e + eps mean(e), and eps is fitted by maximum likelihood "
+                "with the rate; errors the genotype likelihoods do not represent otherwise read as inheritance "
+                "changes (simulations select 0-0.001, TroMau 0.03, a gain of 712 nats)."
+            ),
+        },
+    )
+    inconsistency_nats: float = field(
+        default=10.0,
+        metadata={
+            "provenance": (
+                "Family exclusion threshold (nats): a family whose own composite maximum exceeds its value at "
+                "the leave-one-family-out maximiser by more than this is dropped, one family at a time; read on "
+                "the chi-square(1) scale (p about 1e-5)."
+            ),
+        },
+    )
+    bootstrap_replicates: int = field(
+        default=1000,
+        metadata={"provenance": "Percentile-bootstrap replicates of the interval (count)."},
+    )
+    bootstrap_seed: int = field(
+        default=417,
+        metadata={"provenance": "Fixed seed of the bootstrap draws (integer); the interval is reproducible."},
+    )
+    minimum_interval_units: int = field(
+        default=5,
+        metadata={
+            "provenance": (
+                "Minimum contigs for the two-level bootstrap (families, then each drawn family's chromosomes), "
+                "else minimum families for a family bootstrap (count); a bootstrap over fewer units is degenerate "
+                "and the estimate falls back."
+            ),
+        },
+    )
+    minimum_determined_sites: float = field(
+        default=1000.0,
+        metadata={
+            "provenance": (
+                "Minimum meiosis-weighted mean of the families' median determined sites per pair (sites); the "
+                "depth and design guard: 1x runs score 2-200, 5x runs 3,000-20,000."
+            ),
+        },
+    )
+    maximum_half_width: float = field(
+        default=0.25,
+        metadata={
+            "provenance": (
+                "Maximum 95 % interval half-width relative to the estimate (fraction); about 60 expected "
+                "crossovers (informative meioses x genome Morgans) reach it."
+            ),
+        },
+    )
+    minimum_adoption_families: int = field(
+        default=5,
+        metadata={
+            "provenance": (
+                "Minimum informative families for infer_rate to adopt the estimate (count); structural: with fewer, "
+                "between-family variation in the rate (sex, background) cannot be measured, whatever the interval."
+            ),
+        },
+    )
+    edge_low: float = field(
+        default=0.21,
+        metadata={"provenance": "An estimate at or below this lies at the low grid edge and falls back (cM/Mb)."},
+    )
+    edge_high: float = field(
+        default=49.0,
+        metadata={"provenance": "An estimate at or above this lies at the high grid edge and falls back (cM/Mb)."},
+    )
+    working_digits: int = field(
+        default=3,
+        metadata={
+            "provenance": (
+                "Significant digits of an adopted working rate (digits); far below the interval's width, so the "
+                "working map's identity does not depend on last-bit arithmetic."
+            ),
+        },
+    )
+
+
 # Fixed numerical and workspace controls; not user settings.
 LOG_ZERO = -1e300  # Log-domain maximum initializer (nats).
 SCREEN_FLOOR = 1e-30  # Float32 site-product fallback threshold (probability).
@@ -207,4 +363,4 @@ SCALE_EXPONENT = 500  # Power-of-two product-rescaling exponent (binary exponent
 EVIDENCE_COMPARE_CHUNK = 256  # Early-exit evidence-comparison chunk width (values).
 SCREEN_SITE_TILE = 256  # Storage-only site tile width (sites).
 
-__all__ = ["AlleleFrequencyParameters", "FamilyParameters"]
+__all__ = ["AlleleFrequencyParameters", "FamilyParameters", "RateParameters"]

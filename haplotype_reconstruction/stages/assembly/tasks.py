@@ -41,6 +41,7 @@ def run(
     from ...science.assembly.run import AssemblyInputs, Role
     from ..assembly.final import assembly_task, AssemblySession
     from ..assembly.join_team import task_cpu_ceiling
+    from ..relatedness.working_map import working_maps
     from ..selection import records as selection_records
 
     reader, store = task_inputs(root)
@@ -78,7 +79,7 @@ def run(
         release_resident_namespace(_CHAIN_INPUTS)  # the final assembly is the chain inputs' last consumer
     child_key = TaskKey("assembly", "compute", contig, round_name)
     session = AssemblySession(
-        AssemblyInputs(tuple(selected), view, maps.for_contig(contig)),
+        AssemblyInputs(tuple(selected), view, working_maps(store, reader.manifest, maps).for_contig(contig)),
         resolved.parameters.assembly,
         Role.FINAL if context is None else Role.CONTEXT,
         None if context is None else int(context[1:]),

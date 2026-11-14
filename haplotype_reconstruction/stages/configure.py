@@ -155,7 +155,7 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
         SelectionParameters(),
         AssemblyParameters(),
         PaintingParameters(),
-        FamilyParameters(),
+        FamilyParameters(infer_rate=settings.genetic_map.infer_rate),
         PedigreeParameters(),
         RefitParameters(),
         PhaseParameters(protected_intervals=tuple(protected)),

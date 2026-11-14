@@ -12,6 +12,8 @@ Validate strictly increasing map positions and nondecreasing cumulative cM witho
 
 Implementation: [contracts/genetic_map.py](../../haplotype_reconstruction/contracts/genetic_map.py), [stages/inputs/genetic_map.py](../../haplotype_reconstruction/stages/inputs/genetic_map.py), [stages/configure.py](../../haplotype_reconstruction/stages/configure.py).
 
-Parameters by name: `rate_cm_per_mb`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+With `[genetic_map] infer_rate`, the relatedness stage may replace the fallback rate of contigs without a map file by its genome-wide estimate ([rl20](relatedness.md#rl20)); the working map of every later stage then uses it. Map files are never changed.
+
+Parameters by name: `rate_cm_per_mb`, `infer_rate`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(log M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.

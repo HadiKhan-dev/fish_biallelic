@@ -170,6 +170,16 @@ class GeneticMapSection:
         5.0, "float", "Fallback recombination rate (cM/Mb) without a map or beyond its knots."
     )
     file: Path | None = setting(None, "path", "Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV).")
+    infer_rate: bool = setting(
+        False,
+        "bool",
+        "Use the genome-wide recombination rate estimated from full-sib families in the relatedness "
+        "stage as the fallback rate of contigs without a map file, when its gate passes, "
+        "rate_cm_per_mb lies outside its 95 % interval and at least five informative families were "
+        "used. Off (keep the supplied rate): the estimate is reported, with a warning when "
+        "rate_cm_per_mb lies outside the interval, and nothing downstream changes. Map files are "
+        "always kept.",
+    )
 
 
 @dataclass(frozen=True)

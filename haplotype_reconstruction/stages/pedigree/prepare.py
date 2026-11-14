@@ -35,6 +35,7 @@ from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, read_items, resume
 from ...store.store import CheckpointStore
 from ..framework import RecordKey, ResourceRequest, Task, TaskKey, load_product, publish_product
+from ..relatedness.working_map import map_identity, working_maps
 
 KEY = "pedigree/prepared"
 
@@ -162,7 +163,7 @@ def prepare_stored(
         raise InputError(f"pedigree requires painting and evidence for {contig}")
     identity = derivation(
         parameters.preparation,
-        dict(painting=painted.identity, evidence=observed.identity, genetic_map=manifest["map_identities"][contig]),
+        dict(painting=painted.identity, evidence=observed.identity, genetic_map=map_identity(store, manifest, contig)),
         reverse=parameters.reverse_conventions,
         numerical_policy=numerical_policy,
     )
@@ -461,8 +462,9 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     numerical_policy = NumericalPolicy(**manifest["numerical_policy"])
     contigs = AnalysisContigs.from_manifest(manifest).included
     precheck(len(manifest["sample_ids"]), basis="configured")
-    if any(json_digest(maps.identity(c)) != manifest["map_identities"][c] for c in contigs):
-        raise InputError("pedigree maps differ from the bound run manifest")
+    maps = working_maps(store, manifest, maps)  # the material, units and exclusion weights read this map (rl20)
+    if any(json_digest(maps.identity(c)) != map_identity(store, manifest, c) for c in contigs):
+        raise InputError("pedigree maps differ from the run's working maps")
     tasks = tuple(
         Task(
             TaskKey("pedigree", "prepare", c),

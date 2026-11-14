@@ -1047,6 +1047,7 @@ Source: [haplotype_reconstruction/science/relatedness/parameters.py](../../haplo
 | `max_sweeps` | `30` | See model | Maximum sweeps of each family search (sweeps); bounds search iterations. |
 | `support_unit_morgans` | `1.0` | See model | Length of the support units (Morgans of the configured working map, DESIGN_417 D5): the family sites' axis pooled over contigs in configured order is cut into consecutive units of this length, each weighted by its Morgans in the member and parent support shares. |
 | `support_tail_morgans` | `0.5` | See model | Final-piece length (Morgans) below which the last piece of the pooled support axis joins the unit before it (DESIGN_417 D5, the pedigree material rule). |
+| `infer_rate` | `False` | See model | Use the estimated genome-wide recombination rate as the working fallback rate of contigs without a map file when its gate passes, the supplied rate lies outside its 95 % interval and at least minimum_adoption_families informative families were used (boolean); off: the estimate is a diagnostic and nothing downstream reads it. |
 | `gain_tolerance` | `1e-06` | See model | Family objective and support tie tolerance (nats); prevents numerical noise from choosing a placement or counting support. |
 | `screen_margin` | `0.1` | See model | Fixed screening-error allowance (nats); triggers exact evaluation near a screened gain boundary. |
 | `screen_margin_per_site` | `1e-06` | See model | Additional screening allowance per family site (nats per site); scales the error allowance with likelihood length. |
@@ -1057,6 +1058,30 @@ Source: [haplotype_reconstruction/science/relatedness/parameters.py](../../haplo
 | `pair_batch` | `262144` | See model | Packed pair gains evaluated per batch (pairs); bounds exact-evaluation workspace. |
 | `prefetch_batch` | `64` | See model | Family fits prefetched per batch (families); bounds cached evaluation work. |
 | `term_floor` | `1e-300` | See model | Minimum genotype term before logarithms (probability); keeps family likelihood terms finite. |
+## science.relatedness.parameters — RateParameters
+
+Source: [haplotype_reconstruction/science/relatedness/parameters.py](../../haplotype_reconstruction/science/relatedness/parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `site_posterior` | `0.99` | See model | Minimum leave-pair-out posterior of a family's parental genotype pair for a site to enter a pair's inheritance chain (probability); the pair's chain conditions on that pair exactly. |
+| `segregation_posterior` | `0.9` | See model | Minimum posterior of the same unordered parental pair from the other members alone, both slots latent (probability); a sequenced slot's confident false heterozygous calls cannot select sites its children do not segregate at. |
+| `minimum_information` | `2` | See model | Minimum family information, members - 2 + 2 x sequenced slots (count); a family below it cannot determine its parents' genotypes without the pair. |
+| `rate_low` | `0.2` | See model | Lowest rate of the likelihood grid (cM/Mb). |
+| `rate_high` | `50.0` | See model | Highest rate of the likelihood grid (cM/Mb). |
+| `rate_points` | `48` | See model | Log-spaced rate grid points (count); the maximiser is refined by a parabola on log rate. |
+| `artefacts` | `((0.0, 20.0), (0.1, 20.0), (0.1, 200.0), (1.0, 20.0), (1.0, 200.0), (10.0, 20.0), (10.0, 200.0))` | See model | Artefact-stretch nuisance grid: (start rate per Mb, mean length kb) pairs, fitted with the rate by maximum likelihood and shared by the data set; simulations select 0-0.1 per Mb, TroMau 0.1-1 per Mb. |
+| `error_rates` | `(0.0, 0.001, 0.003, 0.01, 0.03, 0.1)` | See model | Isolated genotype-error grid (probability per site): each selected site's state emissions are mixed with their state mean, e' = (1 - eps) e + eps mean(e), and eps is fitted by maximum likelihood with the rate; errors the genotype likelihoods do not represent otherwise read as inheritance changes (simulations select 0-0.001, TroMau 0.03, a gain of 712 nats). |
+| `inconsistency_nats` | `10.0` | See model | Family exclusion threshold (nats): a family whose own composite maximum exceeds its value at the leave-one-family-out maximiser by more than this is dropped, one family at a time; read on the chi-square(1) scale (p about 1e-5). |
+| `bootstrap_replicates` | `1000` | See model | Percentile-bootstrap replicates of the interval (count). |
+| `bootstrap_seed` | `417` | See model | Fixed seed of the bootstrap draws (integer); the interval is reproducible. |
+| `minimum_interval_units` | `5` | See model | Minimum contigs for the two-level bootstrap (families, then each drawn family's chromosomes), else minimum families for a family bootstrap (count); a bootstrap over fewer units is degenerate and the estimate falls back. |
+| `minimum_determined_sites` | `1000.0` | See model | Minimum meiosis-weighted mean of the families' median determined sites per pair (sites); the depth and design guard: 1x runs score 2-200, 5x runs 3,000-20,000. |
+| `maximum_half_width` | `0.25` | See model | Maximum 95 % interval half-width relative to the estimate (fraction); about 60 expected crossovers (informative meioses x genome Morgans) reach it. |
+| `minimum_adoption_families` | `5` | See model | Minimum informative families for infer_rate to adopt the estimate (count); structural: with fewer, between-family variation in the rate (sex, background) cannot be measured, whatever the interval. |
+| `edge_low` | `0.21` | See model | An estimate at or below this lies at the low grid edge and falls back (cM/Mb). |
+| `edge_high` | `49.0` | See model | An estimate at or above this lies at the high grid edge and falls back (cM/Mb). |
+| `working_digits` | `3` | See model | Significant digits of an adopted working rate (digits); far below the interval's width, so the working map's identity does not depend on last-bit arithmetic. |
 ## science.relatedness.parameters
 
 Source: [haplotype_reconstruction/science/relatedness/parameters.py](../../haplotype_reconstruction/science/relatedness/parameters.py).

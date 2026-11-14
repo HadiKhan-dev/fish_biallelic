@@ -167,6 +167,7 @@ def expected(
     from ...core.errors import InputError
     from ...store.protocol import read_items
     from ..phase import records as phase_records
+    from ..relatedness.working_map import map_identity
 
     if product != "recombination" or contig is None or contig not in manifest["contigs"]:
         raise InputError("recombination reader requires a bound contig")
@@ -180,7 +181,7 @@ def expected(
     inputs = dict(
         phase=phase.identity,
         pedigree=checked.payload["edges_identity"],
-        genetic_map=manifest["map_identities"][contig],
+        genetic_map=map_identity(store, manifest, contig),
     )
     if parameters is None:
         parameters = bound_parameters(file, configuration_identity(contig, tuple(manifest["sample_ids"]), inputs))

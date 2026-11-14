@@ -719,6 +719,7 @@ def run(
     from ...engine.graph import Expansion, RecordKey, ResultRef, Task, TaskKey
     from ..discovery import records as discovery_records
     from ..evidence import records as evidence_records
+    from ..relatedness.working_map import working_maps
     from ..selection.tasks import SelectionSession, selection_round_task
 
     reader, store = task_inputs(root)
@@ -743,7 +744,7 @@ def run(
         contig,
         resolved.parameters.local_selection,
         resolved.parameters.discovery,
-        maps.for_contig(contig),
+        working_maps(store, reader.manifest, maps).for_contig(contig),
         upstream,
         SelectionInputs(root, contig),
         reverse=ties.reverse,

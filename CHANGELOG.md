@@ -1,5 +1,46 @@
 # Changelog
 
+## 4.18.1 (14 November 2026)
+
+The relatedness stage estimates one genome-wide recombination rate from its full-sib families. By default it is a
+diagnostic: released results are those of 4.18.0, and a warning is printed once in the run log and recorded in
+`relatedness/summary.json` when the supplied fallback rate lies outside the estimate's 95 % interval. A new setting,
+`[genetic_map] infer_rate = true` (command line `--infer-rate`), makes the estimate the fallback rate of every contig
+without a map file in that case, when it rests on at least five informative families.
+
+**The estimate** ([rl20](docs/methods/relatedness.md#rl20)). Each pair of a family follows the inheritance chain of
+its two parents' copies on sites where the other members, with the pair left out, determine the parents' genotypes
+(both-heterozygous sites and an XOR chain when both parent slots are latent). The emission averages over the parents'
+genotype law at those sites rather than conditioning on the most likely pair, and two nuisances fitted with the rate
+absorb genotype errors the likelihoods do not represent (an isolated-error mixture) and clustered artefacts. The
+composite likelihood counts each family's meioses about once, inconsistent families are dropped, and the interval is
+a two-level bootstrap (families, then their chromosomes). A gate keeps the supplied rate unless the estimate is inside
+its grid, enough sites are informative (a depth guard: the estimate needs large full-sib families sequenced at about
+5x or more) and the interval is at most ±25 %. On simulated crosses whose gate passes, the interval covered the
+realised rate of the meioses used in all 16 cases (estimate/realised 0.97-1.13). On a real cichlid cross it gives
+about 2 cM/Mb against the default 5; on a second real cross, 1.32 cM/Mb against a supplied 1.45 and that run's own
+recombination estimate of 1.35.
+
+**The decision.** One fixed rate for the genome; per-chromosome values are diagnostics. Without `infer_rate` the
+supplied rate is kept: leaving inference off is how a rate is forced. With `infer_rate`, the rate is adopted (rounded
+to three significant digits) only when the gate passes, the supplied rate lies outside the interval and the estimate
+rests on at least five informative families. The family rule is structural: the rate can differ between families
+(sex of the parents, background), and with fewer families that variation cannot be measured. The real cichlid cross
+above has two informative families, so it keeps its supplied rate and warns. Map files are never changed. With
+`infer_rate` every stage that reads the map binds the working map's digest and each contig's chain waits for
+relatedness; the pedigree's material U, its units and the exclusion weights are measured on the working map. Without
+it nothing downstream reads the estimate and the workflow graph is unchanged.
+
+**Records.** `RelatednessFamilies` (schema 2) carries a `RecombinationRateEstimate`; the relatedness family-site terms
+keep their positions, scaled likelihoods and observation mask for it.
+
+**Cost and validation.** The estimate takes seconds to about two minutes (a cohort of 304 samples), beside discovery
+and off the critical path unless inference is on. The default suite and the stage tier (four shards) pass. Default
+runs give the released results of 4.18.0 on the release matrix cases checked (the real cichlid cross, a standard and
+a backcross simulation), as they gave those of 4.17.3 on all 17 cases before the rebase; the only addition is the
+estimate in the relatedness summary. With inference on, four simulated crosses generated at one rate and supplied
+another adopt rates within a few per cent of the realised rate, and their results match runs given the true rate.
+
 ## 4.18.0 (14 November 2026)
 
 This release makes the pedigree stage decide from the amount of material it has, measured in Morgans, instead of

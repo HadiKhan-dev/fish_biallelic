@@ -1,7 +1,8 @@
 """Declare the model dependencies and workflow cuts without scheduling science.
 
 Execution barriers are policy in engine.scheduler. Relatedness consumes
-all evidence, refit consumes painting, and only pedigree consumes relatedness.
+all evidence, refit consumes painting, and only pedigree consumes relatedness, except that with
+[genetic_map] infer_rate every map consumer reads the working map relatedness decides.
 Stage adapters supply concrete importable actions; this module owns no science.
 """
 
@@ -105,13 +106,19 @@ def _key(stage: str, contig: str = "run", round_: str = "") -> TaskKey:
 
 
 def build_graph(
-    contigs: Sequence[str], *, output_nodes: Sequence[Node] = (), analysis: AnalysisContigs | None = None
+    contigs: Sequence[str],
+    *,
+    output_nodes: Sequence[Node] = (),
+    analysis: AnalysisContigs | None = None,
+    infer_rate: bool = False,
 ) -> RunGraph:
     """Carry ENG-03/05 as model edges; context assemblies share contig affinity.
 
     The initial selection has no context. L1 and L2 contexts consume the previous
     round. Final assembly consumes L2 and releases its founder-view workspace.
     Caller-supplied export/report nodes carry their own declared dependencies.
+    With ``infer_rate`` the working map is a relatedness product (rl20): each contig's initial selection, the first
+    map consumer of its chain, also consumes relatedness. Without it no map consumer waits for relatedness.
     """
     order = tuple(contigs)
     if len(set(order)) != len(order) or "run" in order:
@@ -133,7 +140,7 @@ def build_graph(
         nodes.extend(
             (
                 Node(discovery, (ev,)),
-                Node(initial, (discovery, ev), maps),
+                Node(initial, (discovery, ev, relatedness) if infer_rate else (discovery, ev), maps),
                 Node(context1, (initial, ev), maps),
                 Node(l1, (discovery, initial, context1), maps),
                 Node(context2, (l1, ev), maps),
