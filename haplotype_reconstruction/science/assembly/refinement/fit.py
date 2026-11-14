@@ -59,8 +59,7 @@ from . import gains as gains_kernels
 from . import messages as kernels
 from .acceptance import MOVE_COARSE, MOVE_FINE, TOL, accept_pass
 from .beam import WindowBeam
-from .cache import Orientation, ProposalCache
-from .cache import WindowMemo as _WindowMemo
+from .cache import Orientation, ProposalCache, WindowStore
 from .capabilities import ComponentWorkspaceView, RefinementExecution, RefinementRecords
 from .ledger import FitLedger
 from .objective import score_panel, score_switches_direct, selected_alleles
@@ -77,9 +76,10 @@ from .parameters import (
     SWITCH_PENALTY,
     RefinementParameters,
 )
-from .polish_cache import GainBook, PolishStores, search_store_bytes
+from .polish_cache import GainBook, PolishShare, PolishStores, search_store_bytes
 from .proposals import WindowSolver
 from .reductions import panel_objective
+from .work_limit import WindowWorkState
 from .workspace import sample_ranges, sample_threads
 
 
@@ -259,14 +259,20 @@ class SweepEngine:
         self.ledger = FitLedger()
         self.reused_fits = 0
         self.branch_key = None
-        self._window_memo = None
-        self._window_memo_statistics: dict[str, int] = {}
+        # The component attempt's window-result store and shared polish answers (component_store).
+        self._window_store = None
+        self._polish_share = None
+        self.store_statistics: dict[str, dict[str, int]] = {}
         # Shallow branch copies share measured work; cached fits contribute no
         # new work. Updates occur only once per directional search, under a lock.
         self._profile_lock = threading.Lock()
         self._work_counters: dict[str, int] = {}
         self._fit_order = [0]
         self._ordinal_lock = threading.Lock()
+        # Serialises count-decision fan-outs of concurrent count histories (count._decision_gate).
+        self.decision_lock = threading.RLock()
+        # Set when count histories of this attempt ran concurrently (count._concurrently).
+        self.speculative = False
 
     def bind_fits(self, count, requests=None):
         """Bind logical driver-order fit ordinals before any concurrent dispatch."""
@@ -282,25 +288,43 @@ class SweepEngine:
         return ordinals
 
     @contextmanager
-    def memoized_windows(self, enabled):
-        """Optional bounded reuse across incoming roots; memory admission never waits.
+    def component_store(self, window_bytes, polish_bytes):
+        """One window-result store and one shared polish-answer store for the whole component attempt.
 
-        The fixed workspace and WindowSolver are shared by branch engines. Cache
-        eviction or declined admission changes runtime only. A retained-state
-        reservation is released on success or any failure of the count search.
+        Every fit of the component reads and fills them: the count pass, every incoming root, replay and
+        continuation branch (branch engines are shallow copies made inside this scope), and the polish fits.
+        Budgets are dimension-only (costs.component_store_bytes) and reserved by the stage with the component;
+        eviction changes runtime only. Both stores are emptied when the attempt ends.
         """
-        if not enabled:
-            yield None
-            return
-        # Dimension-bounded, deterministic optional memo. The stage owns reservation.
-        memo = _WindowMemo()
-        self._window_memo = memo
+        store, share = WindowStore(window_bytes, self.windows), PolishShare(polish_bytes)
+        self._window_store, self._polish_share = store, share
         try:
-            yield memo
+            yield store
         finally:
-            self._window_memo = None
-            self._window_memo_statistics = dict(memo.statistics)
-            memo.clear()
+            self._window_store = self._polish_share = None
+            self.store_statistics = dict(window=dict(store.statistics), polish=dict(share.statistics))
+            store.clear()
+            share.clear()
+
+    def restart(self, counter, records):
+        """Start a sequential rerun of the component (run.refine_component): a fresh window-work account and
+        fit ordinals, a fresh ledger (fits, scores, requests), work counters and tie counter, and the record view
+        that hides the abandoned attempt's records. The window and polish stores keep their exact results."""
+        self.windows.work = WindowWorkState(self.windows.work.source_start)
+        self._fit_order[0] = 0
+        self.ledger = FitLedger()
+        self._work_counters.clear()
+        self.reused_fits = 0
+        self.counter = counter
+        self.records = self._base_records = records
+        self.speculative = False
+
+    def pin_fit(self, fit):
+        """Keep the window results of an adopted count fit (WindowStore.pin): later histories meet them again."""
+        store, label = self._window_store, fit.summary.label
+        start = self.ledger.invocations.get(label)
+        if store is not None and start is not None:
+            store.pin((label, start))
 
     def branch(self, choices, input_key=None):
         """A sequential count continuation sharing the evidence and completed fits.
@@ -512,7 +536,7 @@ class SweepEngine:
                             )
         return fwd, bwd, fcnt, bcnt, fscale, bscale
 
-    def proposals(self, X, fwd, bwd, budget, cache=None, convention=None, prefix=None):
+    def proposals(self, X, fwd, bwd, budget, cache=None, convention=None, prefix=None, tag=None):
         """Every window template's proposals for panel X with messages fwd, bwd.
 
         cache (a search's ProposalCache, updated in place): a window problem is a pure function of
@@ -522,25 +546,32 @@ class SweepEngine:
         Numba thread each, as many at once as the live share allows (budget.thread_map). With fewer templates
         than CPUs, they run as concurrent children of the share instead (budget.concurrent), each holding at most
         the CPUs its focal problems can use (WindowSolver.focal_chunk_cap), and a template's focal problems run in
-        chunks on its child's map (WindowSolver._template; the results are those of one call)."""
+        chunks on its child's map (WindowSolver._template; the results are those of one call).
+        The component's window store (component_store) serves and keeps every solve; tag: the count
+        fit's token (label, start panel) under which its keys are tracked for pinning, or None."""
         with budget.scope(sample_threads(self.workspace.samples, budget)):
             fwd = fwd.flanks(a for a, _ in self.windows.spans)
             bwd = bwd.flanks(c for _, c in self.windows.spans)
 
-        memo = self._window_memo
+        store = self._window_store
+        if store is not None and store.solver is not self.windows:
+            raise InvariantError("a window store serves only the component solver it was created for")
 
         def run(index, team=None):
-            key = None
-            if memo is not None:
-                a, c = self.windows.spans[index]
-                key = memo.key(index, a, c, X, fwd, bwd, convention)
-                result = memo.lookup(key)
-                if result is not None:
-                    self.windows.work.reused(ordinals[index], result)
-                    return result
-            result = self.windows.solve(index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team)
-            if memo is not None:
-                memo.store(key, result)
+            if store is None:
+                return self.windows.solve(index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team)
+            a, c = self.windows.spans[index]
+            key = store.key(index, a, c, X, fwd, bwd, convention)
+            result = store.claim(key, tag)
+            if result is not None:
+                # The identical problem was solved by any fit of this component: its logical receipt.
+                self.windows.work.reused(ordinals[index], result)
+                return result
+            try:
+                result = self.windows.solve(index, X, fwd, bwd, convention, ordinal=ordinals[index], team=team)
+                store.store(key, result, tag)
+            finally:
+                store.release(key)
             return result
 
         spans = self.windows.spans
@@ -552,7 +583,7 @@ class SweepEngine:
         windows = self.windows
         sizes = [
             windows.template_bytes(*windows.templates[index], self.workspace.samples, len(X))
-            + (0 if memo is None else memo.transient_bytes(*spans[index], X, fwd, bwd))
+            + (0 if store is None else store.transient_bytes(*spans[index], X, fwd, bwd))
             for index in todo
         ]
         # Largest templates first (their workspace estimate tracks their work), so the map's tail holds small
@@ -1094,7 +1125,7 @@ class SweepEngine:
             for (unit, _), (found, count) in zip(pending[first:stop], values, strict=True):
                 cached[unit] = found, count
                 if book is not None:
-                    stores.bridge[unit] = keys[unit], (tuple(entry[1:5] for entry in found), count)
+                    stores.put(stores.bridge, unit, keys[unit], (tuple(entry[1:5] for entry in found), count))
             first = stop
         for unit in sorted(best):
             found, count = cached[unit]
@@ -1121,10 +1152,10 @@ class SweepEngine:
         )
         return Y, float(gain), record
 
-    def _sweep_inputs(self, X, budget, cache, held=None, convention=None, lex=None, prefix=None):
+    def _sweep_inputs(self, X, budget, cache, held=None, convention=None, lex=None, prefix=None, tag=None):
         """The messages of panel X and its window proposals (pure functions of the panel and the convention)."""
         message_state = self._messages(X, budget, held, lex)
-        proposals, stats = self.proposals(X, message_state[0], message_state[1], budget, cache, convention, prefix)
+        proposals, stats = self.proposals(X, message_state[0], message_state[1], budget, cache, convention, prefix, tag)
         return dict(
             messages=message_state,
             proposals=proposals,
@@ -1145,12 +1176,36 @@ class SweepEngine:
         """C(start): the better of the forward-first search (default content-order convention) and the
         reverse-first search (reversed convention) (module docstring). Both run concurrently, each with its share
         of the budget; the higher exact F is kept (tie classes of F; within a class the canonically smaller panel,
-        flagged as tied_panels when the panels differ). Returns a Fit whose rows are in canonical founder order."""
+        flagged as tied_panels when the panels differ). Returns a Fit whose rows are in canonical founder order.
+
+        A fit is computed once per (label, start panel) token for the component: a completed one is taken from the
+        shared ledger, and one that another count history is computing at the moment is waited for (if that
+        computation fails, a waiter computes it). Every request is listed in the branch ledger's requests, from
+        which count_pass reports the sequential driver's reuse."""
         token = (label, tie_rules.panel_key(start))
-        cached = self.ledger.fits.get(token)
-        if cached is not None:
-            self.reused_fits += 1
-            return self._choose_fit(token, cached)
+        self.ledger.requests.append(token)
+        while True:
+            cached = self.ledger.fits.get(token)
+            if cached is not None:
+                self.reused_fits += 1
+                return self._choose_fit(token, cached)
+            with self.ledger.lock:
+                if token in self.ledger.fits:
+                    continue
+                event = self.ledger.inflight.get(token)
+                if event is None:
+                    self.ledger.inflight[token] = threading.Event()
+                    break
+            event.wait()
+        try:
+            return self._converge_token(token, start, label, budget, polish, ordinal)
+        finally:
+            with self.ledger.lock:
+                event = self.ledger.inflight.pop(token)
+            event.set()
+
+    def _converge_token(self, token, start, label, budget, polish, ordinal):
+        """_converge of a token this thread owns (no completed fit in the ledger)."""
         done = self._load(f"{label}.done")
         if done is not None and (not done["summary"].get("tied_panels") or "variants" in done):
             # The fit's own tie-class decisions count once per computed fit, resumed or not.
@@ -1347,6 +1402,8 @@ class SweepEngine:
         Records <label>.<first>.sweep<n> (that sweep's state and history entry) and .done.
         Initial exact scores may be shared; direction-dependent proposals never are.
         Returns (rows int64 K x B, search record dict)."""
+        # A count fit's window-store keys are tracked under its fit token, so that adopting it can pin them.
+        tag = None if polish else (label, tie_rules.panel_key(start))
         label = f"{label}.{first}"
         done = self._load(f"{label}.done")
         if done is not None:
@@ -1360,9 +1417,12 @@ class SweepEngine:
         F, history, junctions, converged, sweep = F0, [], (), False, 0
         # Each direction owns its proposal cache: the two conventions' proposals differ from sweep 0.
         cache = ProposalCache()
-        # Only this polish search owns these bounded answers. A resumed search
-        # starts empty; no store enters the ledger or a scientific record.
+        # This polish search owns its last-problem slots; a slot miss consults the answers every polish
+        # fit of the component shared (identical framed problems). A resumed search starts with empty
+        # slots; no store enters the ledger or a scientific record.
         stores = PolishStores() if polish else None
+        if stores is not None:
+            stores.share = self._polish_share
         # This search's own messages of the panel its last sweep started from, updated in place by
         # the next sweep: (panel, messages); a reversed pass keeps their forward half only, so the
         # search holds no more message arrays than its forward passes do.
@@ -1397,6 +1457,7 @@ class SweepEngine:
                 convention=(first == "rev"),
                 lex=self.guarded and lex_next,
                 prefix=(ordinal, int(first == "rev"), sweep),
+                tag=tag,
             )
             held = None
             lex = inputs["messages"][2] is not None

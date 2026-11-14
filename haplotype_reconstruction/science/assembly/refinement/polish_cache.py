@@ -1,13 +1,16 @@
-"""Reuse the polish's local numerical answers within one immutable fixed-K search.
+"""Reuse the polish's local numerical answers within one immutable component.
 
-Owns last-problem beam, scalar-gain and plain bridge-window stores. It never
+Owns last-problem beam, scalar-gain and plain bridge-window stores per fixed-K search
+and the bounded answers all polish fits of one component share. It never
 selects variants, accepts moves or retains a workspace. Method:
-docs/methods/founder_refinement.md#polish (RS15–RS16).
+docs/methods/founder_refinement.md#polish (RS15–RS16, RC22).
 """
 
 from __future__ import annotations
 
 import hashlib
+import threading
+from collections import OrderedDict
 
 import numpy as np
 
@@ -93,12 +96,19 @@ class PolishStores:
     spans count fine and coarse units; bridge spans count blocks. Hash collisions
     have the usual content-digest qualification. No full flank array is retained.
     Temporary frames/key gathers are covered by the numerical working set.
+
+    share (set by the owning search, else None): the component's PolishShare. A slot
+    miss then consults the answers of every polish fit of the component under the same
+    complete content key (the primary's answers serve an alternative that meets the
+    identical framed problem), and every slot write is offered to it. The share is
+    bounded separately (PolishShare); the slots keep this bound.
     """
 
     def __init__(self):
         self.beam = {}
         self.gains = {}
         self.bridge = {}
+        self.share = None
 
     def beam_problem(self, kind, a, c, width, convention, X, left, right):
         """Framed key and founder maps of a beam template (a/c are unit indices)."""
@@ -106,23 +116,135 @@ class PolishStores:
         key = digest(kind, int(a), int(c), int(width), bool(convention), X[order], left[:, states], right[:, states])
         return key, order, position
 
-    @staticmethod
-    def lookup(table, slot, key):
-        """Last answer in this slot, dropping the previous problem on a miss."""
+    def _name(self, table):
+        return "beam" if table is self.beam else "gains" if table is self.gains else "bridge"
+
+    def lookup(self, table, slot, key):
+        """Last answer in this slot, dropping the previous problem on a miss; on a miss, the
+        component's shared answer to the identical keyed problem (installed in the slot)."""
         entry = table.get(slot)
         if entry is not None:
             if entry[0] == key:
                 return entry[1]
             del table[slot]
-        return None
+        if self.share is None:
+            return None
+        found = self.share.get(self._name(table), key)
+        if found is not None:
+            table[slot] = key, found
+        return found
+
+    def put(self, table, slot, key, value):
+        """Replace this slot's answer and offer it to the component's share."""
+        table[slot] = key, value
+        if self.share is not None:
+            self.share.put(self._name(table), key, value)
 
     def gain_table(self, slot, key):
         """Scalar answers for this window problem, replaced together on a miss."""
         table = self.lookup(self.gains, slot, key)
         if table is None:
-            table = {}
-            self.gains[slot] = key, table
+            table = {} if self.share is None else SharedGains(self.share, key)
+            self.put(self.gains, slot, key, table)
         return table
+
+
+def _answer_bytes(value) -> int:
+    """Residence estimate of a stored answer: array payloads plus 64 bytes per object."""
+    if isinstance(value, np.ndarray):
+        return 128 + int(value.nbytes)
+    if isinstance(value, (tuple, list)):
+        return 64 + 8 * len(value) + sum(_answer_bytes(item) for item in value)
+    if isinstance(value, dict):
+        return 256 + sum(_answer_bytes(k) + _answer_bytes(v) for k, v in value.items())
+    if isinstance(value, (bytes, str)):
+        return 64 + len(value)
+    return 64
+
+
+class SharedGains(dict):
+    """A scalar-gain table held in the component's share: every new candidate charges its bytes there."""
+
+    __slots__ = ("share", "token")
+
+    def __init__(self, share, key):
+        dict.__init__(self)
+        self.share, self.token = share, ("gains", key)
+
+    def __setitem__(self, key, value):
+        fresh = key not in self
+        dict.__setitem__(self, key, value)
+        if fresh:
+            self.share.grow(self.token, _answer_bytes(key) + 64)
+
+
+class PolishShare:
+    """Polish answers shared by every polish fit of one component attempt.
+
+    Entries are the per-search slot answers (beam template answers in their window founder
+    frame, scalar-gain tables, plain bridge trials) keyed by (table, the complete content
+    digest of the slot's problem), exactly the keys under which a single search reuses them
+    (RS15-RS17): an entry is the answer to the identical problem, whichever fit computed it.
+    Concurrent polish fits may complete one gain table together: its values are pure
+    functions of the same framed problem and candidate. Residence is bounded by ``limit``
+    bytes (estimated from the held arrays and objects; a gain table is charged as it
+    grows); least recently used entries are evicted first, which changes runtime only
+    (an evicted answer still held by a search's slot stays valid there).
+    """
+
+    def __init__(self, limit):
+        self.limit = int(limit)
+        self.entries = OrderedDict()
+        self.lock = threading.Lock()
+        self.used = 0
+        self.statistics = dict(calls=0, hits=0, evictions=0, peak_entry_bytes=0)
+
+    def get(self, name, key):
+        with self.lock:
+            self.statistics["calls"] += 1
+            entry = self.entries.get((name, key))
+            if entry is None:
+                return None
+            self.entries.move_to_end((name, key))
+            self.statistics["hits"] += 1
+            return entry[0]
+
+    def _evict(self, keep=None):
+        while self.used > self.limit and self.entries:
+            token = next(iter(self.entries))
+            if token == keep:
+                if len(self.entries) == 1:
+                    break
+                self.entries.move_to_end(token)
+                continue
+            _, size = self.entries.pop(token)
+            self.used -= size
+            self.statistics["evictions"] += 1
+
+    def put(self, name, key, value):
+        size = 128 + len(key) + _answer_bytes(value)
+        with self.lock:
+            if (name, key) in self.entries or size > self.limit:
+                return
+            self.entries[(name, key)] = [value, size]
+            self.used += size
+            self._evict(keep=(name, key))
+            self.statistics["peak_entry_bytes"] = max(self.statistics["peak_entry_bytes"], self.used)
+
+    def grow(self, token, size):
+        with self.lock:
+            entry = self.entries.get(token)
+            if entry is None:
+                return  # Evicted: the table lives on only in the slots that hold it.
+            entry[1] += size
+            self.used += size
+            self._evict(keep=token)
+            self.statistics["peak_entry_bytes"] = max(self.statistics["peak_entry_bytes"], self.used)
+
+    def clear(self):
+        with self.lock:
+            self.entries.clear()
+            self.used = 0
 
 
 class GainBook:

@@ -51,11 +51,18 @@ class FitLedger:
         self.forced_count_choices: dict[str, PanelKey] = {}
         self.count_families: dict[str, dict[str, Any]] = {}
         self.chosen_count_panels: dict[str, PanelKey] = {}
+        # Fits being computed now (token -> event set when done), shared by every branch with fits and lock.
+        self.inflight: dict[FitToken, threading.Event] = {}
+        self.lock = threading.Lock()
+        # Every fit this branch requested, in request order (count_pass._sequential_reuse).
+        self.requests: list[FitToken] = []
 
     def branch(self, choices: dict[FitToken, PanelKey]) -> FitLedger:
         """Share completed results; bind only the new branch's forced fit choices."""
         child = FitLedger()
         child.fits = self.fits
+        child.inflight = self.inflight
+        child.lock = self.lock
         child.scores = self.scores
         child._score_admission = self._score_admission
         child.minimum_switches = self.minimum_switches

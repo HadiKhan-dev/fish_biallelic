@@ -60,6 +60,7 @@ class WindowWorkState:
         self._open_fits = set()
         self._fits = {}
         self._physical = set()
+        self._aborted = False
 
     def bind_fit(self, ordinal, label, panel, kind, branch):
         """Bind a complete fit identity before its worker can run."""
@@ -108,12 +109,21 @@ class WindowWorkState:
             self._receipts[ordinal] = (diagnostic, None)
 
     def check(self, ordinal=None):
-        """Prune only work above a known failure; lower semantic work must finish."""
+        """Prune only work above a known failure; lower semantic work must finish. An aborted attempt
+        (abort) prunes everything."""
         with self._lock:
+            if self._aborted:
+                raise WindowWorkLimit("the component attempt was abandoned")
             if ordinal is not None and ordinal not in self._planned:
                 raise InvariantError("window solve has no bound ordinal")
             if self._bound is not None and (ordinal is None or ordinal > self._bound):
                 raise WindowWorkLimit("window work lies after the provisional logical stop")
+
+    def abort(self):
+        """Abandon the attempt: every later window solve stops (fail fast across concurrent count
+        histories). The account is then discarded; the caller never reads it."""
+        with self._lock:
+            self._aborted = True
 
     def finish(self, solved, panel, kind, spans, sizes, alphabets, convention):
         """Record a standalone solver invocation (no concurrent driver)."""

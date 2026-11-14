@@ -73,6 +73,11 @@ See [RS09](./refinement.md#rs09) for the model, decision order, parameters and l
 
 See [RS05](./refinement.md#rs05) for the model, decision order, parameters and limits.
 
+## window store
+
+See [RC22](./refinement.md#rc22) for the component's window-result store, the polish answers its polish fits share,
+concurrent count histories, the digest convention and the memory bounds.
+
 ## windows
 
 See [RS04](./refinement.md#rs04) for the model, decision order, parameters and limits.

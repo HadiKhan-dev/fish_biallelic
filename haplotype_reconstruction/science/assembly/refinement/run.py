@@ -25,6 +25,7 @@ from ..count_rule import criterion as count_criterion
 from ..count_rule import geometry as count_geometry
 from ..count_rule.parameters import CountRuleParameters
 from .capabilities import ComponentWorkspaceView, RefinementExecution, RefinementRecords
+from .costs import component_store_bytes
 from .count import _terminal_family, count_pass
 from .fit import SweepEngine
 from .parameters import RefinementParameters
@@ -144,22 +145,26 @@ def _polish(engine, result, budget):
     if len(panels) < 2:
         fits = [engine.converge(panels[0], labels[0], budget, polish=True)]
     else:
-        # The alternatives' polish fits are independent: concurrent, in panel order (each search reserves its own).
+        # The fits are independent and their ordinals are bound in panel order before any runs. The decided
+        # panel's polish runs first on the whole budget; the alternatives then run concurrently (each search
+        # reserves its own), so an alternative that meets the primary's problems (an alias image of it) takes
+        # their answers from the component's stores instead of recomputing them.
         fits = [None] * len(panels)
         ordinals = engine.bind_fits(
             len(panels), [(label, panel, "polish") for label, panel in zip(labels, panels, strict=False)]
         )
+        fits[0] = engine.converge(panels[0], labels[0], budget, polish=True, ordinal=ordinals[0])
         for index, fit in budget.concurrent(
             [
                 lambda child, panel=panel, label=label, ordinal=ordinal: engine.converge(
                     panel, label, child, polish=True, ordinal=ordinal
                 )
-                for panel, label, ordinal in zip(panels, labels, ordinals, strict=False)
+                for panel, label, ordinal in zip(panels[1:], labels[1:], ordinals[1:], strict=False)
             ],
             0,
             label="founder_refinement polish",
         ):
-            fits[index] = fit
+            fits[1 + index] = fit
     values = [float(fit.summary.F) for fit in fits]
     contents = [tie_rules.panel_key(fit.rows) for fit in fits]
     classes = ties.fixed_policy(
@@ -193,6 +198,80 @@ def _polish(engine, result, budget):
         weak_junctions=chosen.weak_junctions,
         live_alternatives=live,
     ), record
+
+
+def _attempt(engine, geometry, start_rows, cost, settings, budget, seed_key, counter, alternative_starts, **options):
+    """One attempt at the component: its count pass, then its polish. Returns dict(stopped, count_stop: the
+    count pass's window-work stop record or None, result, polish record, polish_stop: the polish's stop record
+    or None). options: count_pass's (concurrent)."""
+    try:
+        result = count_pass(
+            engine,
+            geometry,
+            start_rows,
+            cost,
+            settings.count_rule,
+            budget,
+            seed_key,
+            counter=counter,
+            alternative_starts=alternative_starts,
+            **options,
+        )
+    except WindowWorkLimit:
+        if engine.speculative:
+            return dict(stopped=True, count_stop=None, result=None, polish=None, polish_stop=None)
+        return dict(
+            stopped=True, count_stop=engine.windows.work.stop_record(), result=None, polish=None, polish_stop=None
+        )
+    polish: dict[str, Any] = dict(status="off")
+    stop = None
+    if engine.beam is not None:
+        try:
+            result, record = _polish(engine, result, budget)
+            polish = dict(status="done", **record)
+        except WindowWorkLimit:
+            # The component's window-work account ran out during the polish: the count pass's complete,
+            # decided panel stands unpolished (declared policy: the polish is a separate stage after the count
+            # pass, whose decisions never depend on it; RefinementParameters.window_work_coefficient).
+            if not engine.speculative:
+                stop = engine.windows.work.stop_record()
+            polish = dict(
+                status="window_work_bound", from_fit=result.final_fit, F_before=float(result.F), count_reevaluated=False
+            )
+    return dict(
+        stopped=polish["status"] == "window_work_bound", count_stop=None, result=result, polish=polish, polish_stop=stop
+    )
+
+
+class _AttemptRecords:
+    """A component's fit-record scope seen by one attempt (RefinementRecords).
+
+    It lists every record the attempt saves (shared by its scoped views). hiding() returns the view of a
+    sequential rerun: the records this attempt saved are neither read (the rerun computes them, as the
+    sequential driver would have) nor saved again (identical content is already stored); records from an
+    earlier process are read as usual."""
+
+    def __init__(self, inner, scope="", saved=None, hidden=frozenset()):
+        self.inner, self.scope = inner, scope
+        self.saved = set() if saved is None else saved
+        self.hidden = hidden
+
+    def load(self, name):
+        return None if (self.scope, name) in self.hidden else self.inner.load(name)
+
+    def save(self, name, payload):
+        if (self.scope, name) in self.hidden:
+            return None
+        self.saved.add((self.scope, name))
+        return self.inner.save(name, payload)
+
+    def scoped(self, sub, *, nthreads=None):
+        return _AttemptRecords(
+            self.inner.scoped(sub, nthreads=nthreads), f"{self.scope}/{sub}", self.saved, self.hidden
+        )
+
+    def hiding(self):
+        return _AttemptRecords(self.inner, self.scope, set(), frozenset(self.saved))
 
 
 def _count_call(refinement: ComponentRefinement) -> CountCall:
@@ -288,23 +367,44 @@ def refine_component(
     # Deterministic bootstrap streams per component and decision (positions, size).
     seed_key = [int(panels[0].positions[0]), int(panels[-1].positions[-1]), int(blocks), int(founders)]
     alternative_starts, retained = _refinement_inputs(component, incoming)
-    try:
-        with engine.memoized_windows(enabled=len(alternative_starts) > 1):
-            result = count_pass(
+    window_bytes, polish_bytes = component_store_bytes(
+        len(engine.windows.templates), max(len(panel) for panel in (start_rows, *alternative_starts))
+    )
+    with engine.component_store(window_bytes, polish_bytes):
+        # Count histories run concurrently. A window-work stop's record names fit ordinals in the sequential
+        # driver order, which interleaved histories do not keep: a stop after any concurrent history reruns the
+        # component sequentially from a fresh account, ledger and tie counter (records this attempt saved are
+        # neither read nor saved again; the stores keep their exact results), so the outcome and its stop record
+        # are the sequential driver's. Diagnostic tie-census events of the abandoned attempt are discarded.
+        sink, events = settings.census, []
+        records = None if fit_records is None else _AttemptRecords(fit_records)
+        engine.records = engine._base_records = records
+        engine.census = None if sink is None else events.append
+        engine.speculative = False
+        attempt = _attempt(engine, geometry, start_rows, cost, settings, budget, seed_key, counter, alternative_starts)
+        if attempt["stopped"] and engine.speculative:
+            counter = tie_rules.SharedCounter()
+            engine.restart(counter, None if records is None else records.hiding())
+            engine.census = sink
+            attempt = _attempt(
                 engine,
                 geometry,
                 start_rows,
                 cost,
-                settings.count_rule,
+                settings,
                 budget,
                 seed_key,
-                counter=counter,
-                alternative_starts=alternative_starts,
+                counter,
+                alternative_starts,
+                concurrent=False,
             )
-    except WindowWorkLimit:
+        elif sink is not None:
+            for event in events:
+                sink(event)
+    if attempt["count_stop"] is not None:
         # No interrupted direction, count fit or replay may enter a
         # scientific comparison. Preserve the complete original component/families.
-        stop = engine.windows.work.stop_record()
+        stop = attempt["count_stop"]
         domains: tuple[WindowDomain, ...] | tuple[dict[str, Any], ...]
         domains, work = (stop.domain,), stop.work
         domains = tuple(asdict(cast("WindowDomain", domain)) for domain in domains)
@@ -341,20 +441,7 @@ def refine_component(
             work_counters=dict(engine._work_counters, selected_count_decisions=0, selected_fits=0, **work),
         )
         return replace(component, count_call=_count_call(refinement)), refinement
-    polish: dict[str, Any] = dict(status="off")
-    stop = None
-    if engine.beam is not None:
-        try:
-            result, record = _polish(engine, result, budget)
-            polish = dict(status="done", **record)
-        except WindowWorkLimit:
-            # The component's window-work account ran out during the polish: the count pass's complete,
-            # decided panel stands unpolished (declared policy: the polish is a separate stage after the count
-            # pass, whose decisions never depend on it; RefinementParameters.window_work_coefficient).
-            stop = engine.windows.work.stop_record()
-            polish = dict(
-                status="window_work_bound", from_fit=result.final_fit, F_before=float(result.F), count_reevaluated=False
-            )
+    result, polish, stop = attempt["result"], attempt["polish"], attempt["polish_stop"]
     rows, _ = tie_rules.canonical_rows(np.asarray(result.rows, np.int64))
     same_shape = rows.shape == start_rows.shape
     refinement = ComponentRefinement(

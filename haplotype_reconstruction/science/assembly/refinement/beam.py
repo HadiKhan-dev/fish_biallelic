@@ -679,7 +679,7 @@ class WindowBeam:
                         for j in sorted({t // per for t in todo}):
                             slot, key, frame = problems[j]
                             block = results[j * per : (j + 1) * per]
-                            stores.beam[slot] = key, [block[f] for f in frame]
+                            stores.put(stores.beam, slot, key, [block[f] for f in frame])
                     paths = [result[0] for result in results]
                     values = np.asarray([result[1] for result in results])
                     counts = np.asarray([result[2] for result in results])

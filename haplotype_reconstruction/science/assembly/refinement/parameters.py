@@ -186,9 +186,15 @@ POLISH_BEAM_WIDTH = 64
 COUNT_BOUND_RELATIVE = 1e-8
 # Cost-only storage/planning constants: bytes unless named ENTRIES.
 BRIDGE_BATCH_BYTES = 256 << 20
-WINDOW_MEMO_BYTES = 256 << 20
-WINDOW_MEMO_OVERHEAD = 1 << 20
-WINDOW_MEMO_ENTRIES = 4096
+WINDOW_STORE_MIN_BYTES = 256 << 20
+WINDOW_STORE_MAX_BYTES = 8 << 30
+WINDOW_STORE_TEMPLATE_BYTES = 8 << 10
+WINDOW_STORE_ENTRY_OVERHEAD = 512
+WINDOW_STORE_TRACK_BYTES = 64
+WINDOW_STORE_TRACKED_FITS = 128
+POLISH_SHARE_MIN_BYTES = 64 << 20
+POLISH_SHARE_MAX_BYTES = 2 << 30
+POLISH_SHARE_TEMPLATE_BYTES = 2 << 10
 # Cumulative exact score miss admissions per component, shared by continuation branches.
 # Both limits bound storage only; saturation recomputes the same score. The byte
 # allowance keeps long panel keys from dominating small score vectors.
@@ -241,9 +247,24 @@ PARAMETER_PROVENANCE = {
     "POLISH_BEAM_WIDTH": "Retained partial paths in the polish escape beam (paths).",
     "COUNT_BOUND_RELATIVE": "Dimensionless relative outward allowance on aggregate count bounds.",
     "BRIDGE_BATCH_BYTES": "Message-byte budget per batch of bridge precursor scoring (bytes).",
-    "WINDOW_MEMO_BYTES": "Cached window-solve result budget per component (bytes).",
-    "WINDOW_MEMO_OVERHEAD": "Per-entry accounting overhead in the window-solve memo (bytes).",
-    "WINDOW_MEMO_ENTRIES": "Maximum window-solve memo entries (entries), bounding metadata residence.",
+    "WINDOW_STORE_MIN_BYTES": "Smallest window-result store budget of a component (bytes).",
+    "WINDOW_STORE_MAX_BYTES": "Largest window-result store budget of a component (bytes).",
+    "WINDOW_STORE_TEMPLATE_BYTES": (
+        "Window-result store budget per window template and squared founder count (bytes); replays of captured "
+        "components with incoming-root, continuation and polish alternatives stored 3.5-9.4 KiB per template and K^2 "
+        "for every distinct solve of the whole component."
+    ),
+    "WINDOW_STORE_ENTRY_OVERHEAD": "Bookkeeping charge per stored window result beyond its payload (bytes).",
+    "WINDOW_STORE_TRACK_BYTES": "Bookkeeping charge per window-store key tracked for a count fit (bytes).",
+    "WINDOW_STORE_TRACKED_FITS": (
+        "Most recent count fits whose window-store keys are tracked for pinning (fits); covers the refits of a "
+        "few concurrent K = 30 deletion rounds."
+    ),
+    "POLISH_SHARE_MIN_BYTES": "Smallest budget of the polish answers shared by a component's polish fits (bytes).",
+    "POLISH_SHARE_MAX_BYTES": "Largest budget of the polish answers shared by a component's polish fits (bytes).",
+    "POLISH_SHARE_TEMPLATE_BYTES": (
+        "Shared polish-answer budget per window template and squared founder count (bytes)."
+    ),
     "SCORE_LEDGER_ENTRIES": (
         "Cumulative per-sample/shadow score miss admissions per component (entries); fitted publications "
         "remain unconditional."

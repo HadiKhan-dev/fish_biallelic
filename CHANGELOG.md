@@ -1,5 +1,38 @@
 # Changelog
 
+## 4.17.1 (14 November 2026)
+
+This release stops founder refinement from solving the same problem again for each of several tied alternatives, and
+runs the alternatives that do not depend on each other at the same time. Released results are identical to 4.17.0.
+
+**Founder refinement: one window store per component.** A component whose join left tied alternatives (input roots
+of equal likelihood, roots of another founder count, continuation branches after a tie, several equally good final
+panels to polish) refits each alternative in full, and alternatives that differ only by an identical row meet the
+same window problems again. A window solve is a pure function of its template, the panel's rows in the window and
+the messages at its two ends, so one store now serves every fit of a component attempt, keyed by a digest of exactly
+those inputs: a repeated problem costs a lookup. The polish fits of the alternative panels also share their answers
+(beam answers, gain tables, bridge trials) under the same complete keys. Retention is bounded by a budget set from
+the component's dimensions alone (8 KiB per window template and K², between 256 MiB and 8 GiB), least recently used
+entries go first, the adopted path is kept, and nothing enters a checkpoint.
+
+**Founder refinement: independent count histories run at once.** The complete passes of roots of another count no
+longer wait for the nominal pass, the replays of roots of the nominal count start together when it ends, and the
+histories one round of continuation events creates run together. Each history is a function of its root and the
+component only; results are collected and selected in the sequential order, a fit requested by two histories at
+once is computed once, and reported reuse is counted as the sequential driver would count it, so every output is
+independent of the schedule and of the CPU count. A window-work stop in an attempt that ran histories concurrently
+reruns the component sequentially from a fresh work account, so stop records are those of the sequential driver.
+
+**Effect.** On captured refinement components of coalescent simulations with tied roots and polish alternatives,
+wall time falls by 8 to 27 % and CPU by 11 to 25 % (matched warm pairs on a 76-core node); a component without ties
+is unchanged (wall +0.4 %, CPU unchanged). Peak memory rises by about 1 % on the largest component replayed.
+
+**Validation.** The default suite and the stage tier (four shards) pass. Fifteen captured components (levels 1 to 3,
+including a 30-founder cohort of 320 samples; tied input roots, roots of another count, alias replays and polish
+alternatives) give results and complete fit records equal to 4.16.1's, as do runs stopped early and late by explicit
+window-work budgets; a run interrupted and resumed gives the same results. The 17 cases of the release matrix
+(simulated crosses and a real cichlid cross) are identical to 4.17.0 in every table, report and VCF record.
+
 ## 4.17.0 (13 November 2026)
 
 This release stops the assembly joins from repeating a search whose inputs differ only in which of several identical

@@ -18,13 +18,41 @@ from .parameters import (
     FAMILY_BYTES,
     HYBRID_FRONTIER,
     INTERVAL_SEED_STARTS,
+    POLISH_SHARE_MAX_BYTES,
+    POLISH_SHARE_MIN_BYTES,
+    POLISH_SHARE_TEMPLATE_BYTES,
     SCORE_LEDGER_BYTES,
     SEED_STARTS,
+    WINDOW_STORE_MAX_BYTES,
+    WINDOW_STORE_MIN_BYTES,
+    WINDOW_STORE_TEMPLATE_BYTES,
 )
 from .polish_cache import search_store_bytes
 from .window import PARTIAL_SITE_BYTES, RESIDENT_BYTES, resident_bytes, window_sites
 
-__all__ = ["component_bytes", "component_work", "fit_bytes", "traceback_bytes", "component_task_bytes"]
+__all__ = [
+    "component_bytes",
+    "component_work",
+    "component_store_bytes",
+    "fit_bytes",
+    "traceback_bytes",
+    "component_task_bytes",
+]
+
+
+def component_store_bytes(templates: int, founders: int) -> tuple[int, int]:
+    """Budgets (bytes) of a component's window-result store and of its shared polish answers.
+
+    Dimension-only: proportional to the number of window templates and K^2 (a count pass
+    fits O(K) candidates in each of up to K rounds, each sweep solving every template),
+    clamped to [WINDOW_STORE_MIN_BYTES, WINDOW_STORE_MAX_BYTES] and [POLISH_SHARE_MIN_BYTES,
+    POLISH_SHARE_MAX_BYTES]. The stage reserves both with the component; they bound
+    retention only (eviction recomputes the identical problem)."""
+    scale = max(1, int(templates)) * max(1, int(founders)) ** 2
+    window = min(WINDOW_STORE_MAX_BYTES, max(WINDOW_STORE_MIN_BYTES, WINDOW_STORE_TEMPLATE_BYTES * scale))
+    polish = min(POLISH_SHARE_MAX_BYTES, max(POLISH_SHARE_MIN_BYTES, POLISH_SHARE_TEMPLATE_BYTES * scale))
+    return int(window), int(polish)
+
 
 # Bookkeeping and transients of one component task beyond its arrays (bytes); measured on std_n80 L1-L2 components
 # (N = 80): whole-task peaks of 62-310 MiB above the worker's starting RSS, fits and window solves included.
@@ -218,6 +246,19 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
     # made small components reserve tens of GiB for scratch that cannot coexist.
     # One oversized score is already covered by the per-child score estimate.
     families = min(COUNT_FANOUT_BYTES, max(1, cores) * FAMILY_BYTES)
+    # One window-result store and one shared polish-answer store serve every fit of the
+    # component (roots, branches, polish); concurrent count histories share them.
+    stores = sum(component_store_bytes(len(templates), maximum_k))
+    # Count histories that run concurrently (count.count_pass: roots, then one continuation generation, each at most
+    # alternative_branches) hold, between their fits, one round's candidate panels and score vectors each; their fits
+    # are CPU-share children inside the per-core child reservation and their decisions take turns (one fan-out).
+    # Histories at different counts can keep two more switch-cost arrays of a resident component referenced each.
+    resident = resident_bytes(samples, sites, 0) <= RESIDENT_BYTES
+    histories = int(config.alternative_branches) * (
+        8 * maximum_k * blocks * (maximum_k + 2)
+        + 16 * samples * (maximum_k + 2)
+        + (8 * samples * sites if resident else 0)
+    )
     return (
         component_bytes(panels, samples, min_sites_per_bin=min_sites_per_bin, max_bins=config.proposal_max_bins)
         + max(1, cores) * child
@@ -225,5 +266,6 @@ def component_task_bytes(panels, samples, founders, config, *, min_sites_per_bin
         # Optional score residence includes Python keys/metadata, not just N
         # floats. One shared ledger serves every concurrent fit and branch.
         + SCORE_LEDGER_BYTES
-        + (256 << 20)
+        + stores
+        + histories
     )

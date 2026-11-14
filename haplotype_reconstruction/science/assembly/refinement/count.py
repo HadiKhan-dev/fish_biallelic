@@ -65,7 +65,9 @@ import hashlib
 import itertools
 import math
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
+from functools import partial, wraps
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -314,6 +316,28 @@ def _family_scores(engine, choices, shape, budget):
 
 
 # ------------------------------------------------------------------ helpers
+def _decision_gate(engine):
+    """The component's count-decision gate (fit.SweepEngine.decision_lock, shared by its branch engines).
+
+    Concurrent count histories of one component take turns through their count decisions (death classes,
+    shadow families, scoring fan-outs, terminal families), so the decisions' scratch stays within one
+    COUNT_FANOUT_BYTES allowance and the shared decision caches have one writer. Decisions are pure
+    functions of their inputs and cost well under 1 % of a count pass; the order of turns changes nothing."""
+    lock = getattr(engine, "decision_lock", None)
+    return nullcontext() if lock is None else lock
+
+
+def _gated(function):
+    """function(engine, ...) inside the engine's count-decision gate (reentrant on one thread)."""
+
+    @wraps(function)
+    def gated(engine, *args, **kwargs):
+        with _decision_gate(engine):
+            return function(engine, *args, **kwargs)
+
+    return gated
+
+
 class _CountSamples:
     """The count rule's samples: the component's informative samples (workspace.count_samples,
     evidence rows ascending; None = every row). Per-sample score vectors are restricted to them
@@ -557,6 +581,7 @@ def _death_class(engine, rows, budget):
     return members
 
 
+@_gated
 def _symmetric_decision(
     engine,
     geometry,
@@ -668,6 +693,7 @@ def _waves(sizes):
         yield range(start, len(sizes))
 
 
+@_gated
 def _scores_many(engine, panels, budget, label):
     """engine.per_sample of several panels as concurrent in-process tasks, each on its live share of the budget;
     results in input order.
@@ -1145,6 +1171,7 @@ def _terminal_candidates(candidate_fits, ancestry, ancestry_labels, best_fit):
     return eligible_fits
 
 
+@_gated
 def _terminal_family(engine, candidate_fits, final, scores, budget):
     """Current same-K equal-F candidates, rescored together; discarded histories stay out.
 
@@ -1350,8 +1377,12 @@ def _count_pass_point(
         fits.append(fit.summary)
         candidate_fits.append(fit)
 
+    pin = getattr(engine, "pin_fit", None)
+
     def adopt(fit):
         ancestry_labels.add((fit.summary.label, tie_rules.panel_key(fit.rows)))
+        if pin is not None:
+            pin(fit)  # Replays of tied roots and later histories meet the adopted path's windows again.
         tied = getattr(fit.summary, "tied_panels", ())
         if len(tied) > 1:
             ancestry.append(
@@ -1450,25 +1481,28 @@ def _count_pass_point(
             # proves the sequence test too. The bound is summed over samples at one option per block
             # (a panel's options are common to its samples); the round is skipped only when the
             # replicate-wise form also proves the band (the decision's own bootstrap stream).
-            with budget.scope(sample_threads(ws.samples, budget)):
-                sigma, option_offsets = option_scores(ws.leaves, ws.offsets, ws.windows.view(K - 1), K - 1)
-            normalisers = engine.normalisers(K - 1, budget)
-            starts = option_offsets[:-1]
-            # Each option's samples are summed in order before taking the best block total.
-            optimistic = float(
-                panel_objective(np.maximum.reduceat(sigma.cumsum(axis=1)[:, -1], starts)) + panel_objective(normalisers)
-            )
-            tolerance = COUNT_BOUND_RELATIVE * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
-            excluded, band_bound = count_criterion.deletion_bound_excludes(
-                view(scores),
-                sigma if view.rows is None else sigma[:, view.rows],
-                starts,
-                view(normalisers),
-                cost,
-                tolerance=tolerance,
-                config=rule,
-                seed_key=[*seed_key, label, "deletion"],
-            )
+            # Concurrent count histories take turns here (_decision_gate): the option table is decision scratch.
+            with _decision_gate(engine):
+                with budget.scope(sample_threads(ws.samples, budget)):
+                    sigma, option_offsets = option_scores(ws.leaves, ws.offsets, ws.windows.view(K - 1), K - 1)
+                normalisers = engine.normalisers(K - 1, budget)
+                starts = option_offsets[:-1]
+                # Each option's samples are summed in order before taking the best block total.
+                optimistic = float(
+                    panel_objective(np.maximum.reduceat(sigma.cumsum(axis=1)[:, -1], starts))
+                    + panel_objective(normalisers)
+                )
+                tolerance = COUNT_BOUND_RELATIVE * max(1.0, abs(F), abs(optimistic), abs(K * cost - 2.0 * F))
+                excluded, band_bound = count_criterion.deletion_bound_excludes(
+                    view(scores),
+                    sigma if view.rows is None else sigma[:, view.rows],
+                    starts,
+                    view(normalisers),
+                    cost,
+                    tolerance=tolerance,
+                    config=rule,
+                    seed_key=[*seed_key, label, "deletion"],
+                )
             if excluded:
                 skipped_rounds[K] = (X, scores, larger_fit, label)
                 return (
@@ -1634,13 +1668,14 @@ def _count_pass_point(
         """Diagnostics only: founders other than the decided one whose sequence part fails the
         effective-carrier test (m <= 0 or m' <= 0 on q) at a kept deletion round."""
         failing = []
-        for f in range(len(X)):
-            if f == decided:
-                continue
-            shadow_scores, _, _ = _sequence_scores(engine, geometry, X, scores, np.delete(X, f, axis=0), budget)
-            value, loso = _point_margins(view(scores), view(shadow_scores), cost)
-            if not (value > 0.0 and loso > 0.0):
-                failing.append((int(f), float(value), float(loso)))
+        with _decision_gate(engine):
+            for f in range(len(X)):
+                if f == decided:
+                    continue
+                shadow_scores, _, _ = _sequence_scores(engine, geometry, X, scores, np.delete(X, f, axis=0), budget)
+                value, loso = _point_margins(view(scores), view(shadow_scores), cost)
+                if not (value > 0.0 and loso > 0.0):
+                    failing.append((int(f), float(value), float(loso)))
         return tuple(failing)
 
     final = fit
@@ -1732,6 +1767,55 @@ def _count_pass_point(
     )
 
 
+def _concurrently(budget, functions, concurrent, engine):
+    """Results of independent count histories (functions of a team) in input order.
+
+    With concurrent and two or more, they run as children of the budget (each on its live share); the
+    engine is marked speculative, since the fit ordinals of interleaved histories are not the sequential
+    driver order (refine_component reruns a component sequentially if its window-work account stops)."""
+    if not concurrent or len(functions) < 2:
+        return [function(budget) for function in functions]
+    engine.speculative = True
+    failures = []
+
+    def guarded(function, team):
+        # Fail fast: the first failure stops every history of the attempt at its next window solve.
+        try:
+            return function(team)
+        except BaseException as error:
+            failures.append(error)
+            engine.windows.work.abort()
+            raise
+
+    results = [None] * len(functions)
+    try:
+        for index, value in budget.concurrent(
+            [partial(guarded, function) for function in functions], 0, label="founder_refinement count histories"
+        ):
+            results[index] = value
+    except BaseException:
+        # Every child has joined (RefinementExecution.concurrent); report the first failure, not an abort it caused.
+        if failures:
+            raise failures[0] from None
+        raise
+    return results
+
+
+def _sequential_reuse(first, branches):
+    """Fits that the branches took from the shared ledger, counted as the sequential driver would: a request
+    reuses a fit when the nominal pass (first) or an earlier branch in driver order, or an earlier request of
+    the same branch, requested the same (label, start panel). Independent of the order histories ran in."""
+    seen = set(first)
+    reused = 0
+    for branch in branches:
+        for token in branch.ledger.requests:
+            if token in seen:
+                reused += 1
+            else:
+                seen.add(token)
+    return reused
+
+
 def count_pass(
     engine: SweepEngine,
     geometry: count_geometry.RowGeometry,
@@ -1742,22 +1826,34 @@ def count_pass(
     seed_key: Sequence[int | str],
     counter: tie_rules.SharedCounter | None = None,
     alternative_starts: Sequence[Sequence[Sequence[int]]] = (),
+    *,
+    concurrent: bool = True,
 ) -> CountPass:
     """Joint input/fit-direction/count-choice continuations within the configured leaf budget.
 
     Every branch replays the original input, reconstructing bootstrap labels,
     round counters, best-by-K records and cycle history before selecting
     its evaluated alternative. No intermediate panel is a fresh count-pass root.
+
+    Independent histories run concurrently (concurrent=True): the complete passes of incoming roots of
+    another count start with the nominal pass (they do not read it); the replays of roots of the nominal
+    count (and the complete passes of roots that cannot be replayed) start together as soon as the nominal
+    pass ends; and every history one breadth-first generation of continuation events starts runs together
+    (the expansion reads only histories of earlier generations, so its order and leaf budget are the
+    sequential driver's). Each history is a pure function of its root, forced choices and the immutable
+    component; results are collected and selected in the sequential driver order, a fit requested by two
+    histories at once is computed once (FitLedger.inflight), and the reported reuse is the sequential
+    driver's (_sequential_reuse), so every output is independent of the schedule and the CPU count.
     """
 
-    def run(worker, incoming, incoming_seed, path=None):
+    def run(worker, incoming, incoming_seed, path=None, team=budget):
         return _count_pass_point(
             worker,
             geometry,
             incoming,
             cost,
             rule,
-            budget,
+            team,
             incoming_seed,
             counter=counter,
             census_prefix=worker.census_prefix,
@@ -1799,12 +1895,62 @@ def count_pass(
     event: tuple[str, Any, dict[str, Any]] | dict[str, Any] | None
     engine.ledger.forced_count_choices = {}
     nominal_path = _DeletionPath()
-    initial = run(engine, start, seed_key, nominal_path)
     nominal_input = tie_rules.panel_key(start)
     input_keys = tuple(
         sorted({nominal_input, *(tie_rules.panel_key(np.asarray(panel)) for panel in alternative_starts)})
     )
     limit = int(engine.config.alternative_branches)
+    roots = [] if len(input_keys) > limit else [panel for panel in input_keys if panel != nominal_input]
+
+    def root_history(panel, initial, replayable, team):
+        """One incoming root in the sequential driver's way: the replay of a root of the nominal count when
+        the nominal pass is replayable (merged, or standing, or refused), else (or when refused) its own
+        complete pass. Returns its record; branches lists the branch engines it used, in driver order."""
+        incoming = np.asarray(panel, np.int64)
+        record = dict(panel=panel, branches=[], replayed=False, evaluated=False, merged=False, result=None)
+        if replayable and len(panel) == len(nominal_input):
+            # A replay has its own branch identity, hence its own fit records: its fit labels name the
+            # nominal pass's deletions, which a later complete pass of the same root may not repeat.
+            branch = branch_worker({}, {}, ("replay", panel))
+            record["branches"].append(branch)
+            result = _replayed_root(branch, incoming, initial, nominal_path, team)
+            if result is not None:
+                record["replayed"] = True
+            if result is _MERGED:
+                record["merged"] = True
+                return record
+            if result is not None:
+                record.update(result=result, engine=branch)
+                return record
+        branch = branch_worker({}, {}, panel)
+        record["branches"].append(branch)
+        # Same bootstrap stream; each root retains its ordinary 2 * incoming K bound.
+        record.update(result=run(branch, incoming, seed_key, team=team), engine=branch, evaluated=True)
+        return record
+
+    def nominal_history(team):
+        initial = run(engine, start, seed_key, nominal_path, team=team)
+        # The returned panel must be the end of the adopted deletions: a restored best-F panel has no such path.
+        replayable = initial.best_f_replacement is None and np.array_equal(initial.rows, nominal_path.end)
+        same = [panel for panel in roots if len(panel) == len(nominal_input)]
+        records = _concurrently(
+            team,
+            [partial(root_history, panel, initial, replayable) for panel in same],
+            concurrent,
+            engine,
+        )
+        return initial, dict(zip(same, records, strict=True))
+
+    # Roots of another count never read the nominal pass: their complete passes start with it.
+    others = [panel for panel in roots if len(panel) != len(nominal_input)]
+    started = _concurrently(
+        budget,
+        [nominal_history, *(partial(root_history, panel, None, False) for panel in others)],
+        concurrent,
+        engine,
+    )
+    initial, root_records = started[0]
+    root_records.update(zip(others, started[1:], strict=True))
     if len(input_keys) > limit:
         family = dict(
             panels=input_keys,
@@ -1902,38 +2048,23 @@ def count_pass(
             input_key=nominal_input,
         )
     ]
-    evaluations, reused, count_evaluations, replays = 1, 0, 0, 0
-    # The returned panel must be the end of the adopted deletions: a restored best-F panel has no such path.
-    replayable = initial.best_f_replacement is None and np.array_equal(initial.rows, nominal_path.end)
-    for panel in input_keys:
-        if panel == nominal_input:
+    evaluations, count_evaluations, replays = 1, 0, 0
+    # Every branch engine in the sequential driver order (roots in sorted order, then continuations as created).
+    driver_order = []
+    for panel in roots:
+        root = root_records[panel]
+        driver_order.extend(root["branches"])
+        replays += int(root["replayed"])
+        evaluations += int(root["evaluated"])
+        if root["merged"]:
             continue
-        incoming = np.asarray(panel, np.int64)
-        result = None
-        if replayable and len(panel) == len(nominal_input):
-            # A replay has its own branch identity, hence its own fit records: its fit labels name the
-            # nominal pass's deletions, which a later complete pass of the same root may not repeat.
-            branch = branch_worker({}, {}, ("replay", panel))
-            result = _replayed_root(branch, incoming, initial, nominal_path, budget)
-            # Fits the replay took from the shared ledger count as reused whether or not the replay stands.
-            reused += branch.reused_fits
-            if result is not None:
-                replays += 1
-            if result is _MERGED:
-                continue
-        if result is None:
-            branch = branch_worker({}, {}, panel)
-            # Same bootstrap stream; each root retains its ordinary 2 * incoming K bound.
-            result = run(branch, incoming, seed_key)
-            evaluations += 1
-            reused += branch.reused_fits
         pending.append(
             dict(
                 choices={},
                 count_choices={},
-                result=result,
-                engine=branch,
-                start=incoming,
+                result=root["result"],
+                engine=root["engine"],
+                start=np.asarray(panel, np.int64),
                 seed_key=seed_key,
                 input_key=panel,
             )
@@ -1942,55 +2073,77 @@ def count_pass(
     count_events: list[dict[str, Any]]
     leaves, budget_families, count_events = [], [], []
     overflow = False
+    # Breadth-first generations: a generation's states were all created (and their histories run) before
+    # it is expanded, in the sequential driver's FIFO order; the histories it creates run together after it.
     while pending:
-        state = pending.pop(0)
-        point, worker = state["result"], state["engine"]
-        event = None
-        for family in point.continuation_families:
-            found = event_of(family, worker)
-            if found is not None and not handled(family, state):
-                event = (*found, family)
-                break
-        if event is None:
-            leaves.append(state)
-            continue
-        kind, token, family = event
-        options = tuple(sorted(set(family["panels"])))
-        nominal = worker.ledger.chosen_count_panels[token] if kind == "count" else worker.ledger.chosen_panels[token]
-        record = None
-        if kind == "count":
-            record = dict(
-                token=token,
-                family=family,
-                input_key=state["input_key"],
-                fit_prefix=dict(state["choices"]),
-                count_prefix=dict(state["count_choices"]),
-                nominal=nominal,
-                options=options,
-                overflow=False,
+        generation, pending = pending, []
+        deferred = []
+        for position, state in enumerate(generation):
+            point, worker = state["result"], state["engine"]
+            event = None
+            for family in point.continuation_families:
+                found = event_of(family, worker)
+                if found is not None and not handled(family, state):
+                    event = (*found, family)
+                    break
+            if event is None:
+                leaves.append(state)
+                continue
+            kind, token, family = event
+            options = tuple(sorted(set(family["panels"])))
+            nominal = (
+                worker.ledger.chosen_count_panels[token] if kind == "count" else worker.ledger.chosen_panels[token]
             )
-            count_events.append(record)
-        # Enumerate the full encountered class, or retain its incumbent and history.
-        if len(leaves) + len(pending) + len(options) > limit:
-            overflow = True
-            budget_families.append(family)
-            if record is not None:
-                record["overflow"] = True
-            leaves.append(dict(state, unfinished_budget=True))
-            continue
-        for panel in options:
-            choices, count_choices = dict(state["choices"]), dict(state["count_choices"])
-            (count_choices if kind == "count" else choices)[token] = panel
-            if panel == nominal:
-                pending.append(dict(state, choices=choices, count_choices=count_choices))
-            else:
-                branch = branch_worker(choices, count_choices, state["input_key"])
-                result = run(branch, state["start"], state["seed_key"])
-                evaluations += 1
-                reused += branch.reused_fits
-                if kind == "count":
-                    count_evaluations += 1
-                pending.append(dict(state, choices=choices, count_choices=count_choices, result=result, engine=branch))
+            record = None
+            if kind == "count":
+                record = dict(
+                    token=token,
+                    family=family,
+                    input_key=state["input_key"],
+                    fit_prefix=dict(state["choices"]),
+                    count_prefix=dict(state["count_choices"]),
+                    nominal=nominal,
+                    options=options,
+                    overflow=False,
+                )
+                count_events.append(record)
+            # Enumerate the full encountered class, or retain its incumbent and history. The driver's pending
+            # list holds the rest of this generation and the states it has created so far.
+            waiting = len(generation) - position - 1 + len(pending)
+            if len(leaves) + waiting + len(options) > limit:
+                overflow = True
+                budget_families.append(family)
+                if record is not None:
+                    record["overflow"] = True
+                leaves.append(dict(state, unfinished_budget=True))
+                continue
+            for panel in options:
+                choices, count_choices = dict(state["choices"]), dict(state["count_choices"])
+                (count_choices if kind == "count" else choices)[token] = panel
+                if panel == nominal:
+                    pending.append(dict(state, choices=choices, count_choices=count_choices))
+                else:
+                    branch = branch_worker(choices, count_choices, state["input_key"])
+                    driver_order.append(branch)
+                    evaluations += 1
+                    if kind == "count":
+                        count_evaluations += 1
+                    created = dict(state, choices=choices, count_choices=count_choices, result=None, engine=branch)
+                    deferred.append(created)
+                    pending.append(created)
+        results = _concurrently(
+            budget,
+            [
+                partial(lambda team, item: run(item["engine"], item["start"], item["seed_key"], team=team), item=item)
+                for item in deferred
+            ],
+            concurrent,
+            engine,
+        )
+        for item, result in zip(deferred, results, strict=True):
+            item["result"] = result
+    # Fits a branch took from the shared ledger, as the sequential driver counts them (a refused replay's too).
+    reused = _sequential_reuse(engine.ledger.requests, driver_order)
 
     # Compare only outputs of the same K by F. Different supported count outcomes
     # remain a family; smaller K is the declared representative prior.
