@@ -56,6 +56,8 @@ import numba
 import numpy as np
 
 from haplotype_reconstruction.core import ties
+from haplotype_reconstruction.core.progress import Progress
+from haplotype_reconstruction.core.progress import frame as progress_frame
 
 from .. import orders as tie_rules
 from ..count_rule import criterion as count_criterion
@@ -270,6 +272,82 @@ def _canonical(value):
     raise TypeError(f"no state-key form for {type(value).__name__}")
 
 
+# PanelSearch attributes a progress snapshot does not hold (PanelSearch._snapshot): callbacks, locks and
+# thread-local state; objects their owners save (the CountStep, saved separately; the batch's shared tie counter; the
+# choice plan, the merge index and the progress capability, which belong to the enclosing frames); constants a
+# construction from the same inputs computes again (configuration, emission layout and its derived tables, geometry,
+# the beam's original pool and covering family, backstops); and caches of pure functions of the panel or pool
+# (exclusion forwards and their birth bounds, the tier-1 candidate arrays and workspace, the pool digest), which
+# refill with equal values and record no decisions.
+_UNSAVED = frozenset(
+    {
+        "tie_settings",
+        "choice_plan",
+        "merge",
+        "progress",
+        "config",
+        "linkage",
+        "_claim_threads",
+        "_map_tasks",
+        "label",
+        "tie_counter",
+        "tie_lock",
+        "beam_runner",
+        "_local",
+        "blocks",
+        "samples",
+        "initial_family",
+        "penalty",
+        "sites_per_bin",
+        "cost",
+        "layout",
+        "total_bins",
+        "block_offsets",
+        "block_sizes",
+        "geometry",
+        "near_identity",
+        "counter",
+        "_evaluations_lock",
+        "original_pool",
+        "original_set",
+        "candidate_array",
+        "candidate_workspace",
+        "forwards_cache",
+        "births_by_set",
+        "_cache_lock",
+        "sweep_forwards",
+        "sweep_backstop",
+        "count_backstop",
+        "static_totals",
+        "_pool_key",
+    }
+)
+# CountStep attributes a snapshot does not hold: its callbacks into the search, lock, shared tie counter and the
+# constants of the join (the rest, its exact-score counters and birth memo, is saved).
+_COUNT_STEP_UNSAVED = frozenset(
+    {
+        "tie_settings",
+        "layout",
+        "linkage",
+        "choose_panel",
+        "record_count_family",
+        "total_bins",
+        "offsets",
+        "penalty",
+        "cost",
+        "samples",
+        "threshold",
+        "geometry",
+        "config",
+        "near_identity",
+        "score",
+        "_counts",
+        "tie_counter",
+        "label",
+    }
+)
+
+
 class PanelSearch:
     """One join's certified panel search (see the module docstring); :meth:`run` executes it.
 
@@ -329,10 +407,13 @@ class PanelSearch:
         shared_layout: EmissionLayout | None = None,
         tie_settings: ties.TieSettings = DEFAULT_TIE_SETTINGS,
         merge: Any = None,
+        progress: Progress | None = None,
     ) -> None:
         self.tie_settings = tie_settings
         self.choice_plan = choice_plan
         self.merge = merge
+        # The join's partial-progress capability (core.progress): the search offers its state at sweep boundaries.
+        self.progress = progress
         self.config = config
         # The batch linker's path score (join/beam.path_linkage): the data criterion inside
         # log-likelihood tie classes (None: panel content alone decides inside a class).
@@ -684,6 +765,42 @@ class PanelSearch:
             digest.update(name.encode() + b"\0" + encoded + b"\0")
         digest.update(b"loop\0" + repr(dataclasses.astuple(loop)).encode())
         return digest.digest()
+
+    # -- progress ------------------------------------------------------------------------------
+
+    def _snapshot(self, loop: _Loop) -> dict[str, Any]:
+        """The search's complete state at a sweep boundary, for a progress snapshot (store.progress).
+
+        Every attribute except _UNSAVED: STATE_FIELDS and the rest the search reads later (records it appends to:
+        events, release and seed families; its full-score count; the beam re-runs and switch counts it keeps, which
+        decide what is recomputed and so which tie decisions are counted again), the CountStep's state (its exact
+        score counters and birth memo), the loop, the batch's shared tie counts, the choice plan's transcript and
+        whether the merge index holds this execution's pending boundaries."""
+        plan = self.choice_plan
+        return dict(
+            state={name: value for name, value in vars(self).items() if name not in _UNSAVED},
+            count_step={name: value for name, value in vars(self.counter).items() if name not in _COUNT_STEP_UNSAVED},
+            loop=dataclasses.replace(loop),
+            ties=self.tie_counter.counts_state(),
+            plan=None if plan is None else (tuple(plan.observed), tuple(plan.excluded)),
+        )
+
+    def _restore(self, saved: dict[str, Any]) -> _Loop:
+        """Continue a snapshot (_snapshot) on this search, freshly constructed from the same inputs and plan: its
+        constants and caches are the snapshot's own by construction (caches of pure functions refill with equal
+        values and no decisions); its state, counters and transcript become the snapshot's."""
+        for name, value in saved["state"].items():
+            setattr(self, name, value)
+        capacity = self.capacity
+        self._set_pool(self.candidates)
+        self.capacity = capacity
+        vars(self.counter).update(saved["count_step"])
+        self.tie_counter.restore_counts(saved["ties"])
+        if saved["plan"] is not None:
+            self.choice_plan.observed, self.choice_plan.excluded = list(saved["plan"][0]), list(saved["plan"][1])
+        if self.merge is not None:
+            self.merge.rebind(self)
+        return dataclasses.replace(saved["loop"])
 
     # -- threads -------------------------------------------------------------------------------
 
@@ -1392,19 +1509,30 @@ class PanelSearch:
 
     def _search(self) -> JoinOutcome:
         config = self.config
-        loop = _Loop(
-            quota=config.paths_per_endpoint,
-            ladder_top=config.paths_per_endpoint * 2**POOL_QUOTA_DOUBLINGS,
-            quota_backstop=config.paths_per_endpoint * 2**POOL_EXTENDED_DOUBLINGS,
-            largest_pool=len(self.candidates),
-        )
+        saved = None if self.progress is None else self.progress.take("search")
+        if saved is not None:
+            loop = self._restore(saved)
+        else:
+            loop = _Loop(
+                quota=config.paths_per_endpoint,
+                ladder_top=config.paths_per_endpoint * 2**POOL_QUOTA_DOUBLINGS,
+                quota_backstop=config.paths_per_endpoint * 2**POOL_EXTENDED_DOUBLINGS,
+                largest_pool=len(self.candidates),
+            )
+        # A resumed search re-enters the loop at the boundary its snapshot was taken at, past that boundary's merge
+        # check (the snapshot holds its effect) and its own snapshot.
+        resumed = saved is not None
         final_forwards = None
         while True:
             # A sweep boundary: the rest of the search reads only the state STATE_FIELDS and loop hold (AJ29).
-            if self.merge is not None:
-                merged = self.merge.boundary(self, loop)
-                if merged is not None:
-                    return merged
+            if not resumed:
+                if self.merge is not None:
+                    merged = self.merge.boundary(self, loop)
+                    if merged is not None:
+                        return merged
+                if self.progress is not None:
+                    self.progress.boundary("search", lambda: self._snapshot(loop))
+            resumed = False
             if loop.phase_sweeps >= self.sweep_backstop:
                 loop.backstop_reached = True
                 break
@@ -1565,6 +1693,7 @@ def search_panel(
     max_branches: int = MAX_BRANCHES,
     tie_settings: ties.TieSettings = DEFAULT_TIE_SETTINGS,
     replay_merge: str = "on",
+    progress: Progress | None = None,
 ) -> JoinOutcome:
     """The certified panel of one joined batch.
 
@@ -1585,8 +1714,12 @@ def search_panel(
         continuation; its records are those of the full replay, its work and tie counters count only what ran),
         "off" (every execution runs to its end), or "verify" (every execution runs to its end and each state
         coincidence's adopted continuation is checked against it; alternatives.ReplayMergeMismatch otherwise).
+    progress: the join's partial-progress capability (core.progress). Its "replays" frame holds the replay loop
+        (alternatives.ReplayLoop: completed executions, the prefixes still to run, the execution in progress) and
+        the merge index; PanelSearch adds its sweep-boundary state ("search"). A resumed join runs the execution in
+        progress again from its inputs and continues it from the saved sweep boundary.
     """
-    from .alternatives import ReplayMerge, resolve_replays, run_bounded_replays
+    from .alternatives import ReplayLoop, ReplayMerge, resolve_replays, run_bounded_replays
 
     shared_layout = None
     last_search = None
@@ -1617,6 +1750,7 @@ def search_panel(
             shared_layout=shared_layout,
             tie_settings=tie_settings,
             merge=merge,
+            progress=progress,
         )
         shared_layout = last_search.layout
         try:
@@ -1629,7 +1763,16 @@ def search_panel(
             # that cycle so sequential branches release their large caches now.
             last_search.counter = None
 
-    replay = run_bounded_replays(run, max_branches=max_branches)
+    saved = None if progress is None else progress.take("replays")
+    loop = ReplayLoop() if saved is None else saved["loop"]
+    if saved is not None and merge is not None:
+        merge.restore(saved["merge"])
+
+    def replay_state():
+        return dict(loop=loop, merge=None if merge is None else merge.state())
+
+    with progress_frame(progress, "replays", replay_state):
+        replay = run_bounded_replays(run, max_branches=max_branches, loop=loop)
 
     # A failed forced prefix may have raised during construction. Reuse the
     # immutable layout directly for finalist priors rather than depending on that

@@ -196,6 +196,13 @@ def _forget_indexes():
     _INDEXES_GUARD = threading.Lock()
 
 
+def forget_index(path) -> None:
+    """Drop this process's index of a removed container (a unit's progress records, store.progress)."""
+    if _INDEX_PID == os.getpid():
+        with _INDEXES_GUARD:
+            _INDEXES.pop(os.path.abspath(os.fspath(path)), None)
+
+
 def _index(path):
     # Reset before taking inherited locks; import itself installs no process hooks.
     global _INDEX_PID

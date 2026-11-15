@@ -117,6 +117,26 @@ class ChromosomeGeneticMap:
             return (right - left) * self.fallback_rate_per_bp
         return self.cumulative_morgans(right) - self.cumulative_morgans(left)
 
+    def fallback_bp(self, left: ArrayLike, right: ArrayLike) -> NDArray[np.float64] | np.float64:
+        """Physical length (bp) of ordered intervals [left, right] that the fallback rate measures: all of it without
+        knots, else the parts before the first and after the last knot (a file's own distances are never rescaled)."""
+        left, right = np.broadcast_arrays(np.asarray(left, dtype=np.float64), np.asarray(right, dtype=np.float64))
+        if np.any(right < left):
+            raise ValueError("interval right endpoints must not precede left endpoints")
+        if not self.has_map:
+            return right - left
+        first, last = self.positions_bp[0], self.positions_bp[-1]
+        return np.maximum(np.minimum(right, first) - left, 0.0) + np.maximum(right - np.maximum(left, last), 0.0)
+
+    def with_fallback_rate(self, rate_cm_per_mb: float) -> "ChromosomeGeneticMap":
+        """The same knots with another fallback rate (the rate of map-free contigs and of stretches beyond knots)."""
+        return ChromosomeGeneticMap(
+            self.contig,
+            self.positions_bp if self.has_map else None,
+            self.map_cm if self.has_map else None,
+            default_rate_cm_per_mb=rate_cm_per_mb,
+        )
+
     def inverse_morgans(self, values: ArrayLike) -> NDArray[np.float64] | np.float64:
         """Physical positions of genetic coordinates (continuous-position simulation).
 
@@ -175,6 +195,11 @@ class GeneticMapSet:
         rate = ChromosomeGeneticMap("", default_rate_cm_per_mb=self.default_rate_cm_per_mb).default_rate_cm_per_mb
         object.__setattr__(self, "default_rate_cm_per_mb", rate)
         object.__setattr__(self, "maps", dict(self.maps))
+
+    def with_fallback_rate(self, rate_cm_per_mb: float) -> "GeneticMapSet":
+        """The same map files with another fallback rate, for map-free contigs and beyond every file's knots."""
+        return GeneticMapSet({name: value.with_fallback_rate(rate_cm_per_mb) for name, value in self.maps.items()},
+                             default_rate_cm_per_mb=rate_cm_per_mb)
 
     def for_contig(self, contig: str) -> ChromosomeGeneticMap:
         """The chromosome's map, or a map-free one with the fallback rate."""

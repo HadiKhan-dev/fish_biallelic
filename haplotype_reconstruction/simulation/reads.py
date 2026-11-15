@@ -32,6 +32,28 @@ Fragments are drawn at the maximum target factor per sample and site-hits thinne
 target intensity, retaining the shared fragment's homologue. No extra draws or arithmetic
 on the unmodified rates occur when these options are off.
 
+* long reads (long_read_mean_bp > 0): per sample, read starts form a Poisson process along the contig; a read has
+  length ~ Lognormal (mean long_read_mean_bp, log-SD long_read_length_sigma) rounded and clipped to
+  [LONG_READ_MIN_BP, exp(log-mean + LONG_READ_SIGMA_LIMIT x SD)], comes from one homologue with probability 1/2 and
+  covers every site it spans; depth_cv, dropout_fraction, site and regional factors and count_dispersion act as for
+  fragments. Each read draws its own error rate e = 10**(-Q/10), Q ~ Normal(read_quality_mean, read_quality_sd)
+  clipped to [READ_QUALITY_MIN, READ_QUALITY_MAX], used at every site it covers (errors correlated within a read).
+  At a covered site a read's base is: lost to a deletion error (e (1 - substitution_share) / 2), to a substitution
+  into a third base (2 e substitution_share / 3) or to reference bias (1 - exp(-reference_bias k**power), k = the
+  read homologue's ALT alleles within reference_bias_window_bp, the site included);
+  read as the other allele (substitution, e substitution_share / 3; an ALT base also as REF with probability
+  reference_pull x e / mean e); or kept. At a context site (a contig-level share context_sites, all samples alike), the
+  allele that extends a homopolymer (drawn per site) has an extra indel probability
+  min(1, e (1 - substitution_share) context_factor s_i), s_i a mean-one exponential strength of the site (run length
+  and sequence vary between sites), of which context_convert is read as the other allele and the rest lost. The causes
+  combine as independent hazards. A share foreign_read_share of reads comes from a uniform other sample's homologue.
+  Context sites come from the contig stream after every draw of the other samplers, so those are unchanged.
+
+Structure (simulation/structure.py): a homologue inside a deletion it carries gives no reads (the long-read sampler
+drops its hits; the other samplers' reads at such cells are assigned to homologues at 1/2 and redrawn per homologue),
+and each carried duplication copy adds Poisson reads of its own allele at the per-homologue expected depth. These
+draws use one stream per sample, simulation.sv.reads, after the sampler's own draws.
+
 Random streams: the factors shared by all samples (sample depth factors, site factors)
 and one seed come from the contig's stream; each sample's own draws (cell factors, depth or
 fragments, dropout tract, alleles) come from its own stream, simulation.sample_reads(seed, sample
@@ -52,7 +74,16 @@ from scipy.special import ndtri
 from ..core.errors import SettingsError
 from ..core.random import stream
 from .design import ReadModel
-from .parameters import FRAGMENT_QUANTILES, FRAGMENT_SD_LIMIT, MINIMUM_FRAGMENT_BP
+from .parameters import (
+    FRAGMENT_QUANTILES,
+    FRAGMENT_SD_LIMIT,
+    LONG_READ_MIN_BP,
+    LONG_READ_SIGMA_LIMIT,
+    MINIMUM_FRAGMENT_BP,
+    READ_QUALITY_MAX,
+    READ_QUALITY_MIN,
+)
+from .structure import StructureReads, structural_counts, sv_stream
 
 # Fragment-length quantiles used to compute the expected bases covered per fragment.
 
@@ -71,6 +102,12 @@ class ReadInputs:
     depth: float
     model: ReadModel
     seed: int
+    # Long-read mode: int8 [L], -1 = ordinary site, else the allele extending a homopolymer (context site).
+    context: NDArray[np.int8] | None = None
+    # Long-read mode: float64 [L], each context site's indel multiplier over context_factor (mean-one exponential).
+    context_strength: NDArray[np.float64] | None = None
+    # Structural variants of the analysed haplotypes (simulation/structure.py), or None.
+    structure: StructureReads | None = None
 
 
 def read_inputs(
@@ -96,7 +133,14 @@ def read_inputs(
     if site_factor is not None:
         site_factor = np.ascontiguousarray(site_factor, dtype=np.float64)
     seed = int(rng.integers(0, 2**63))
-    return ReadInputs(hap0, hap1, positions, factor, site_factor, float(depth), model, seed)
+    context = strength = None
+    if model.long_read_mean_bp:
+        # Drawn after every released draw of this stream, so the other samplers are unchanged.
+        at = rng.random(sites) < model.context_sites
+        allele = rng.integers(0, 2, size=sites)
+        context = np.where(at, allele, -1).astype(np.int8)
+        strength = rng.exponential(1.0, size=sites)
+    return ReadInputs(hap0, hap1, positions, factor, site_factor, float(depth), model, seed, context, strength)
 
 
 def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer] | None = None) -> NDArray[np.integer]:
@@ -104,7 +148,10 @@ def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer
     (simulation.sample_reads, the inputs' seed and the sample's index): any partition of the samples into blocks,
     simulated anywhere, gives the same counts. ``out`` (optional, integer [stop - first, L, 2]): written
     in place and returned instead (the simulation stage's shared int32 counts)."""
-    sample = _fragment_sample if inputs.model.read_length_bp else _site_sample
+    model = inputs.model
+    sample = _fragment_sample if model.read_length_bp else _site_sample
+    if model.long_read_mean_bp:
+        sample = _long_read_sample
     sites = inputs.hap0.shape[1]
     if out is None:
         out = np.zeros((stop - first, sites, 2), dtype=np.int64)
@@ -121,8 +168,48 @@ def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer
                 inputs.positions, inputs.model, stream("simulation.sample_region", seed=inputs.seed, index=i)
             )
             target = regional if target is None else target * regional
-        out[row] = sample(*args, target, rng)
+        structure = inputs.structure
+        if model.long_read_mean_bp:
+            present = None if structure is None else structure.present[i]
+            context = None if inputs.context is None else (inputs.context, inputs.context_strength)
+            counts = sample(*args, target, rng, context, present, (inputs.hap0, inputs.hap1, i))
+        else:
+            counts = sample(*args, target, rng)
+        if structure is not None and (not structure.present[i].all() or (structure.copies[i] >= 0).any()):
+            # Expected reads of one homologue copy (unimpaired depth x sample, site and regional factors).
+            lam = np.full(sites, inputs.depth * float(inputs.factor[i]) / 2)
+            if target is not None:
+                lam = lam * target
+            error = _mean_other_allele_rate(model) if model.long_read_mean_bp else model.error_rate
+            counts = structural_counts(
+                counts,
+                np.stack((inputs.hap0[i], inputs.hap1[i])),
+                structure.present[i],
+                structure.copies[i],
+                lam,
+                error,
+                sv_stream("simulation.sv.reads", inputs.seed, i),
+                thin=not model.long_read_mean_bp,
+            )
+        out[row] = counts
     return out
+
+
+def _quality_quantiles(model):
+    """Per-read error rates at fixed quantiles of the clipped Phred law (deterministic integration)."""
+    q = (np.arange(FRAGMENT_QUANTILES) + 0.5) / FRAGMENT_QUANTILES
+    quality = np.clip(model.read_quality_mean + model.read_quality_sd * ndtri(q), READ_QUALITY_MIN, READ_QUALITY_MAX)
+    return 10.0 ** (-quality / 10)
+
+
+def _mean_error(model) -> float:
+    """Mean per-base error rate of a long read under the clipped Phred law."""
+    return float(np.mean(_quality_quantiles(model)))
+
+
+def _mean_other_allele_rate(model) -> float:
+    """Mean probability that a long read reports the other allele at an ordinary site (substitutions only)."""
+    return _mean_error(model) * model.substitution_share / 3
 
 
 def _sample_factors(samples, model, rng):
@@ -311,4 +398,124 @@ def _fragment_sample(hap0, hap1, positions, depth, model, factor, site_factor, r
         first = int(rng.integers(0, sites - width + 1))
         counts[first : first + width] = 0
         alt[first : first + width] = 0
+    return np.stack((counts - alt, alt), axis=-1).astype(np.int64, copy=False)
+
+
+def _long_read_lengths(model):
+    """(log-mean, log-SD, minimum, maximum, expected covered bases) of the clipped lognormal read-length law."""
+    mean, sigma = float(model.long_read_mean_bp), float(model.long_read_length_sigma)
+    mu = math.log(mean) - sigma * sigma / 2
+    f_min = LONG_READ_MIN_BP
+    f_max = max(f_min + 1, int(math.ceil(math.exp(mu + LONG_READ_SIGMA_LIMIT * sigma))) + 1)
+    quantiles = (np.arange(FRAGMENT_QUANTILES) + 0.5) / FRAGMENT_QUANTILES
+    lengths = np.clip(np.rint(np.exp(mu + sigma * ndtri(quantiles))), f_min, f_max)
+    return mu, sigma, f_min, f_max, float(np.mean(lengths))
+
+
+def _window_alt_counts(haplotype, positions, window):
+    """ALT alleles of one homologue within +-window bp of each site (the site included)."""
+    lo = np.searchsorted(positions, positions - window)
+    hi = np.searchsorted(positions, positions + window, side="right")
+    cumulative = np.r_[0, np.cumsum(haplotype, dtype=np.int64)]
+    return cumulative[hi] - cumulative[lo]
+
+
+def _long_read_sample(hap0, hap1, positions, depth, model, factor, site_factor, rng, context, present=None,
+                      cohort=None):
+    """REF/ALT counts int64[L, 2] of one sample under the long-read sampler (module docstring), from its own stream.
+
+    present: bool [2, L] (structure) or None; a homologue's hits at its absent cells are removed. cohort: (hap0 [N, L],
+    hap1 [N, L], this sample's row) for foreign reads."""
+    sites = len(hap0)
+    mu, sigma, f_min, f_max, covered_per_read = _long_read_lengths(model)
+    width = int(sites * model.dropout_fraction)
+    lo = int(positions[0]) - f_max
+    span = int(positions[-1]) + 1 - lo
+    counts = np.zeros(sites, dtype=np.int64)
+    alt = np.zeros(sites, dtype=np.int64)
+    bias = model.heterozygote_alt_probability - 0.5
+    rate = depth * factor / (1 - width / sites) / covered_per_read
+    target = site_factor
+    if model.count_dispersion:
+        target = rng.gamma(1 / model.count_dispersion, model.count_dispersion, size=sites)
+        if site_factor is not None:
+            target *= site_factor
+    if target is None:
+        n = int(rng.poisson(rate * span))
+        start = lo + rng.integers(0, span, size=n)
+    else:
+        edges, widths, local = _fragment_envelopes(positions, target, lo, span, f_max)
+        per_window = rng.poisson(rate * local * widths)
+        n = int(per_window.sum())
+        start = np.repeat(edges, per_window) + rng.integers(0, np.repeat(widths, per_window))
+        envelope = np.repeat(local, per_window)
+    length = np.clip(np.rint(np.exp(rng.normal(mu, sigma, size=n))), f_min, f_max).astype(np.int64)
+    which = rng.integers(0, 2, size=n)
+    quality = np.clip(rng.normal(model.read_quality_mean, model.read_quality_sd, size=n), READ_QUALITY_MIN,
+                      READ_QUALITY_MAX)
+    error = 10.0 ** (-quality / 10)
+    donor = None
+    if model.foreign_read_share and cohort is not None and len(cohort[0]) > 1:
+        # A foreign read takes a uniform other sample's homologue (which); drawn only when the share is positive.
+        foreign = rng.random(n) < model.foreign_read_share
+        other = rng.integers(0, len(cohort[0]) - 1, size=n)
+        donor = np.where(foreign, other + (other >= cohort[2]), -1)
+    first = np.searchsorted(positions, start)
+    stop = np.searchsorted(positions, start + length)
+    size = stop - first
+    keep = size > 0
+    if np.any(keep):
+        first, size = first[keep], size[keep]
+        reads = np.flatnonzero(keep)
+        offsets = np.arange(int(size.sum())) - np.repeat(np.cumsum(size) - size, size)
+        site = np.repeat(first, size) + offsets
+        read = np.repeat(reads, size)
+        if target is not None:
+            mark = rng.random(n)
+            retained = mark[read] < target[site] / envelope[read]
+            site, read = site[retained], read[retained]
+        owner = which[read]
+        if present is not None:
+            here = present[owner, site] | (donor is not None and donor[read] >= 0)
+            site, read, owner = site[here], read[here], owner[here]
+        allele = np.where(owner == 0, hap0[site], hap1[site]).astype(np.int64)
+        het = hap0[site] != hap1[site]
+        if donor is not None:
+            outside = donor[read] >= 0
+            d, s_, o = donor[read][outside], site[outside], owner[outside]
+            allele[outside] = np.where(o == 0, cohort[0][d, s_], cohort[1][d, s_])
+            het = het & ~outside
+        if bias:
+            favoured = 1 if bias > 0 else 0
+            convert = het & (allele != favoured) & (rng.random(len(site)) < 2 * abs(bias))
+            allele[convert] = favoured
+        e = error[read]
+        substitution = model.substitution_share
+        lost = 1 - (1 - e * (1 - substitution) / 2) * (1 - e * substitution * 2 / 3)
+        other = e * substitution / 3
+        if model.reference_pull:
+            pull = np.minimum(1.0, model.reference_pull * e / _mean_error(model))
+            other = np.where(allele == 1, 1 - (1 - other) * (1 - pull), other)
+        if model.reference_bias:
+            window = int(model.reference_bias_window_bp)
+            k = np.where(owner == 0, _window_alt_counts(hap0, positions, window)[site],
+                         _window_alt_counts(hap1, positions, window)[site])
+            lost = 1 - (1 - lost) * np.exp(-model.reference_bias * k.astype(np.float64) ** model.reference_bias_power)
+        if context is not None:
+            extending, strength = context
+            at = (extending[site] >= 0) & (allele == extending[site])
+            indel = np.where(at, np.minimum(1.0, e * (1 - substitution) * model.context_factor * strength[site]), 0.0)
+            lost = 1 - (1 - lost) * (1 - indel * (1 - model.context_convert))
+            other = 1 - (1 - other) * (1 - indel * model.context_convert)
+        u = rng.random(len(site))
+        dropped = u < lost
+        flipped = ~dropped & (u < lost + (1 - lost) * other)
+        allele[flipped] ^= 1
+        site, allele = site[~dropped], allele[~dropped]
+        counts = np.bincount(site, minlength=sites).astype(np.int64)
+        alt = np.bincount(site, weights=allele, minlength=sites).astype(np.int64)
+    if width:
+        cut = int(rng.integers(0, sites - width + 1))
+        counts[cut : cut + width] = 0
+        alt[cut : cut + width] = 0
     return np.stack((counts - alt, alt), axis=-1).astype(np.int64, copy=False)

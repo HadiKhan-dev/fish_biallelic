@@ -29,7 +29,7 @@ from haplotype_reconstruction.science.assembly.hierarchy.costs import (
     batch_work,
 )
 from haplotype_reconstruction.science.assembly.hierarchy.level import LevelOutput, LevelPlan, compose_level, plan_level
-from haplotype_reconstruction.stages.framework import Expansion
+from haplotype_reconstruction.stages.framework import Expansion, close_progress, unit_progress
 from haplotype_reconstruction.store.protocol import claim
 
 from .completion import attached_scoring
@@ -47,21 +47,30 @@ def execute_join(
     *,
     cores: int = 1,
 ) -> JoinRecord:
-    """Execute one whole batch and atomically publish it before returning."""
+    """Execute one whole batch and atomically publish it before returning.
+
+    A recorded batch snapshots its search (store.progress) at its sweep boundaries, so that a stopped run resumes
+    inside it; the snapshot is removed once the join is published."""
     if records is not None:
         with claim(records.file, JOINS + identity, identity, blocking=False) as needed:
             if not needed:
                 stored = load_join(records.file, identity, index=task.index)
                 assert stored is not None
                 return stored
-            result = execute_join(task, scoring, None, identity, cores=cores)
+            progress = unit_progress(records.file, JOINS + identity, identity)
+            result = _execute(task, scoring, cores, progress)
             save_join(records.file, identity, result)
+            close_progress(progress)
             return result
+    return _execute(task, scoring, cores, None)
+
+
+def _execute(task: JoinTask, scoring: np.ndarray | SharedArrayRef, cores: int, progress) -> JoinRecord:
     began = perf_counter()
     with attached_scoring(scoring) as data, thread_team(default=cores):
         # The task's live allowance: the join search re-reads it at its boundaries, so a long batch grows into CPUs
         # its finished peers left (a fixed budget kept a tail batch on the cores it started with).
-        result = run_batch(task, data, JoinTeam(batch_threads(task)))
+        result = run_batch(task, data, JoinTeam(batch_threads(task)), progress=progress)
     return replace(result, seconds=perf_counter() - began)
 
 

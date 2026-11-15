@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ...core.concurrency import ThreadSource, thread_count
+from .class_kernels import FAMILY_FAMILY
 from .family_kernels import (
     family_loglik_parallel,
     full_sib_gains,
@@ -45,7 +46,9 @@ class FamilyFit:
     "content_order"); search_margin: its objective minus the other search's.
     A slot sample's genotypes serve the model as a parent's would: it may be a parent, child (the two directions
     tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong
-    to the pedigree stage.
+    to the pedigree stage. With two source populations (rl21), slot_class: int64 [F, 2] the most probable ancestry
+    class of each latent slot under the family's class posterior (-1 for a sequenced slot) and
+    slot_class_probability: float64 [F] that class pair's posterior probability; None with one source.
     """
 
     members: tuple[np.ndarray, ...]
@@ -59,6 +62,8 @@ class FamilyFit:
     converged: bool
     search: str = "best_improvement"
     search_margin: float = float("nan")
+    slot_class: np.ndarray | None = None
+    slot_class_probability: np.ndarray | None = None
 
 
 class _PairGains:
@@ -122,6 +127,8 @@ def _agglomerate(part: _Partition):
     updated with the entries a merge changes. A screen (family_kernels.screen_all, screen_one: the full-sib gain in the
     linear domain, in float32) sets aside the pairs whose gain is below 0 by more than its error bound; only the
     others are evaluated exactly (_agglomeration_entries)."""
+    if part.class_prior is not None:
+        return _agglomerate_classes(part)
     N, M = part.N, part.M
     part.singletons()
     gain = _PairGains(N)
@@ -187,6 +194,51 @@ def _agglomerate(part: _Partition):
             rowmax[row_index] = gain.maximum(row_index)
 
 
+def _agglomerate_classes(part: _Partition):
+    """_agglomerate with two source populations (rl21): the same merges by the same rule, every pair's entry exact
+    (_Partition.class_pair_entries); no screen."""
+    N = part.N
+    part.singletons()
+    gain = _PairGains(N)
+    for lo in range(0, len(gain.values), part.parameters.pair_batch):
+        thread_count(part.threads)
+        hi = min(len(gain.values), lo + part.parameters.pair_batch)
+        pairs = pair_indices(N, lo, hi)
+        gain.values[lo:hi] = part.class_pair_entries(pairs[:, 0], pairs[:, 1])
+    rowmax = np.asarray([gain.maximum(f) for f in range(N)])
+    while True:
+        maximum = rowmax.max()
+        if maximum <= 0:
+            break
+        bound = maximum - part.parameters.gain_tolerance
+        tied: list[tuple[int, int]] = []
+        for r in np.flatnonzero(rowmax >= bound):
+            row = gain.row(r)
+            tied.extend((int(r), int(r + 1 + c)) for c in np.flatnonzero((row > 0) & (row >= bound)))
+        f, g = tied[0] if len(tied) == 1 else max(tied, key=lambda pair: part.pair_key(*pair))
+        thread_count(part.threads)
+        part.merge(f, g, np.array([-1, -1]))
+        # family g is gone: rows whose maximum was in column g are scanned again
+        previous = np.arange(g, dtype=np.int64)
+        column = gain.get(previous, g)
+        gain.row(g)[:] = -np.inf
+        gain.put(previous, g, -np.inf)
+        recount = set(previous[(column == rowmax[:g]) & (column > -np.inf)].tolist()) | {f, g}
+        others = np.asarray([h for h in part.live() if h != f], dtype=np.int64)
+        if not len(others):
+            break
+        below = others[others < f]  # their entries (h, f) lie in column f
+        before = gain.get(below, f)
+        low, high = np.minimum(others, f), np.maximum(others, f)
+        gain.put(low, high, part.class_pair_entries(low, high))
+        after = gain.get(below, f)
+        rise = after > rowmax[below]
+        rowmax[below[rise]] = after[rise]
+        recount |= set(below[(before == rowmax[below]) & (after < before) & (before > -np.inf)].tolist())
+        for row_index in recount:
+            rowmax[row_index] = gain.maximum(row_index)
+
+
 def _offer_gain(part: _Partition, f: int, k: int, p: int, member: bool):
     """(gain, target) of filling family f's free slot k with sample p on the current partition: for a member, p
     first moves to its best other placement (target; -1 a new family). None when the offer no longer applies."""
@@ -202,6 +254,8 @@ def _offer_gain(part: _Partition, f: int, k: int, p: int, member: bool):
     kept = part._slot_logliks.get((int(f), int(part.version[f])))
     if kept is not None and not np.isnan(kept[p]):
         return kept[p] - part.ll[f], None
+    if part.class_prior is not None:
+        return part.slotted(f, other, p) - part.ll[f], None
     return (
         family_loglik_parallel(part.S[f], part.S[f], 0.0, part.law(other), part.logpost[p], 0, part.M) - part.ll[f],
         None,
@@ -346,7 +400,10 @@ def _moves(part: _Partition) -> int:
             u, v = part.slots[g]
             fresh = (
                 part.leave_gain(c)
-                + family_loglik_parallel(part.S[g], part.C[c], 1.0, part.law(u), part.law(v), 0, part.M)
+                + (
+                    part.joined(g, c) if part.class_prior is not None
+                    else family_loglik_parallel(part.S[g], part.C[c], 1.0, part.law(u), part.law(v), 0, part.M)
+                )
                 - part.ll[g]
             )
         if not fresh > part.parameters.gain_tolerance or (g >= 0 and c in part.blocked(g)):
@@ -425,7 +482,10 @@ def _split_moves(part: _Partition, penalty: float) -> int:
         f = int(part.of[c])
         a, b = part.slots[f]
         fresh = (
-            family_loglik_parallel(part.S[f], part.C[c], -1.0, part.law(a), part.law(b), 0, part.M)
+            (
+                part.left(f, c) if part.class_prior is not None
+                else family_loglik_parallel(part.S[f], part.C[c], -1.0, part.law(a), part.law(b), 0, part.M)
+            )
             - part.ll[f]
             + part.singleton_slot_loglik(c, u)
         )
@@ -476,16 +536,26 @@ def _merge_one(part: _Partition) -> int:
         thread_count(part.threads)
         missing = np.asarray(missing_list, dtype=np.int64)
         fresh = np.empty((len(missing), 2))
-        merge_gains(
-            part.S,
-            part.ll,
-            np.ascontiguousarray(rows[missing]),
-            np.ascontiguousarray(parents[missing]),
-            part.logpi,
-            part.logpost,
-            part.parameters.gain_tolerance,
-            fresh,
-        )
+        if part.class_prior is not None:
+            first, second = rows[missing, 0], rows[missing, 1]
+            fresh[:, 0] = (
+                part.class_values(FAMILY_FAMILY, first, second, slots=parents[missing]) - part.ll[first] - part.ll[second]
+            )
+            fresh[:, 1] = np.nan
+            linked = np.flatnonzero((parents[missing] < 0).all(axis=1) & (fresh[:, 0] > part.parameters.gain_tolerance))
+            if len(linked):
+                fresh[linked, 1] = part.class_half_sib_gains(first[linked], second[linked])
+        else:
+            merge_gains(
+                part.S,
+                part.ll,
+                np.ascontiguousarray(rows[missing]),
+                np.ascontiguousarray(parents[missing]),
+                part.logpi,
+                part.logpost,
+                part.parameters.gain_tolerance,
+                fresh,
+            )
         out[missing] = fresh
         for t, value in zip(missing.tolist(), fresh, strict=False):
             part._merge_pairs[keys[t]] = value.copy()
@@ -523,16 +593,23 @@ def fit(
     max_sweeps: int,
     parameters: FamilyParameters = _DEFAULT_FAMILY,
     threads: ThreadSource = 1,
+    class_prior: np.ndarray | None = None,
+    composition=None,
 ) -> FamilyFit:
     """Families over the samples of C [N, M, 9] (child terms), logpi [M, 3], logpost [N, M, 3]; ``ranges``: each
     support unit's site range (lo, hi), ``weights`` its working Morgans (None: equal weights). Two bounded production searches; screens
-    use exact fallback gains."""
+    use exact fallback gains. ``class_prior`` (rl21, two source populations): the ancestry classes' log laws
+    over the parental configurations [K, M, G]; C is then [N, M, G x G] (child terms over configuration pairs) and
+    logpost [N, M, G] (configuration posteriors), a latent slot is the marginal over the classes and every gain
+    is exact; ``composition`` is the terms' ancestry_composition (rows: the genome, then ``ranges``)."""
     # Partition sums borrow singleton rows before detaching on mutation. A readonly
     # task input needs an owned buffer so Numba's mutable sum list remains valid.
     C = C if C.flags.writeable else C.copy()
     logpi = logpi if logpi.flags.writeable else logpi.copy()
     logpost = logpost if logpost.flags.writeable else logpost.copy()
-    part = _Partition(C, logpi, logpost, parameters, threads)
+    if class_prior is not None:
+        class_prior = np.ascontiguousarray(class_prior, dtype=np.float64)
+    part = _Partition(C, logpi, logpost, parameters, threads, class_prior, composition, ranges)
     penalty = float(np.log(part.N))
     _agglomerate(part)
     # Two order-free searches from the agglomeration, and the higher objective is kept (the first on a
@@ -559,10 +636,16 @@ def fit(
     a, b = np.triu_indices(len(latent), k=1)
     pairs = np.stack([latent[a], latent[b]], axis=1).astype(np.int64).reshape(-1, 2)
     gains = np.empty(len(pairs))
-    if len(pairs):
+    if len(pairs) and class_prior is not None:
+        thread_count(part.threads)
+        gains[:] = part.class_half_sib_gains(live[pairs][:, 0], live[pairs][:, 1])
+    elif len(pairs):
         thread_count(part.threads)
         half_sib_gains(part.S, part.ll, np.ascontiguousarray(live[pairs]), part.logpi, gains)
     linked = gains > penalty
+    slot_class = slot_probability = None
+    if class_prior is not None:
+        slot_class, slot_probability = part.slot_classes(live)
     return FamilyFit(
         members=tuple(np.asarray(sorted(part.members[f]), dtype=np.int64) for f in live),
         parents=parents,
@@ -575,6 +658,8 @@ def fit(
         converged=converged,
         search=search,
         search_margin=float(margin),
+        slot_class=slot_class,
+        slot_class_probability=slot_probability,
     )
 
 

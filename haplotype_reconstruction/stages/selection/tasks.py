@@ -59,9 +59,10 @@ from ...science.selection.parameters import (
 )
 from ...science.selection.rounds import BlockSelection, BlockTask, block_task_bytes, select_task
 from ...science.selection.run import initial_tasks, round_tasks
+from ...store.progress import UnitProgress
 from ...store.protocol import ClaimBusy, claim
 from ...store.store import CheckpointStore
-from ..framework import Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey
+from ..framework import Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey, close_progress, unit_progress
 from .records import ROUNDS, SelectionRecords
 
 __all__ = [
@@ -97,7 +98,7 @@ def _run_block(
 ) -> BlockSelection:
     """Execute one block with its allocated team; publish memo before block when recording."""
 
-    def compute() -> BlockSelection:
+    def compute(progress: UnitProgress | None = None) -> BlockSelection:
         # Recorded graph rounds carry only the previous outcomes/releases. The
         # exact memo belongs to this block's consumer, not every round continuation.
         current = block
@@ -112,20 +113,23 @@ def _run_block(
                 reverse=reverse,
                 census_sink=census_sink,
                 threads=share_reader(SHARE_REREAD_SECONDS),
+                progress=progress,
             )
         return value
 
     if scope is None:
         return compute()
-    with claim(
-        scope.file, scope.key("block", block.index), scope.derivation("block", block.index), blocking=False
-    ) as needed:
+    key, identity = scope.key("block", block.index), scope.derivation("block", block.index)
+    with claim(scope.file, key, identity, blocking=False) as needed:
         if not needed:
             saved = scope.load_block(block.index, memos=retain_memo)
             assert saved is not None
             return saved
-        result = compute()
+        # A long block snapshots its search state (store.progress), so that a stopped run resumes inside it.
+        progress = unit_progress(scope.file, key, identity)
+        result = compute(progress)
         scope.save_block(result)
+        close_progress(progress)
         # Publication retains the complete memo for resume and the next round.
         # The gather needs the outcome/release, and can drop the memo immediately.
         return result if retain_memo else replace(result, memo=None)

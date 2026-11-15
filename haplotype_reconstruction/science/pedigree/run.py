@@ -37,7 +37,7 @@ from ...contracts.pedigree import (
     SupportRecord,
 )
 from ...core.errors import InputError, InvariantError
-from . import api, count, decision, exclusion, guard, regimes
+from . import api, count, decision, exclusion, family_transmission, guard, regimes
 from .eligibility import ParentEligibility
 from .parameters import PedigreeParameters
 
@@ -62,7 +62,7 @@ def precheck(n_samples: int, *, basis: str = "informative") -> PedigreePrecheck:
 def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters) -> decision.FullFit | Pedigree:
     """Fit the supplied unit evidence; a run below the assessable material gets the completed unresolved product."""
     precheck(len(scores.sample_ids))
-    classified = regimes.classify(scores.material_morgans, len(scores.contigs), parameters)
+    classified = regimes.classify(scores.regime_basis_morgans, len(scores.contigs), parameters)
     if classified.name != scores.regime:
         raise InputError("unit scores' regime differs from their material")
     if classified.name == "not_assessable":
@@ -100,6 +100,24 @@ def exclusion_request(
                             log_weights=log_weights)
 
 
+def transmission_request(
+    decided: Decision,
+    request: ExclusionRequest,
+    relatedness: GuardRelatedness,
+    observed_counts: np.ndarray,
+    parameters: PedigreeParameters,
+    *,
+    relationship_evidence=(),
+):
+    """Freeze the PD29 family transmission request after the guard's fixed point: (request, witnesses per edge)."""
+    parameters = regimes.effective(parameters, decided.scores.regime)
+    preliminary = guard.fixed_point(request.before_edges, relatedness, request.relationship, relationship_evidence,
+                                    parameters)
+    return family_transmission.request(decided.scores.sample_ids, request.contigs, request.before_edges, preliminary,
+                                       relatedness, request.relationship, relationship_evidence, observed_counts,
+                                       parameters)
+
+
 def release_decision(
     decided: Decision,
     request: ExclusionRequest,
@@ -109,6 +127,7 @@ def release_decision(
     parameters: PedigreeParameters,
     *,
     relationship_evidence=(),
+    transmission_evidence=(),
 ) -> ReleasedDecision:
     """Combine configured evidence, guard/count, orient and check the second guard; no scoring."""
     parameters = regimes.effective(parameters, decided.scores.regime)
@@ -148,6 +167,14 @@ def release_decision(
     elif evidence:
         raise InvariantError("supplied exclusion evidence is outside the decision's path")
     preliminary_guard = guard.fixed_point(before, relatedness, request.relationship, relationship_evidence, parameters)
+    # PD29: one family transmission pass on the edges the guard retained (no iteration with the guard's cleaning)
+    transmitted, witnesses = family_transmission.request(sample_ids, request.contigs, before, preliminary_guard,
+                                                         relatedness, request.relationship, relationship_evidence,
+                                                         observed_counts, parameters)
+    if len(transmitted.parents) and len(transmission_evidence) == 0:
+        raise InvariantError("the family transmission request needs its per-contig evidence")
+    preliminary_guard = family_transmission.apply(preliminary_guard, transmitted, witnesses, transmission_evidence,
+                                                  parameters)
     released = count.release_counts(
         CountReleaseBasis(
             decided.tier_b,
@@ -190,6 +217,13 @@ def release_decision(
     if set(zip(ordered_edges.parents.tolist(), ordered_edges.children.tolist(), strict=True)) != edge_set:
         raise InvariantError("count release changed the edges the guard was scored for")
     final_guard = guard.fixed_point(ordered_edges, relatedness, request.relationship, relationship_evidence, parameters)
+    final_transmitted, final_witnesses = family_transmission.request(
+        sample_ids, request.contigs, ordered_edges, final_guard, relatedness, request.relationship,
+        relationship_evidence, observed_counts, parameters)
+    if final_transmitted.digest != transmitted.digest:
+        raise InvariantError("family transmission request differs after released slot ordering")
+    final_guard = family_transmission.apply(final_guard, final_transmitted, final_witnesses, transmission_evidence,
+                                            parameters)
     if final_guard.withheld != preliminary_guard.withheld:
         raise InvariantError("guard withdrawals differ after released slot ordering")
     pre_guard_calls = api.calls(released.tier_b, rows, orientation)
@@ -227,8 +261,11 @@ def assemble(
     omitted: dict[str, str],
     parameters: PedigreeParameters,
     reports: PedigreeReportInputs,
+    *,
+    veto_outcome=None,
 ) -> PedigreeResult:
-    """Assemble retained state and complete numeric report views for publication."""
+    """Assemble retained state and complete numeric report views for publication; ``veto_outcome``: the both-maps
+    veto's withheld calls (material_veto), already applied to ``released``, withdrawn from the views too."""
     decided = released.decision
     numeric = api.report_views(
         decided,
@@ -245,6 +282,9 @@ def assemble(
     from .low_labels import label_views
     numeric = label_views(numeric, released, low_material=decided.scores.regime == "low_material",
                           tier_a=decided.tier_a_assessed)
+    if veto_outcome is not None:
+        from .material_veto import apply_views
+        numeric = apply_views(numeric, veto_outcome)
     scores = decided.scores
     if scores.piece_contig is not None and scores.piece_unit is not None:
         assert scores.piece_bins is not None and scores.piece_markers is not None

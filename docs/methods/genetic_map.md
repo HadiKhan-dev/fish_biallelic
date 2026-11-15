@@ -12,8 +12,8 @@ Validate strictly increasing map positions and nondecreasing cumulative cM witho
 
 Implementation: [contracts/genetic_map.py](../../haplotype_reconstruction/contracts/genetic_map.py), [stages/inputs/genetic_map.py](../../haplotype_reconstruction/stages/inputs/genetic_map.py), [stages/configure.py](../../haplotype_reconstruction/stages/configure.py).
 
-With `[genetic_map] infer_rate`, the relatedness stage may replace the fallback rate of contigs without a map file by its genome-wide estimate ([rl20](relatedness.md#rl20)); the working map of every later stage then uses it. Map files are never changed.
+`[genetic_map] rate_estimate` decides what the run's two genome-wide rate estimates may change. Both stand in only for the fallback rate: contigs without a map file and the stretches beyond a map file's knots; a map file's own distances are never rescaled, so a genome fully covered by map files has the same map in every mode. With `adopt`, the relatedness stage may replace the fallback rate by its estimate ([rl20](relatedness.md#rl20)); the working map of every later stage then uses it. The painting estimate never changes the working map: with `veto` (default) the pedigree releases only what both the working map's and the estimated map's material regimes release, with `adopt` it may apply the estimated map's regime ([map scale](pedigree.md#map-scale)), and with `ignore` nothing reads either estimate.
 
-Parameters by name: `rate_cm_per_mb`, `infer_rate`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `rate_cm_per_mb`, `rate_estimate`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(log M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.

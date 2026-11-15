@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.errors import SettingsError
+from ...simulation import parameters as generating
 from ...core.files import atomic_path
 from .schema import NAMED_SECTIONS, Settings, schema_fields
 
@@ -101,6 +102,17 @@ def _assign(mapping: dict, path: list[str], value) -> None:
     mapping[path[-1]] = value
 
 
+# Structural-variant tables of [simulation.structure] variants (simulation/structure.py StructuralVariant).
+VARIANT_KEYS = ("kind", "contig", "start", "end", "target", "carriers")
+VARIANT_KINDS = ("inversion", "deletion", "duplication", "reversed", "moved", "unlinked")
+# Generating read presets: name -> preset file (interface/settings/presets).
+READ_PRESETS = {
+    "realistic": "realistic_reads.toml",
+    "short_read_cohort": "short_read_cohort.toml",
+    "long_read_cohort": "long_read_cohort.toml",
+}
+
+
 def _convert(kind: str, value, where: str, choices: tuple, cwd: Path):
     def fail(expected):
         raise SettingsError(f"{where}: expected {expected}, got {value!r}")
@@ -141,6 +153,25 @@ def _convert(kind: str, value, where: str, choices: tuple, cwd: Path):
                 )
             )
         return tuple(regions)
+    if kind == "variants":
+        if not isinstance(value, list):
+            fail("an array of structural-variant tables")
+        variants = []
+        for r in value:
+            required = {"kind", "contig", "start", "end"}
+            if not isinstance(r, dict) or not required <= set(r) or set(r) - set(VARIANT_KEYS):
+                fail("variant tables with kind, contig, start, end (optional target, carriers)")
+            variants.append(
+                (
+                    _convert("str", r["kind"], where, VARIANT_KINDS, cwd),
+                    _convert("str", r["contig"], where, (), cwd),
+                    _convert("int", r["start"], where, (), cwd),
+                    _convert("int", r["end"], where, (), cwd),
+                    _convert("int", r.get("target", 0), where, (), cwd),
+                    _convert("ints", r.get("carriers", []), where, (), cwd),
+                )
+            )
+        return tuple(variants)
     if kind == "bool":
         if not isinstance(value, bool):
             fail("true or false")
@@ -217,6 +248,9 @@ def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
     artefacts = simulation.get("artefacts", {}) if isinstance(simulation, dict) else {}
     if isinstance(artefacts, dict) and artefacts.get("preset") == "reference_blocks":
         mapping = _merge({"simulation": {"artefacts": {"enabled": True}}}, mapping)
+    structure = simulation.get("structure", {}) if isinstance(simulation, dict) else {}
+    if isinstance(structure, dict) and structure.get("preset") == "cichlid":
+        mapping = _merge({"simulation": {"structure": {"enabled": True}}}, mapping)
     if isinstance(simulation, dict):
         genome = simulation.get("genome", {})
         inputs = mapping.get("input", {})
@@ -228,10 +262,10 @@ def build_settings(mapping: dict, *, cwd: str | Path | None = None) -> Settings:
         ):
             mapping = _merge(mapping, {"input": {"contigs": genome["contigs"]}})
     reads = simulation.get("reads", {}) if isinstance(simulation, dict) else {}
-    if isinstance(reads, dict) and reads.get("preset") in ("realistic", "short_read_cohort"):
+    if isinstance(reads, dict) and reads.get("preset") in READ_PRESETS:
         text = (
             resources.files("haplotype_reconstruction.interface.settings")
-            .joinpath("presets", "realistic_reads.toml" if reads["preset"] == "realistic" else "short_read_cohort.toml")
+            .joinpath("presets", READ_PRESETS[reads["preset"]])
             .read_text()
         )
         # Expand after all user/CLI layers have merged, so every explicit key wins,
@@ -296,6 +330,8 @@ def validate(config: Settings, given: Set[tuple[str, ...]] = frozenset()) -> Non
     execution, inputs = config.execution, config.input
     if execution.max_contigs and ("execution", "serial") in given and not execution.serial:
         raise SettingsError("[execution] max_contigs runs contigs serially; it cannot be combined with serial = false")
+    if not math.isfinite(execution.progress_minutes) or execution.progress_minutes < 0:
+        raise SettingsError("[execution] progress_minutes must be finite and nonnegative")
     if config.serial and config.run.stop_after == "discovery":
         raise SettingsError(
             "serial contigs are painted before the next is discovered; they cannot stop after discovery"
@@ -304,6 +340,8 @@ def validate(config: Settings, given: Set[tuple[str, ...]] = frozenset()) -> Non
         raise SettingsError("[input] contigs is required (no preset lists them)")
     if len(set(inputs.contigs)) != len(inputs.contigs):
         raise SettingsError("[input] contigs must be unique")
+    if isinstance(inputs.source_populations, bool) or inputs.source_populations not in (1, 2):
+        raise SettingsError("[input] source_populations must be 1 or 2")
     if inputs.kind == "vcf":
         if inputs.vcf is None:
             raise SettingsError('[input] kind = "vcf" needs [input] vcf (or --vcf)')
@@ -512,6 +550,11 @@ def _validate_simulation(config: Settings) -> None:
             "positive region_depth_cv requires positive region_depth_window_bp")
     require(0 <= artefacts.balance_dispersion < 1, "artefact balance_dispersion must be in [0, 1)")
     require(artefacts.miss_sample_cv >= 0, "artefact miss_sample_cv must be nonnegative")
+    require(0 <= artefacts.hom_alt_miss_factor <= 1, "artefact hom_alt_miss_factor must be between zero and one")
+    require(
+        not (reads.long_read_mean_bp and artefacts.enabled and artefacts.balance_dispersion),
+        generating.BALANCE_WITH_LONG_READS,
+    )
     require(
         artefacts.block_band > 0 and artefacts.stretch_sites >= 1,
         "artefact block_band must be positive and stretch_sites at least one",
@@ -532,6 +575,22 @@ def _validate_simulation(config: Settings) -> None:
     require(
         all(a[0] != b[0] or a[2] <= b[1] for a, b in zip(regions, regions[1:], strict=False)),
         "artefact regions on the same contig must not overlap",
+    )
+    require(reads.long_read_mean_bp >= 0, "long_read_mean_bp must be nonnegative")
+    require(not (reads.long_read_mean_bp and reads.read_length_bp),
+            "long_read_mean_bp and read_length_bp select different samplers; set one")
+    require(reads.reference_bias >= 0, "reference_bias must be nonnegative")
+    require(reads.reference_bias_power > 0, "reference_bias_power must be positive")
+    require(0 <= reads.reference_pull <= 1, "reference_pull must be between zero and one")
+    require(0 <= reads.foreign_read_share < 1, "foreign_read_share must be in [0, 1)")
+    require(not reads.reference_bias or reads.reference_bias_window_bp > 0,
+            "positive reference_bias requires positive reference_bias_window_bp")
+    for name in ("substitution_share", "context_sites", "context_convert"):
+        require(0 <= getattr(reads, name) <= 1, f"[simulation.reads] {name} must be between zero and one")
+    structure = sim.structure
+    require(
+        all(contig in config.input.contigs for _, contig, *_ in structure.variants),
+        "structural variants must name simulated contigs ([input] contigs)",
     )
 
 
@@ -596,6 +655,8 @@ def settings_text(config: Settings) -> str:
                     value = dict(value)
                 elif kind == "regions":
                     value = [dict(zip(("contig", "start", "end", "factor"), r, strict=True)) for r in value]
+                elif kind == "variants":
+                    value = [dict(zip(VARIANT_KEYS, (*r[:5], list(r[5])), strict=True)) for r in value]
                 lines.append(f"{item.name} = {_toml_value(_plain(kind, value))}")
         for sub, value in nested:
             emit(sub, value)

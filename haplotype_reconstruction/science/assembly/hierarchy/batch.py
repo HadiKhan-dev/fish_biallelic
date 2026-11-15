@@ -19,6 +19,8 @@ from haplotype_reconstruction.contracts.assembly import JoinInputs, JoinRecord, 
 from haplotype_reconstruction.contracts.panels import ComponentPanel, materialise
 from haplotype_reconstruction.core.digest import array_digest, json_digest
 from haplotype_reconstruction.core.kernels import kernel
+from haplotype_reconstruction.core.progress import Progress
+from haplotype_reconstruction.core.progress import frame as progress_frame
 from haplotype_reconstruction.core.ties import SharedCounter, TieSettings
 
 if TYPE_CHECKING:
@@ -137,13 +139,18 @@ def join_inputs(task: JoinTask, scoring: np.ndarray) -> JoinInputs:
 
 
 def _run_single(
-    task: JoinTask, scoring: np.ndarray, budget, *, report_switches=False, max_branches=MAX_BRANCHES
+    task: JoinTask, scoring: np.ndarray, budget, *, report_switches=False, max_branches=MAX_BRANCHES, progress=None
 ) -> JoinRecord:
     """Join one batch (see the module docstring); results never depend on the budget.
 
     The joined component's founders are returned in canonical order (lexicographic order of their prepared-row
     index paths), so every later level's slot and row-index tie-breaks are content rules."""
-    return _record(task, _search(task, scoring, budget, report_switches=report_switches, max_branches=max_branches))
+    return _record(
+        task,
+        _search(
+            task, scoring, budget, report_switches=report_switches, max_branches=max_branches, progress=progress
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -156,9 +163,10 @@ class _LocalJoin:
     work_counters: dict[str, int]
 
 
-def _search(task: JoinTask, scoring: np.ndarray, budget, *, report_switches, max_branches) -> _LocalJoin:
+def _search(task: JoinTask, scoring: np.ndarray, budget, *, report_switches, max_branches, progress=None) -> _LocalJoin:
     """The join search of one batch in local row terms; its outcome reads only the batch's join view (and, with a
-    census attached, the census label)."""
+    census attached, the census label). ``progress`` (core.progress) reaches the panel search; a resumed search
+    fits the linker and runs the beam again (deterministic functions of the inputs) before continuing."""
     from ..join import beam as join_beam
     from ..join import search as join_search
     from ..linker import em as linker_em
@@ -223,6 +231,7 @@ def _search(task: JoinTask, scoring: np.ndarray, budget, *, report_switches, max
         linkage=join_beam.path_linkage(transitions, gap),
         report_switches=report_switches,
         max_branches=max_branches,
+        progress=progress,
     )
     return _LocalJoin(
         outcome=outcome,
@@ -285,43 +294,56 @@ def _record(task: JoinTask, searched: _LocalJoin) -> JoinRecord:
     )
 
 
-def run_batch(task: JoinTask, scoring: np.ndarray, budget) -> JoinRecord:
+def run_batch(task: JoinTask, scoring: np.ndarray, budget, *, progress: Progress | None = None) -> JoinRecord:
     """Compare a complete bounded Cartesian input family on one common cohort.
 
     No child and parent scores are added, and linker scores from different
     fitted models are not used to rank the parent outputs. Branches with equal
     join views share one search (see join_view); the batch's work counters count
     each search once, and its shadow diagnostic names the search of each branch.
+    ``progress``: the batch's partial-progress capability (core.progress); its "batch" frame holds the completed
+    branch searches, and the search in progress adds its own frames (search_panel, PanelSearch). A resumed batch
+    publishes the record the uninterrupted batch would have published.
     """
     if not task.branches:
-        return _run_single(task, scoring, budget)
+        return _run_single(task, scoring, budget, progress=progress)
     from ..alternatives import terminal_winners
     from ..orders import panel_key
 
-    results: list[JoinRecord] = []
     # One search per distinct join view (u13). Branches whose views are equal (tied inputs that differ only in
     # which of several inference-identical prepared rows a founder copies) run the same computation, so one
     # search serves them all and each branch maps its local outcome through its own input rows: every branch
     # keeps its own record and families, exactly as if it had been searched alone. With a tie census attached,
     # every branch is searched, so each records its decisions under its own row label.
-    searches: list[_LocalJoin] = []
-    search_of_view: dict[object, int] = {}
-    branch_search: list[int] = []
-    for index, components in enumerate(task.branches):
-        branch = replace(task, components=components, branches=(), branch_sources=())
-        view = join_view(branch) if task.settings.census is None else index
-        if view not in search_of_view:
-            if searches:
-                # CountStep callbacks hold a search cycle. Retire the previous
-                # mutable caches before constructing the next sequential branch.
-                gc.collect()
-            # The complete incoming family shares at most 16 executions. Do not
-            # multiply that allowance by an independent per-input replay budget.
-            # Unperformed inner histories remain explicit source uncertainty.
-            search_of_view[view] = len(searches)
-            searches.append(_search(branch, scoring, budget, report_switches=True, max_branches=1))
-        branch_search.append(search_of_view[view])
-        results.append(_record(branch, searches[branch_search[-1]]))
+    saved = None if progress is None else progress.take("batch")
+    searches: list[_LocalJoin] = [] if saved is None else list(saved["searches"])
+    search_of_view: dict[object, int] = {} if saved is None else dict(saved["search_of_view"])
+    branch_search: list[int] = [] if saved is None else list(saved["branch_search"])
+    results: list[JoinRecord] = [
+        _record(replace(task, components=task.branches[index], branches=(), branch_sources=()), searches[number])
+        for index, number in enumerate(branch_search)
+    ]
+
+    def batch_state():
+        return dict(searches=tuple(searches), search_of_view=dict(search_of_view), branch_search=tuple(branch_search))
+
+    with progress_frame(progress, "batch", batch_state):
+        for index in range(len(branch_search), len(task.branches)):
+            branch = replace(task, components=task.branches[index], branches=(), branch_sources=())
+            view = join_view(branch) if task.settings.census is None else index
+            if view not in search_of_view:
+                if searches:
+                    # CountStep callbacks hold a search cycle. Retire the previous
+                    # mutable caches before constructing the next sequential branch.
+                    gc.collect()
+                # The complete incoming family shares at most 16 executions. Do not
+                # multiply that allowance by an independent per-input replay budget.
+                # Unperformed inner histories remain explicit source uncertainty.
+                searched = _search(branch, scoring, budget, report_switches=True, max_branches=1, progress=progress)
+                search_of_view[view] = len(searches)
+                searches.append(searched)
+            branch_search.append(search_of_view[view])
+            results.append(_record(branch, searches[branch_search[-1]]))
     survivors = terminal_winners(results, reverse=task.settings.reverse)
     chosen = min(survivors, key=lambda result: (len(result.rows), result.minimum_switches, panel_key(result.rows)))
     survivor_ids = {id(result) for result in survivors}

@@ -742,6 +742,11 @@ def guard_view(guard: GuardRecord) -> GuardView:
                 v.withdrawal_iteration,
                 v.withholding_basis,
                 v.relationship_basis,
+                v.transmission_call,
+                v.transmission_witnesses,
+                v.transmission_segments,
+                v.transmission_score if v.transmission_call in ("kept", "withheld") else float("nan"),
+                v.transmission_alternative,
             )
             for v in guard.votes
         ),

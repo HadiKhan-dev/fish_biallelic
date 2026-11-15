@@ -410,6 +410,14 @@ class TieCounter:
         """Return a frozen kind-sorted snapshot; neither counter nor earlier snapshots change."""
         return TieCounts(tuple(self._counts[kind] for kind in sorted(self._counts)))
 
+    def counts_state(self) -> dict[str, TieCount]:
+        """A copy of the accumulated counts, in insertion order (a unit's progress snapshot, store.progress)."""
+        return dict(self._counts)
+
+    def restore_counts(self, state: dict[str, TieCount]) -> None:
+        """Replace the accumulated counts by a snapshot's (counts_state)."""
+        self._counts = dict(state)
+
 
 def class_sort(
     items: Iterable,
@@ -807,6 +815,14 @@ class SharedCounter(TieCounter):
         """Return a frozen snapshot under the update lock without mutating any counts."""
         with self._lock:
             return super().record()
+
+    def counts_state(self) -> dict[str, TieCount]:
+        with self._lock:
+            return super().counts_state()
+
+    def restore_counts(self, state: dict[str, TieCount]) -> None:
+        with self._lock:
+            super().restore_counts(state)
 
 
 @dataclass(frozen=True)

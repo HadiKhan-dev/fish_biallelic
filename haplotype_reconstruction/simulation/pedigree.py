@@ -31,6 +31,7 @@ from ..core.errors import InputError
 from ..core.random import child_seeds, stream, structure_stream
 from .design import PedigreeRow, SimulationDesign
 from .haplotypes import Mosaic, transmit
+from .structure import ContigStructure, structured_transmit, sv_stream
 
 # ---------------------------------------------------------------------------------------------
 # Founders
@@ -82,12 +83,16 @@ def _map_crossovers(site_locs, chromosome_map, rng):
     return np.sort(chromosome_map.inverse_morgans(coordinates))
 
 
-def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_rate, rng, chromosome_map=None):
+def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_rate, rng, chromosome_map=None,
+           structure: ContigStructure | None = None, coins=()):
     """One label-level gamete, its ancestry alias and unchanged float crossovers.
 
     The random draws and stopping conditions are those of the released array
     meiosis, including the no-map terminal overshoot and repeated mutation hits.
     ``ancestry_pair`` is retained as a task-interface alias of the parental mosaics.
+    With ``structure`` (simulation/structure.py) the same draws are filtered and ordered by the parent's chromosome
+    structure; the result then has a fourth member, the reference-axis switch points, and ``coins`` gives each unlinked
+    segment's starting homologue.
     """
     using_map = chromosome_map is not None and chromosome_map.has_map
     start_phys = site_locs[0]
@@ -118,6 +123,11 @@ def gamete(hap_pair, ancestry_pair, site_locs, *, recombination_rate, mutation_r
             mutated.append(new_loc_index)
         cur_loc = new_loc
     events = np.asarray(crossovers, dtype=np.float64)
+    if structure is not None:
+        result, kept, switches = structured_transmit(
+            hap_pair, using_hap, events, np.unique(mutated).astype(np.int64), site_locs, structure, coins
+        )
+        return result, result, kept, switches
     result = transmit(hap_pair, using_hap, events, np.unique(mutated).astype(np.int64), site_locs)
     return result, result, events
 
@@ -135,10 +145,18 @@ def _simulate_children(task, shared=None, budget=None):
         recombination_rate,
         mutation_rate,
         chromosome_map,
-    ) = task
+    ) = task[:10]
+    structure = task[10] if len(task) > 10 else None
     children = []
     for (mother, father), seed in zip(parent_pairs, seeds, strict=False):
         rng = stream("simulation.child", seed=int(seed))
+        extra: list[dict] = [{}, {}]
+        if structure is not None:
+            # Unlinked segments choose their homologue from a stream of their own: no released draw moves.
+            coins = sv_stream("simulation.sv.gamete", int(seed), "cross").integers(
+                0, 2, size=(2, len(structure.unlinked))
+            )
+            extra = [dict(structure=structure, coins=coins[slot]) for slot in (0, 1)]
         maternal = gamete(
             parents[mother],
             ancestries[mother],
@@ -147,6 +165,7 @@ def _simulate_children(task, shared=None, budget=None):
             mutation_rate=mutation_rate,
             rng=rng,
             chromosome_map=chromosome_map,
+            **extra[0],
         )
         paternal = gamete(
             parents[father],
@@ -156,8 +175,12 @@ def _simulate_children(task, shared=None, budget=None):
             mutation_rate=mutation_rate,
             rng=rng,
             chromosome_map=chromosome_map,
+            **extra[1],
         )
-        children.append(([maternal[0], paternal[0]], [maternal[1], paternal[1]], [maternal[2], paternal[2]]))
+        child = ([maternal[0], paternal[0]], [maternal[1], paternal[1]], [maternal[2], paternal[2]])
+        if structure is not None:
+            child += ([maternal[3], paternal[3]],)
+        children.append(child)
     return contig_index, first, children
 
 
@@ -211,6 +234,8 @@ class SimulatedContig:
     haplotypes: list = record_field("obs", axes=(), units="1", dtype="list")
     ancestry: list = record_field("obs", axes=(), units="1", dtype="list")
     gametes: list = record_field("obs", axes=(), units="1", dtype="list")
+    # With structure: {(child row, parent slot): reference-axis switch points (bp)}.
+    switches: dict = record_field("obs", axes=(), units="1", dtype="dict", default_factory=dict)
 
 
 class _TaskRunner:
@@ -245,7 +270,8 @@ def _child_tasks(parent_pairs, seeds, haplotypes_by_contig, ancestries_by_contig
     The children, their seeds and every draw are unchanged."""
     tasks = []
     for c, (haplotypes, ancestries) in enumerate(zip(haplotypes_by_contig, ancestries_by_contig, strict=True)):
-        sites, recombination_rate, mutation_rate, chromosome_map = common_by_contig[c]
+        sites, recombination_rate, mutation_rate, chromosome_map = common_by_contig[c][:4]
+        structure = common_by_contig[c][4] if len(common_by_contig[c]) > 4 else None
         for first in range(0, len(parent_pairs), per_task):
             pairs = parent_pairs[first : first + per_task]
             used = sorted({parent for pair in pairs for parent in pair})
@@ -263,8 +289,18 @@ def _child_tasks(parent_pairs, seeds, haplotypes_by_contig, ancestries_by_contig
                     mutation_rate,
                     chromosome_map,
                 )
+                + (() if structure is None else (structure,))
             )
     return tasks
+
+
+def _common(sites_by_contig, recombination_rate, mutation_rate, chromosome_maps, structures):
+    """Per-contig task constants; a contig's structure is appended only when it has one."""
+    return [
+        (sites_by_contig[c], recombination_rate, mutation_rate, chromosome_maps[c])
+        + (() if structures is None or structures[c] is None else (structures[c],))
+        for c in range(len(sites_by_contig))
+    ]
 
 
 def simulate_pedigree(
@@ -279,6 +315,7 @@ def simulate_pedigree(
     design: SimulationDesign,
     budget: int = 1,
     runner: Callable[[Callable[..., Any], Sequence[Any]], Iterable[Any]] | None = None,
+    structures: Sequence[ContigStructure | None] | None = None,
 ) -> tuple[PedigreeTable, list[SimulatedContig]]:
     """Simulate the cohorts on every contig with one shared pedigree structure.
 
@@ -351,19 +388,22 @@ def simulate_pedigree(
                 pool_haplotypes,
                 pool_ancestries,
                 per_task,
-                [(sites_by_contig[c], recombination_rate, mutation_rate, chromosome_maps[c]) for c in range(n_contigs)],
+                _common(sites_by_contig, recombination_rate, mutation_rate, chromosome_maps, structures),
             )
             offspring: list[list[Any]] = [[None] * n_children for _ in range(n_contigs)]
             for contig_index, first, children in pool.imap_unordered(_simulate_children, tasks):
                 offspring[contig_index][first : first + len(children)] = children
             row0 = len(samples) - n_children
             for c in range(n_contigs):
-                for i, (haplotypes, ancestry, events) in enumerate(offspring[c]):
+                for i, child in enumerate(offspring[c]):
+                    haplotypes, ancestry, events = child[:3]
                     contigs[c].haplotypes.append(haplotypes)
                     contigs[c].ancestry.append(ancestry)
                     for slot in (0, 1):
                         parent = pool_ids[parent_pairs[i][slot]]
                         contigs[c].gametes.append((row0 + i, slot, parent, events[slot]))
+                        if len(child) > 3:
+                            contigs[c].switches[(row0 + i, slot)] = child[3][slot]
             if design.backcross_fraction:
                 for c in range(n_contigs):
                     hap_registry[c].update(zip(child_ids, (child[0] for child in offspring[c]), strict=False))
@@ -385,6 +425,7 @@ def simulate_explicit_pedigree(
     chromosome_maps: Sequence[ChromosomeGeneticMap | None],
     budget: int = 1,
     runner: Callable[[Callable[..., Any], Sequence[Any]], Iterable[Any]] | None = None,
+    structures: Sequence[ContigStructure | None] | None = None,
 ) -> tuple[PedigreeTable, list[SimulatedContig]]:
     """Simulate an explicit pedigree table (design.read_pedigree_table rows) on every contig.
 
@@ -432,18 +473,21 @@ def simulate_explicit_pedigree(
                 [[contigs[c].haplotypes[index] for index in ancestors] for c in range(n_contigs)],
                 [[contigs[c].ancestry[index] for index in ancestors] for c in range(n_contigs)],
                 per_task,
-                [(sites_by_contig[c], recombination_rate, mutation_rate, chromosome_maps[c]) for c in range(n_contigs)],
+                _common(sites_by_contig, recombination_rate, mutation_rate, chromosome_maps, structures),
             )
             offspring: list[list[Any]] = [[None] * len(members) for _ in range(n_contigs)]
             for contig_index, first, children in pool.imap_unordered(_simulate_children, tasks):
                 offspring[contig_index][first : first + len(children)] = children
             for c in range(n_contigs):
-                for position, (haplotypes, ancestry, events) in enumerate(offspring[c]):
+                for position, child in enumerate(offspring[c]):
+                    haplotypes, ancestry, events = child[:3]
                     index = members[position]
                     contigs[c].haplotypes[index] = haplotypes
                     contigs[c].ancestry[index] = ancestry
                     for slot, parent in ((0, rows[index].parent1), (1, rows[index].parent2)):
                         contigs[c].gametes.append((index, slot, parent, events[slot]))
+                        if len(child) > 3:
+                            contigs[c].switches[(index, slot)] = child[3][slot]
     for contig in contigs:
         contig.gametes.sort(key=lambda gamete: (gamete[0], gamete[1]))
     table = PedigreeTable(

@@ -461,6 +461,9 @@ def _report_rate(prepared: PreparedRun) -> None:
     reader = None if manifest is None else result_reader(store, manifest, product="families")
     product = None if reader is None else load(store.run, reader.identity)
     rate = None if product is None else product.rate
+    # rl21: a two-source fit outside its validated depth, or on a cohort that does not look like a two-source cross
+    for warning in getattr(getattr(product, "sources", None), "warnings", ()):
+        print(f"WARNING: {warning}", flush=True)
     if rate is None:
         return
     if rate.gate_passed:
@@ -482,6 +485,67 @@ def _report_rate(prepared: PreparedRun) -> None:
     print(f"Recombination rate: {text}", flush=True)
     if rate.warning:
         print(f"WARNING: {rate.warning}", flush=True)
+
+
+def _report_map_scale(prepared: PreparedRun) -> None:
+    """Print the pedigree's painting-based fallback-rate estimate once in the run log (pedigree map scale), with its
+    route and warning, whatever rate_estimate is (with ignore nothing else reads it)."""
+    from ..core.errors import InputError
+    from ..stages.pedigree import map_scale
+    from ..stages.pedigree.records import run_parameters
+    from ..store.protocol import NumericalPolicy
+    from ..store.store import CheckpointStore
+
+    store = CheckpointStore(prepared.paths.checkpoints)
+    manifest = store.manifest("run")
+    if manifest is None:
+        return
+    parameters = run_parameters(manifest)  # with the run's tie convention, as the record's producer
+    try:
+        identity = map_scale.expected(store, manifest, parameters, NumericalPolicy(**manifest["numerical_policy"]))
+        value = map_scale.load(store, identity)
+    except InputError:
+        return
+    if value.estimate_cm_per_mb == value.estimate_cm_per_mb:  # finite
+        interval = (f", 95 % interval [{value.interval_low_cm_per_mb:.2f}, {value.interval_high_cm_per_mb:.2f}]"
+                    if value.interval_low_cm_per_mb == value.interval_low_cm_per_mb else "")
+        text = (f"painting estimate of the fallback rate {value.estimate_cm_per_mb:.3g} cM/Mb{interval} "
+                f"({value.expected_events:.0f} expected crossovers, {sum(s == 'used' for s in value.family_status)} "
+                f"families; {'adopted' if value.adopted else 'usable' if value.usable else 'not usable'}: "
+                f"{value.gate_reason}); pedigree route {value.route} ({value.route_reason})")
+    else:
+        text = f"painting estimate of the fallback rate not determined ({value.gate_reason}); pedigree route {value.route}"
+    print(text, flush=True)
+    if value.warning:
+        print(f"WARNING: {value.warning}", flush=True)
+
+
+def _pedigree_identity(receipt: Any) -> str | None:
+    """The published pedigree product's identity in a task reply (decision.product_receipt), else None."""
+    from collections.abc import Mapping
+
+    from ..stages.pedigree.records import PRODUCT
+
+    if not isinstance(receipt, Mapping):
+        return None
+    return next((value for key, value in receipt.items() if getattr(key, "key", None) == PRODUCT), None)
+
+
+def _report_material(prepared: PreparedRun, receipt: Any) -> None:
+    """Print the pedigree's material decision once in the run log (MaterialChoice.statement): the regime under the
+    working map alone and under the estimated map, the regime applied, and what the product withholds (and adds)
+    relative to the working map alone. ``receipt``: a reply carrying the published product's key and identity."""
+    from ..stages.pedigree.records import PRODUCT
+    from ..store.protocol import read_items
+    from ..store.store import CheckpointStore
+
+    identity = _pedigree_identity(receipt)
+    if not identity:
+        return
+    record = read_items(CheckpointStore(prepared.paths.checkpoints).run, PRODUCT, identity, ("material",))
+    material = None if record is None else record.payload.get("material")
+    if material and material.get("statement"):
+        print(material["statement"], flush=True)
 
 
 def _map_output(function, items):
@@ -883,7 +947,7 @@ def execute(
             settings.input.contigs,
             output_nodes=output_nodes,
             analysis=resolved.analysis,
-            infer_rate=resolved.parameters.relatedness.infer_rate,
+            adopt_rate=resolved.parameters.relatedness.infers_rate,
         )
         painted: tuple[str, ...] = ()
         if settings.execution.max_contigs:
@@ -965,10 +1029,19 @@ def execute(
         assert cut is not None
         if defer:
             tasks, scheduling = with_kernel_tasks(tasks, scheduling, kernels)
+        pedigree_reported: list[bool] = []
+
         def on_task(task, reply, finished=recorder.task_finished):
             finished(task, reply)
             if task.key.stage == "relatedness" and task.key.round == "" and isinstance(reply.value, str):
                 _report_rate(prepared)  # once per invocation that runs or reuses the relatedness gather
+            # Once per invocation that publishes or reuses the pedigree product: the first pedigree task replying with
+            # the product's receipt (the node itself replies with an expansion before the map scale and the product
+            # exist).
+            if task.key.stage == "pedigree" and not pedigree_reported and _pedigree_identity(reply.value):
+                pedigree_reported.append(True)
+                _report_map_scale(prepared)
+                _report_material(prepared, reply.value)
 
         values = run_graph(
             tasks,
@@ -1295,7 +1368,7 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
         resolved.contigs,
         output_nodes=tuple(Node(task.key, task.depends_on) for task in outputs.values()),
         analysis=resolved.analysis,
-        infer_rate=resolved.parameters.relatedness.infer_rate,
+        adopt_rate=resolved.parameters.relatedness.infers_rate,
     )
     cut = _attach_reports(graph, workflow_cut(graph, "recombination"))
     completed = _prerequisites(prepared, resolved, cut)
@@ -1364,6 +1437,7 @@ def _start_runtime(prepared: PreparedRun, *, preload: tuple[str, ...] = ()) -> N
         prepared.cores,
         preload=roots,
         profile=prepared.settings.execution.profile,
+        progress_seconds=60.0 * prepared.settings.execution.progress_minutes,
         memory_limit=memory_limit(prepared.settings),
         memory_diagnostics=prepared.paths.logs,
         cache_directory=cache,

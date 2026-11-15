@@ -109,14 +109,160 @@ class FamilyParameters:
             ),
         },
     )
-    infer_rate: bool = field(
-        default=False,
+    rate_estimate: str = field(
+        default="veto",
         metadata={
             "provenance": (
-                "Use the estimated genome-wide recombination rate as the working fallback rate of contigs "
-                "without a map file when its gate passes, the supplied rate lies outside its 95 % interval and "
-                "at least minimum_adoption_families informative families were used (boolean); off: the "
-                "estimate is a diagnostic and nothing downstream reads it."
+                "[genetic_map] rate_estimate (owner, 14 Nov 2026): with adopt, the estimated genome-wide "
+                "recombination rate becomes the working fallback rate (contigs without a map file and stretches "
+                "beyond a file's knots) when its gate passes, the supplied rate lies outside its 95 % interval and "
+                "at least minimum_adoption_families informative families were used; with veto or ignore it is a "
+                "diagnostic and nothing downstream reads it."
+            ),
+        },
+    )
+
+    @property
+    def infers_rate(self) -> bool:
+        """Whether this estimate may become the working fallback rate (rate_estimate = adopt)."""
+        return self.rate_estimate == "adopt"
+    source_populations: int = field(
+        default=1,
+        metadata={
+            "provenance": (
+                "rl21: source populations the cohort descends from (count; the [input] source_populations "
+                "setting). 1: one cohort allele frequency, a latent parent is a Hardy-Weinberg draw (no ancestry "
+                "model runs). 2: a cross between two diverged populations or species; a latent parent's law is the "
+                "marginal over ancestry classes at source-specific frequencies. Validated in the 4.19 "
+                "study at depth 5 with pure or first-generation-hybrid parents (held-out interspecies F2 "
+                "simulations: 1,274 misplaced sample pairs with one source, 45 with two, 29 in the one-population "
+                "control); not shown to help at depth 1 (1,114 against 1,277) or for unsequenced later-generation "
+                "parents; misdeclared for one population it splits sibships. An automatic choice was tested and "
+                "rejected in the 4.19 study: a cross from few founders is itself an admixture of founder "
+                "haplotypes, and no admixture statistic separated the two cases with a margin."
+            ),
+        },
+    )
+    source_shares: tuple[float, ...] = field(
+        default=(0.0, 0.5, 1.0),
+        metadata={
+            "provenance": (
+                "rl21: the homologue types, each a share of source B constant over the genome (probability): a "
+                "pure-A homologue, one transmitted by a first-generation hybrid (each site from A or B with "
+                "probability 1/2 by Mendel) and a pure-B homologue. The classes are their unordered pairs: pure, "
+                "first-generation hybrid, backcross, and F2 or later. A finer grid represents later backcrosses "
+                "at (T (T + 1) / 2)^2 class pairs per family term for T types."
+            ),
+        },
+    )
+    source_clip: float = field(
+        default=0.01,
+        metadata={
+            "provenance": (
+                "rl21: bound of the source allele frequencies away from 0 and 1 (probability). It caps what one "
+                "site that contradicts a class can cost (ln(1 / clip) nats for one allele), the allowance for a "
+                "frequency estimated from the few haplotypes a source contributed to the cross."
+            ),
+        },
+    )
+    source_switch_rate: float = field(
+        default=4.0,
+        metadata={
+            "provenance": (
+                "rl21: rate per Morgan at which a sample's local ancestry state is redrawn from its genome-wide "
+                "shares along the working map (1/Morgan). An F2's state changes when either parental gamete "
+                "crossed over: 2 per Morgan, which a redraw rate of 4 gives in the heterozygous-ancestry state; "
+                "pure and first-generation samples have one state and never switch."
+            ),
+        },
+    )
+    source_state_error: float = field(
+        default=0.01,
+        metadata={
+            "provenance": (
+                "rl21: probability given to a child's reads at a site where its local ancestry state cannot be "
+                "produced by a pair of parental configurations (probability): the allowance for a wrong local "
+                "state. One such site costs ln(1 / error) nats."
+            ),
+        },
+    )
+    source_fit_sites: int = field(
+        default=4000,
+        metadata={
+            "provenance": (
+                "rl21: at most this many family sites (every s-th in genome order) feed the fit of the samples' "
+                "ancestry shares (sites); bounds it at O(N x 4000) per iteration."
+            ),
+        },
+    )
+    source_starts: int = field(
+        default=3,
+        metadata={"provenance": "rl21: seeded starts of the ancestry fit (count); the best log likelihood is kept."},
+    )
+    source_iterations: int = field(
+        default=300,
+        metadata={"provenance": "rl21: maximum EM iterations of one start of the ancestry fit (count)."},
+    )
+    source_tolerance: float = field(
+        default=1e-7,
+        metadata={"provenance": "rl21: relative log-likelihood gain below which a start of the ancestry fit stops (ratio)."},
+    )
+    source_seed: int = field(
+        default=4190,
+        metadata={"provenance": "rl21: seed of the ancestry fit's starts (integer); the fit uses no sample name or order."},
+    )
+    source_site_iterations: int = field(
+        default=30,
+        metadata={
+            "provenance": "rl21: EM iterations of every family site's source frequencies at the fitted sample shares (count)."
+        },
+    )
+    source_chunk: int = field(
+        default=5000,
+        metadata={"provenance": "rl21: family sites per block of the source-frequency pass (sites; memory only)."},
+    )
+    source_strong_differentiation: float = field(
+        default=0.9,
+        metadata={
+            "provenance": (
+                "rl21: source allele-frequency difference (probability) above which a family site counts as "
+                "strongly differentiated for the misdeclaration warning. Near-fixed differences are what a cross "
+                "between two diverged sources has and a one-population cohort lacks."
+            ),
+        },
+    )
+    source_minimum_strong: float = field(
+        default=0.01,
+        metadata={
+            "provenance": (
+                "rl21: share of family sites that must be strongly differentiated, or the stage warns that the "
+                "cohort does not look like a two-source cross or that its sources are not identified (share). In "
+                "the 4.19 study 16 one-population cohorts declared as two sources had 0.000-0.001; the two-source "
+                "cohorts whose ancestry was read correctly had 0.04-0.50; the one whose sources were not "
+                "identified (weak divergence at depth 1) had 0.000. 0.01 is ten times the largest of the first "
+                "group and a quarter of the smallest of the second. A warning only: no result depends on it."
+            ),
+        },
+    )
+    source_validated_depth: float = field(
+        default=3.0,
+        metadata={
+            "provenance": (
+                "rl21: estimated reads per family site and sample below which the stage warns that two sources "
+                "are declared outside the validated depth (reads; the cohort median of -ln(1 - a sample's "
+                "observed share of family sites)). In the 4.19 study the held-out interspecies F2 simulations "
+                "met the criteria at depth 5 and failed them at depth 1 (cousin sibships merged around an aunt or "
+                "uncle in a parent slot); nothing was measured between, so the bound is their midpoint. A warning "
+                "only: no result depends on it."
+            ),
+        },
+    )
+    source_differentiation: float = field(
+        default=0.5,
+        metadata={
+            "provenance": (
+                "rl21: source allele-frequency difference (probability) above which a family site is counted as "
+                "differentiated in the report. A diagnostic only: no site is removed and no law depends on it."
             ),
         },
     )
@@ -304,9 +450,11 @@ class RateParameters:
         default=5,
         metadata={
             "provenance": (
-                "Minimum contigs for the two-level bootstrap (families, then each drawn family's chromosomes), "
-                "else minimum families for a family bootstrap (count); a bootstrap over fewer units is degenerate "
-                "and the estimate falls back."
+                "Minimum equal-material units (1-Morgan units of the working map's support axis, DESIGN_417 D5) for "
+                "the two-level bootstrap (families, then each drawn family's units), else minimum families for a "
+                "family bootstrap (count); a bootstrap over fewer units is degenerate and the estimate falls back. "
+                "Units replace 4.18.1's chromosomes (owner, 13 Nov 2026: the amount of material decides, never a count "
+                "of chromosomes); five units are five working Morgans, the pedigree's assessable material."
             ),
         },
     )
@@ -332,7 +480,7 @@ class RateParameters:
         default=5,
         metadata={
             "provenance": (
-                "Minimum informative families for infer_rate to adopt the estimate (count); structural: with fewer, "
+                "Minimum informative families for rate_estimate = adopt to adopt the estimate (count); structural: with fewer, "
                 "between-family variation in the rate (sex, background) cannot be measured, whatever the interval."
             ),
         },
@@ -362,5 +510,6 @@ SCREEN_FLOOR = 1e-30  # Float32 site-product fallback threshold (probability).
 SCALE_EXPONENT = 500  # Power-of-two product-rescaling exponent (binary exponent).
 EVIDENCE_COMPARE_CHUNK = 256  # Early-exit evidence-comparison chunk width (values).
 SCREEN_SITE_TILE = 256  # Storage-only site tile width (sites).
+TERM_FLOOR = 1e-300  # Smallest class-pair site term before its logarithm (probability; rl21).
 
 __all__ = ["AlleleFrequencyParameters", "FamilyParameters", "RateParameters"]

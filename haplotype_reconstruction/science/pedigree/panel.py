@@ -1,10 +1,11 @@
 """Genome-retained parent identities define the fixed M2 panel.
 
-The panel screens retained-parent pairs by a valid M2 likelihood upper bound (``pair_bound``), then applies
-``PanelParameters.max_pairs_per_child`` by largest bound gap across the full-data and leave-one-chromosome-out fits.
-Relevance screening rejects only pairs below the best known score by more than ``pair_relevance_margin`` in every
-fit. The cap can also drop competitive pairs; boundary ties and unknown gaps remain, and capped children are flagged.
-Pairs outside the panel contribute nothing to M2 evidence, which is therefore a lower bound. The
+Every eligible pair of a child's genome-retained M1 parents enters the panel: there is no relevance screen, so for a
+child within ``PanelParameters.max_pairs_per_child`` the M2 evidence covers every retained pair in every fit (the
+full data, each bootstrap draw and each leave-one-unit-out fit). A child with more pairs keeps those with the largest
+full-data pair bound (``pair_bound``, summed over contigs; no chromosome or unit structure enters the ranking), every
+pair tied with the last kept one and every pair whose bound is not a number; it is flagged, because the cap can drop
+a competitive pair. Pairs outside the panel contribute nothing to M2 evidence, which is then a lower bound. The
 robust M1 utility keeps all eligible identities, floor multiplicities and contamination; it is reported for
 diagnostics and does not select an arbitrary tied subset.
 
@@ -75,52 +76,35 @@ def robust_screen_values(
     return output
 
 
-def relevance_fits(n_contigs: int) -> np.ndarray:
-    """float64 [F, C]: the chromosome multiplicities the panel is screened for: the full-data fit (all ones), then
-    each leave-one-chromosome-out refit (one zero), as the decision weights them (pedigree.resampling)."""
-    full = np.ones((1, n_contigs))
-    if n_contigs < 2:
-        return full
-    return np.vstack([full, np.ones((n_contigs, n_contigs)) - np.eye(n_contigs)])
-
-
-def _fit_sums(fits: np.ndarray, values: np.ndarray) -> np.ndarray:
-    """float64 [F, P]: for each fit, the weighted sum of the chromosome rows of values [C, P] with positive weight.
-    A zero-weight chromosome is left out, never multiplied (0 x inf would be NaN); a sum meeting +inf and -inf is
-    NaN, which the caller treats as no evidence for exclusion."""
-    out = np.zeros((len(fits), values.shape[1]))
+def _genome_sums(values: np.ndarray) -> np.ndarray:
+    """float64 [P]: the full-data sums of the chromosome rows of values [C, P] (rows are the per-contig storage of the
+    pair bounds), added in configured contig order. A sum meeting +inf and -inf is NaN."""
+    out = np.zeros(values.shape[1])
     with np.errstate(invalid="ignore"):
-        for fit, weights in enumerate(fits):
-            for contig in np.flatnonzero(weights > 0):
-                out[fit] += weights[contig] * values[contig]
+        for row in values:
+            out += row
     return out
 
 
 def bounded_panel(
     compact,
-    zero: np.ndarray,
     bounds: np.ndarray | BoundsSource,
     screen_scores: np.ndarray,
     eligibility: ParentEligibility,
     config: PedigreeParameters,
 ) -> tuple[CandidatePanel, dict]:
-    """Relevance-screened, capped retained-parent pairs, and counts for the log.
+    """The capped retained-parent pairs, and counts for the log.
 
-    ``compact`` the certified M1 profile (raw chromosome M1 of each child's retained parents), ``zero`` float64 [C, N]
-    the chromosome M0 scores of the same screen, ``bounds`` [C, P] each chromosome's pair bounds in the canonical
-    retained-pair order (``pair_bound.retained_batches``). A pair enters when, for some fit w of ``relevance_fits``,
-    w . bound >= max(w . M0, max_r w . M1_r) - margin, r over the child's retained parents. Rejection at this step
-    proves the pair's M2 is below the best known configuration by more than the margin in every fit (the bound is
-    >= M2 on every chromosome and w >= 0). Chromosomes a fit leaves out are omitted from its sums. A pair with a
-    nonnumeric bound sum is kept (a numerical failure is never evidence for exclusion). After relevance screening,
-    the nominal per-child cap keeps the largest bound gaps over the fits, including all boundary ties and unknown
-    gaps. A capped child's panel is incomplete: this second step has no competitive-pair exclusion guarantee.
-    Membership depends only on scores and eligibility; rows are serialized by child, then by ascending parent indices.
+    ``compact`` the certified M1 profile (the retained parents of each child), ``bounds`` [C, P] each chromosome's
+    pair bounds in the canonical retained-pair order (``pair_bound.retained_batches``). Every eligible pair of a
+    child's retained parents enters. When a child has more than the nominal per-child cap, it keeps the pairs with
+    the largest full-data bound sum_c bound (an upper bound on the pair's full-data M2), including every pair tied with
+    the last kept one and every pair whose sum is not a number (a numerical failure is never evidence for exclusion).
+    A capped child's panel is incomplete: the cap has no competitive-pair exclusion guarantee. Membership depends
+    only on scores and eligibility; rows are serialized by child, then by ascending parent indices.
     """
-    margin = float(config.panel.pair_relevance_margin)
     cap = int(config.panel.max_pairs_per_child)
     capped = []
-    fits = relevance_fits(compact.n_contigs)
     counts = np.diff(compact.indptr)
     offsets = np.concatenate([[0], np.cumsum(counts * (counts - 1) // 2)])
     if bounds.shape != (compact.n_contigs, int(offsets[-1])):
@@ -131,22 +115,18 @@ def bounded_panel(
         if stop - start < 2:
             continue
         parents = compact.parents[start:stop]
-        known = np.maximum(
-            _fit_sums(fits, zero[:, child][:, None])[:, 0], np.max(_fit_sums(fits, compact.raw[:, start:stop]), axis=1)
-        )
-        # cast: NumPy 2.5's stubs type signedinteger[32 | 64] + 1 as float64; it is an intp.
-        bound = np.asarray(bounds[:, offsets[child] : offsets[cast(np.intp, child + 1)]], dtype=np.float64)
-        with np.errstate(invalid="ignore"):
-            gap = _fit_sums(fits, bound) - known[:, None]
-        admitted = np.any(gap >= -margin, axis=0) | np.any(np.isnan(gap), axis=0)
         first, second = np.triu_indices(stop - start, 1)
-        first, second = parents[first[admitted]], parents[second[admitted]]
-        allowed = eligibility.pair_mask(int(child), first, second)
-        trio = np.column_stack([np.full(int(np.sum(allowed)), child, dtype=np.int64), first[allowed], second[allowed]])
+        allowed = eligibility.pair_mask(int(child), parents[first], parents[second])
+        trio = np.column_stack(
+            [np.full(int(np.sum(allowed)), child, dtype=np.int64), parents[first[allowed]], parents[second[allowed]]]
+        )
         if len(trio) > cap:
-            # The best pairs by their largest gap over the fits (a gap that is not a number ranks first: it is
-            # never evidence for exclusion), with every pair tied at the last kept gap.
-            best = np.where(np.isnan(gap), np.inf, gap).max(axis=0)[admitted][allowed]
+            # cast: NumPy 2.5's stubs type signedinteger[32 | 64] + 1 as float64; it is an intp.
+            bound = np.asarray(bounds[:, offsets[child] : offsets[cast(np.intp, child + 1)]], dtype=np.float64)
+            # The best pairs by their full-data bound (a bound that is not a number ranks first), with every pair tied
+            # at the last kept bound.
+            total = _genome_sums(bound)
+            best = np.where(np.isnan(total), np.inf, total)[allowed]
             trio = trio[best >= np.sort(best)[len(best) - cap]]
             capped.append(int(child))
         rows.append(trio[np.lexsort((trio[:, 2], trio[:, 1]))])
@@ -154,8 +134,6 @@ def bounded_panel(
     log = dict(
         retained_pairs=int(offsets[-1]),
         panel_rows=int(len(trios)),
-        margin=margin,
-        fits=int(len(fits)),
         capped_children=len(capped),
     )
     return CandidatePanel(np.ascontiguousarray(trios, dtype=np.int64), screen_scores, tuple(capped)), log

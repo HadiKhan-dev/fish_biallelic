@@ -38,6 +38,7 @@ import numpy as np
 from ...contracts.relatedness import RecombinationRateEstimate
 from ...core.concurrency import ThreadSource, thread_count
 from ...core.kernels import kernel
+from .class_kernels import class_family_table
 from .parameters import RateParameters
 
 __all__ = ["RateFit", "estimate_rate", "decide", "rate_grid"]
@@ -51,21 +52,24 @@ _f1C = numba.types.Array(numba.float64, 1, "C", readonly=False)
 _f2C = numba.types.Array(numba.float64, 2, "C", readonly=False)
 _f3C = numba.types.Array(numba.float64, 3, "C", readonly=False)
 _f4C = numba.types.Array(numba.float64, 4, "C", readonly=False)
+_i1C = numba.types.Array(numba.int64, 1, "C", readonly=False)
 _i2C = numba.types.Array(numba.int64, 2, "C", readonly=False)
+_f5C = numba.types.Array(numba.float64, 5, "C", readonly=False)
 
 
 @kernel(
     overloads=(
         (
-            _f2C, _f2C, _f2C, _f2C, _f2C, _f2C, _b1C, _b1C, _f1C, numba.float64, numba.float64, numba.boolean, _f2C,
-            _f1C,
+            _f2C, _f2C, _f2C, _f2C, _f2C, _f2C, _b1C, _b1C, _f1C, _i1C, numba.float64, numba.float64, numba.boolean,
+            _f2C, _f1C, _i1C,
         ),
     ),
     cache=True,
     nogil=True,
 )
-def _site_emissions(base, base_kids, Ci, Cj, gi, gj, oi, oj, pos, tau, tau_kids, xor, em, x):
-    """Fill em[:n] and x[:n] for the pair's jointly observed selected sites; return (n, summed log row maxima).
+def _site_emissions(base, base_kids, Ci, Cj, gi, gj, oi, oj, pos, unit, tau, tau_kids, xor, em, x, u):
+    """Fill em[:n], x[:n] and u[:n] (each selected site's material unit, from ``unit``) for the pair's jointly
+    observed selected sites; return (n, summed log row maxima).
 
     Selection, from the leave-pair-out parental law w: xor, the (1, 1) posterior >= tau; else the most likely pair has
     posterior >= tau and a heterozygous parent and, with tau_kids > 0, the other members alone (both slots latent:
@@ -152,6 +156,7 @@ def _site_emissions(base, base_kids, Ci, Cj, gi, gj, oi, oj, pos, tau, tau_kids,
             for s in range(4):
                 em[n, s] = e[s] / m
         x[n] = pos[site]
+        u[n] = unit[site]
         logm += np.log(m)
         n += 1
     return n, logm
@@ -159,15 +164,18 @@ def _site_emissions(base, base_kids, Ci, Cj, gi, gj, oi, oj, pos, tau, tau_kids,
 
 @kernel(
     overloads=(
-        (_f2C, _f1C, numba.int64, numba.float64, numba.float64, numba.float64, numba.boolean, numba.float64),
+        (_f2C, _f1C, _i1C, numba.int64, numba.float64, numba.float64, numba.float64, numba.boolean, numba.float64,
+         _f1C),
     ),
     cache=True,
     nogil=True,
 )
-def _chain_loglik(em, x, n, c, rho, ell, xor, eps):
+def _chain_loglik(em, x, u, n, c, rho, ell, xor, eps, out):
     """Forward log-likelihood of the inheritance chain at rate c (Morgans per bp) with the artefact-stretch process
     (start rate rho per bp, mean length ell bp) and the isolated-error mixture eps. xor: em [n, 3] read as the XOR
-    chain on both-heterozygous sites (P(d | Z = 1) = e1, P(d | Z = 0) = (e0 + e2) / 2); else em [n, 4]."""
+    chain on both-heterozygous sites (P(d | Z = 1) = e1, P(d | Z = 0) = (e0 + e2) / 2); else em [n, 4]. Each site's
+    predictive term log p(d_site | d_<site) is added to out[u[site]] (its material unit): the units' values sum to the
+    chain's log-likelihood. Returns that sum."""
     if n == 0:
         return 0.0
     K = 2 if xor else 4
@@ -225,7 +233,9 @@ def _chain_loglik(em, x, n, c, rho, ell, xor, eps):
                 a[s, 0] = n0 * e[s]
                 a[s, 1] = n1 * bar
                 tot += a[s, 0] + a[s, 1]
-        ll += np.log(tot)
+        step = np.log(tot)
+        ll += step
+        out[u[site]] += step
         for s in range(K):
             a[s, 0] /= tot
             a[s, 1] /= tot
@@ -235,18 +245,19 @@ def _chain_loglik(em, x, n, c, rho, ell, xor, eps):
 @kernel(
     overloads=(
         (
-            numba.boolean, _f2C, _f2C, _f3C, _f3C, _b2C, _f1C, _i2C, _f1C, _f1C, _f1C, _f1C, numba.float64,
-            numba.float64, _f4C, _f1C, _f1C,
+            numba.boolean, _f2C, _f2C, _f3C, _f3C, _b2C, _f1C, _i1C, _i2C, _f1C, _f1C, _f1C, _f1C, numba.float64,
+            numba.float64, _f5C, _f1C,
         ),
     ),
     parallel=True,
     cache=True,
     nogil=True,
 )
-def pair_tables(xor, base, base_kids, C, g, obs, pos, pairs, rates, rhos, ells, epss, tau, tau_kids, ll, nsites, logm):
-    """ll[t, e, a, r]: pair t's chain log-likelihood at rates[r] (Morgans per bp), nuisance (rhos[a], ells[a]) and
-    error mixture epss[e]; nsites[t]: its selected sites; logm[t]: the summed log row maxima its emissions were divided
-    by. Pairs are independent; every value is computed by one thread in site order."""
+def pair_tables(xor, base, base_kids, C, g, obs, pos, unit, pairs, rates, rhos, ells, epss, tau, tau_kids, ll, nsites):
+    """ll[t, e, a, r, k]: pair t's chain log-likelihood at rates[r] (Morgans per bp), nuisance (rhos[a], ells[a]) and
+    error mixture epss[e], split by the material unit k (``unit``: each site's unit, 0-based on this contig) of each
+    site's predictive term; nsites[t]: its selected sites. The emission rows' maxima are a constant of each pair and
+    drop out of every comparison. Pairs are independent; every value is computed by one thread in site order."""
     P = pairs.shape[0]
     M = pos.shape[0]
     R = rates.shape[0]
@@ -257,13 +268,14 @@ def pair_tables(xor, base, base_kids, C, g, obs, pos, pairs, rates, rhos, ells, 
         j = pairs[t, 1]
         x = np.empty(M)
         em = np.empty((M, 4))
-        n, lm = _site_emissions(base, base_kids, C[i], C[j], g[i], g[j], obs[i], obs[j], pos, tau, tau_kids, xor, em, x)
+        u = np.empty(M, np.int64)
+        n, _lm = _site_emissions(base, base_kids, C[i], C[j], g[i], g[j], obs[i], obs[j], pos, unit, tau, tau_kids,
+                                 xor, em, x, u)
         nsites[t] = n
-        logm[t] = lm
         for z in range(E):
             for q in range(A):
                 for r in range(R):
-                    ll[t, z, q, r] = _chain_loglik(em, x, n, rates[r], rhos[q], ells[q], xor, epss[z])
+                    _chain_loglik(em, x, u, n, rates[r], rhos[q], ells[q], xor, epss[z], ll[t, z, q, r])
 
 
 def rate_grid(parameters: RateParameters = _DEFAULT_RATE) -> np.ndarray:
@@ -301,6 +313,7 @@ class _Family:
     pairs: int
     table: np.ndarray | None  # [C, E, A, R], pair-weighted; None when not tabulated
     sites: float  # median selected sites per pair over the genome
+    units: np.ndarray | None = None  # [U, E, A, R]: the same split by equal-material unit of the support axis
 
 
 @dataclass(frozen=True)
@@ -328,9 +341,16 @@ class RateFit:
         return sum(1 for value in self.status.values() if value == "used")
 
 
-def _family_tables(terms, family: np.ndarray, parents: np.ndarray, parameters, threads) -> list[_Family]:
-    """Each family's pair-weighted composite table [C, E, A, R] and median selected sites per pair. Contigs are the
-    outer loop (one copy of a contig's terms), families the inner; every value is independent of the order."""
+# Pairs per kernel call (execution grain only: bounds the [pairs, E, A, R, units] workspace).
+_PAIR_CHUNK = 256
+
+
+def _family_tables(terms, family: np.ndarray, parents: np.ndarray, parameters, threads,
+                   contig_mask: np.ndarray | None = None) -> list[_Family]:
+    """Each family's pair-weighted composite tables, per contig [C, E, A, R] and per equal-material unit of the
+    support axis [U, E, A, R] (FamilyTerms.ranges: 1-Morgan units of the working map, DESIGN_417 D5), and its median
+    selected sites per pair. Contigs outside ``contig_mask`` are not tabulated (zero rows). Contigs are the outer loop
+    (one copy of a contig's terms), families the inner; every value is independent of the order."""
     rates = rate_grid(parameters) * _PER_BP
     rhos = np.asarray([start / 1e6 for start, _ in parameters.artefacts], dtype=np.float64)
     ells = np.asarray([length * 1e3 for _, length in parameters.artefacts], dtype=np.float64)
@@ -356,13 +376,23 @@ def _family_tables(terms, family: np.ndarray, parents: np.ndarray, parameters, t
             result[f] = _Family(f, n, model, len(pairs), None, float("nan"))
             continue
         plans.append((f, np.asarray(m, dtype=np.int64), (u, v), model, pairs))
+    classed = getattr(terms, "class_prior", None) is not None
+    weights = {f: _class_weights(terms, rows, slots) for f, rows, slots, _, _ in plans} if classed else {}
     shape = (contigs, len(epss), len(rhos), len(rates))
+    unit_of = np.zeros(int(bounds[-1]), np.int64)
+    for k, (first, stop) in enumerate(terms.ranges):
+        unit_of[first:stop] = k
+    n_units = max(1, len(terms.ranges))
     tables = {f: np.zeros(shape) for f, *_ in plans}
+    unit_tables = {f: np.zeros((n_units,) + shape[1:]) for f, *_ in plans}
     sites = {f: np.zeros(len(pairs)) for f, *_, pairs in plans}
     for c in range(contigs):
         lo, hi = int(bounds[c]), int(bounds[c + 1])
-        if hi == lo or not plans:
+        if hi == lo or not plans or (contig_mask is not None and not contig_mask[c]):
             continue
+        first_unit = int(unit_of[lo:hi].min())
+        local_unit = np.ascontiguousarray(unit_of[lo:hi] - first_unit)
+        span = int(local_unit.max()) + 1
         M = hi - lo
         C = np.array(terms.child[:, lo:hi], dtype=np.float64)
         prior = np.array(terms.log_prior[lo:hi], dtype=np.float64)
@@ -370,27 +400,82 @@ def _family_tables(terms, family: np.ndarray, parents: np.ndarray, parameters, t
         obs = np.array(terms.observed[:, lo:hi], dtype=np.bool_)
         pos = np.array(terms.positions[lo:hi], dtype=np.float64)
         latent = (prior[:, :, None] + prior[:, None, :]).reshape(M, 9)
+        laws = np.exp(np.asarray(terms.class_prior[:, lo:hi], dtype=np.float64)) if classed else None
         for f, rows, (u, v), model, pairs in plans:
             thread_count(threads)  # each family's pairs on the task's current share
-            su = np.array(terms.log_posterior[u, lo:hi], dtype=np.float64) if u >= 0 else prior
-            sv = np.array(terms.log_posterior[v, lo:hi], dtype=np.float64) if v >= 0 else prior
             member_sum = C[rows].sum(0)
-            base = np.ascontiguousarray((su[:, :, None] + sv[:, None, :]).reshape(M, 9) + member_sum)
-            kids = base if model == "xor" else np.ascontiguousarray(latent + member_sum)
-            ll = np.zeros((len(pairs),) + shape[1:])
+            if classed:
+                # rl21: a latent slot's law is the classes' mean law under the family's class posterior
+                slots, both = weights[f]
+                lu = np.exp(np.asarray(terms.log_posterior[u, lo:hi], dtype=np.float64))[None] if u >= 0 else laws
+                lv = np.exp(np.asarray(terms.log_posterior[v, lo:hi], dtype=np.float64))[None] if v >= 0 else laws
+                base = np.ascontiguousarray(_mixed_law(slots, lu, lv) + member_sum)
+                kids = base if model == "xor" else np.ascontiguousarray(_mixed_law(both, laws, laws) + member_sum)
+            else:
+                su = np.array(terms.log_posterior[u, lo:hi], dtype=np.float64) if u >= 0 else prior
+                sv = np.array(terms.log_posterior[v, lo:hi], dtype=np.float64) if v >= 0 else prior
+                base = np.ascontiguousarray((su[:, :, None] + sv[:, None, :]).reshape(M, 9) + member_sum)
+                kids = base if model == "xor" else np.ascontiguousarray(latent + member_sum)
             nsites = np.zeros(len(pairs))
-            logm = np.zeros(len(pairs))
-            pair_tables(
-                model == "xor", base, kids, C, g, obs, pos, pairs, rates, rhos, ells, epss,
-                float(parameters.site_posterior),
-                0.0 if model == "xor" else float(parameters.segregation_posterior),
-                ll, nsites, logm,
-            )
-            tables[f][c] = (ll + logm[:, None, None, None]).sum(0) / (len(rows) - 1)
+            acc = np.zeros(shape[1:] + (span,))
+            for start in range(0, len(pairs), _PAIR_CHUNK):
+                chunk = np.ascontiguousarray(pairs[start:start + _PAIR_CHUNK])
+                ll = np.zeros((len(chunk),) + shape[1:] + (span,))
+                counted = np.zeros(len(chunk))
+                pair_tables(
+                    model == "xor", base, kids, C, g, obs, pos, local_unit, chunk, rates, rhos, ells, epss,
+                    float(parameters.site_posterior),
+                    0.0 if model == "xor" else float(parameters.segregation_posterior),
+                    ll, counted,
+                )
+                acc += ll.sum(0)
+                nsites[start:start + len(chunk)] = counted
+            acc /= len(rows) - 1
+            unit_tables[f][first_unit:first_unit + span] += np.moveaxis(acc, -1, 0)
+            tables[f][c] = acc.sum(-1)
             sites[f] += nsites
     for f, rows, _, model, pairs in plans:
-        result[f] = _Family(f, len(rows), model, len(pairs), tables[f], float(np.median(sites[f])))
+        result[f] = _Family(f, len(rows), model, len(pairs), tables[f], float(np.median(sites[f])), unit_tables[f])
     return [result[f] for f in sorted(result)]
+
+
+def _class_weights(terms, rows, slots) -> tuple[np.ndarray, np.ndarray]:
+    """rl21: a family's class posteriors from all its members over every family site, on the family fit's own terms
+    (child terms over parental configurations): (the weights of its slots' laws [n_u, n_v], n = 1 for a sequenced
+    slot; the weights [K, K] with both slots latent). Classes are constant over the genome, so the posterior is that
+    of the whole genome; it does not use which sites a pair shares."""
+    u, v = slots
+    member_sum = np.ascontiguousarray(np.asarray(terms.ancestry_child[rows], dtype=np.float64).sum(0))
+    laws = np.ascontiguousarray(np.exp(np.asarray(terms.ancestry_prior, dtype=np.float64)))
+    classes, M, G = laws.shape
+    posterior = np.zeros((2, M, G))
+    for k, slot in enumerate((u, v)):
+        if slot >= 0:
+            posterior[k] = terms.ancestry_posterior[slot]
+
+    held = None
+    if terms.ancestry_composition is not None:
+        held, class_type, sample_type = terms.ancestry_composition
+        held = held[0][rows].sum(axis=0)  # the members' ancestry along the map, by the parents' transmitted shares
+
+    def weights(a: int, b: int, su: int, sv: int) -> np.ndarray:
+        table = np.empty((classes if a < 0 else 1, classes if b < 0 else 1))
+        class_family_table(member_sum, member_sum, 0.0, a, b, laws, posterior, 0, M, table)
+        if held is not None:
+            tu = class_type if a < 0 else sample_type[[su]]
+            tv = class_type if b < 0 else sample_type[[sv]]
+            table += held[tu[:, None], tv[None, :]]
+        table = np.exp(table - table.max())  # the classes' prior weights are equal
+        return table / table.sum()
+
+    both = weights(-1, -1, u, v)
+    return (both if u < 0 and v < 0 else weights(0 if u >= 0 else -1, 1 if v >= 0 else -1, u, v)), both
+
+
+def _mixed_law(weights: np.ndarray, laws_u: np.ndarray, laws_v: np.ndarray) -> np.ndarray:
+    """float64 [M, 9]: log sum_{a, b} weights[a, b] laws_u[a, i, g_u] laws_v[b, i, g_v], the slots' joint law."""
+    joint = np.einsum("ab,amg,bmh->mgh", weights, laws_u, laws_v)
+    return np.log(np.maximum(joint, 1e-300)).reshape(joint.shape[0], 9)
 
 
 def _exclude_inconsistent(families: list[_Family], threshold: float):
@@ -417,14 +502,16 @@ def _exclude_inconsistent(families: list[_Family], threshold: float):
     return [keep[k] for k in sorted(keep)], dropped
 
 
-def _bootstrap(X: np.ndarray, rates: np.ndarray, parameters: RateParameters, contigs: int):
-    """Two-level percentile bootstrap of the estimate from family tables X [F, C, E, A, R] (nuisances refitted): with
-    at least minimum_interval_units contigs, families with replacement and then each drawn family's chromosomes with
-    replacement ("family_chromosome"); with fewer contigs but that many families, families only ("family")."""
+def _bootstrap(X: np.ndarray, rates: np.ndarray, parameters: RateParameters):
+    """Two-level percentile bootstrap of the estimate from family tables X [F, U, E, A, R] split by equal-material
+    unit (nuisances refitted): with at least minimum_interval_units units, families with replacement and then each
+    drawn family's units with replacement ("family_unit"); with less material but that many families, families only
+    ("family"). No count of chromosomes enters (owner, 13 Nov 2026: material, not chromosomes)."""
     F = X.shape[0]
+    units = X.shape[1]
     rng = np.random.default_rng(parameters.bootstrap_seed)
-    if contigs >= parameters.minimum_interval_units:
-        kind, by_family = "family_chromosome", X
+    if units >= parameters.minimum_interval_units:
+        kind, by_family = "family_unit", X
     elif F >= parameters.minimum_interval_units:
         kind, by_family = "family", X.sum(1, keepdims=True)
     else:
@@ -442,13 +529,15 @@ def _bootstrap(X: np.ndarray, rates: np.ndarray, parameters: RateParameters, con
 
 def estimate_rate(
     terms, family: np.ndarray, parents: np.ndarray, parameters: RateParameters = _DEFAULT_RATE, *,
-    threads: ThreadSource = 1,
+    threads: ThreadSource = 1, contig_mask: np.ndarray | None = None,
 ) -> RateFit:
     """Fit the genome-wide rate on ``terms`` (a FamilyTerms with positions, scaled likelihoods and observations)
-    from the relatedness families (``family`` per sample, ``parents`` per family) and apply the gate."""
+    from the relatedness families (``family`` per sample, ``parents`` per family) and apply the gate.
+    ``contig_mask``: the contigs the fit uses (the map-free contigs of a genome that also has map files: the estimate
+    stands in for the fallback rate only); None: every contig. Per-chromosome values of the others are NaN."""
     rates = rate_grid(parameters)
     contigs = len(terms.chromosome_sites)
-    families = _family_tables(terms, family, parents, parameters, threads)
+    families = _family_tables(terms, family, parents, parameters, threads, contig_mask)
     status = {item.family: "too_little_information" for item in families if item.table is None}
     informative = [item for item in families if item.table is not None and item.sites > 0]
     status.update(
@@ -467,8 +556,12 @@ def estimate_rate(
     X = np.stack([item.table for item in kept])  # [F, C, E, A, R]
     estimate, e, a, edge = _fit(X.sum((0, 1)), rates)
     start, length = parameters.artefacts[a]
-    per_chromosome = np.asarray([_grid_argmax(rates, X[:, c, e, a].sum(0)) for c in range(X.shape[1])])
-    interval, kind = _bootstrap(X, rates, parameters, contigs)
+    used = np.ones(X.shape[1], bool) if contig_mask is None else np.asarray(contig_mask, bool)
+    per_chromosome = np.asarray([_grid_argmax(rates, X[:, c, e, a].sum(0)) if used[c] else float("nan")
+                                 for c in range(X.shape[1])])
+    Xu = np.stack([item.units for item in kept])  # [F, U, E, A, R]
+    occupied = np.flatnonzero(np.any(Xu != 0, axis=(0, 2, 3, 4)))
+    interval, kind = _bootstrap(np.ascontiguousarray(Xu[:, occupied]), rates, parameters)
     weights = np.asarray([2 * item.members for item in kept], dtype=np.float64)
     sites = float(np.sum(weights * np.asarray([item.sites for item in kept])) / np.sum(weights))
     meioses = int(weights.sum())
@@ -479,7 +572,7 @@ def estimate_rate(
             f"weighted determined sites per pair {sites:.0f} < {parameters.minimum_determined_sites:.0f}"
         )
     elif kind == "none":
-        passed, reason = False, f"{contigs} contigs and {len(kept)} families: no interval"
+        passed, reason = False, f"{len(occupied)} material units and {len(kept)} families: no interval"
     else:
         half = (interval[1] - interval[0]) / 2 / estimate
         label = kind.replace("_", " x ")
@@ -503,15 +596,16 @@ def decide(
     *,
     supplied_rate: float,
     map_free_contigs: tuple[str, ...],
-    infer_rate: bool,
+    rate_estimate: str,
     parameters: RateParameters = _DEFAULT_RATE,
 ) -> RecombinationRateEstimate:
-    """The working-map decision. Without ``infer_rate`` the supplied rate is kept (forcing the supplied rate means
-    leaving inference off). With it, the estimate replaces the supplied fallback rate of the contigs without a map
-    file when the gate passes, the supplied rate lies outside the estimate's 95 % interval and at least
-    minimum_adoption_families informative families were used: with fewer, between-family variation in the rate cannot
-    be measured, whatever the interval. A contig's map file is never changed. The warning (empty when none) is
-    reported once in the run log and in the report."""
+    """The working-map decision. Unless ``rate_estimate`` is adopt the supplied rate is kept (veto and ignore: the
+    early estimate is a diagnostic). With adopt, the estimate replaces the supplied fallback rate (contigs without a
+    map file and the stretches beyond every file's knots) when the gate passes, the supplied rate lies outside the
+    estimate's 95 % interval and at least minimum_adoption_families informative families were used: with fewer,
+    between-family variation in the rate cannot be measured, whatever the interval. A map file's own distances never
+    change. The warning (empty when none) is reported once in the run log and in the report."""
+    infer_rate = rate_estimate == "adopt"
     low, high = fit.interval
     outside = fit.gate_passed and not (low <= supplied_rate <= high)
     enough = fit.used_families >= parameters.minimum_adoption_families
@@ -523,7 +617,7 @@ def decide(
     supplied = f"the supplied fallback rate {_rate_text(supplied_rate)} cM/Mb"
     few = (
         f"the estimate rests on {fit.used_families} informative "
-        f"famil{'y' if fit.used_families == 1 else 'ies'}; --infer-rate adopts it only with at least "
+        f"famil{'y' if fit.used_families == 1 else 'ies'}; --rate-estimate adopt adopts it only with at least "
         f"{parameters.minimum_adoption_families}"
     )
     decision, working, warning = "kept", float(supplied_rate), ""
@@ -536,15 +630,15 @@ def decide(
     elif infer_rate and enough:
         digits = parameters.working_digits
         decision, working = "adopted", float(f"{fit.estimate:.{digits}g}")
-        reason = "infer_rate: the supplied rate lies outside the interval"
+        reason = "rate_estimate = adopt: the supplied rate lies outside the interval"
     elif infer_rate:
-        reason = f"infer_rate: fewer than {parameters.minimum_adoption_families} informative families"
+        reason = f"rate_estimate = adopt: fewer than {parameters.minimum_adoption_families} informative families"
         warning = f"{summary}; {supplied} lies outside it, but {few}, so the supplied rate is kept."
     else:
-        reason = "the supplied rate lies outside the interval (infer_rate is off)"
+        reason = f"the supplied rate lies outside the interval (rate_estimate = {rate_estimate})"
         advice = (
-            "set [genetic_map] rate_cm_per_mb, or run with --infer-rate ([genetic_map] infer_rate = true) to use the "
-            "estimate" if enough else f"set [genetic_map] rate_cm_per_mb ({few})"
+            "set [genetic_map] rate_cm_per_mb, or run with --rate-estimate adopt ([genetic_map] rate_estimate = "
+            "\"adopt\") to use the estimate" if enough else f"set [genetic_map] rate_cm_per_mb ({few})"
         )
         warning = f"{summary}; {supplied} lies outside it. Contigs without a map file keep the supplied rate: {advice}."
     rows = fit.families
@@ -576,7 +670,7 @@ def decide(
         gate_passed=bool(fit.gate_passed),
         gate_reason=fit.gate_reason,
         supplied_rate_cm_per_mb=float(supplied_rate),
-        infer_rate=bool(infer_rate),
+        rate_estimate=str(rate_estimate),
         map_free_contigs=tuple(map_free_contigs),
         decision=decision,
         decision_reason=reason,

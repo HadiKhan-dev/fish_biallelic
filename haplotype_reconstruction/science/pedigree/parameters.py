@@ -33,7 +33,10 @@ __all__ = [
     "ReleaseParameters",
     "ExclusionParameters",
     "RelationshipParameters",
+    "FamilyTransmissionParameters",
     "MaterialParameters",
+    "MapScaleParameters",
+    "RATE_ESTIMATE_MODES",
     "PedigreeParameters",
     "ScoringNumerics",
     "PedigreeWorkspace",
@@ -51,6 +54,8 @@ __all__ = [
     "FAMILY_EXP_UNDERFLOW",
     "ORDER_MINIMUM_UNIT_WEIGHT",
     "ORDER_VARIANCE_OFFSET",
+    "DIRECTION_RELIABILITY_GRID",
+    "DIRECTION_COIN_SHARE_GRID",
     "JUNCTION_UNREACHABLE_STATE",
     "JUNCTION_UNREACHABLE_COUNT",
     "BOUND_WORKSPACE_BYTES",
@@ -194,34 +199,24 @@ class ScoringParameters:
 class PanelParameters:
     """Genome-wide M2 panel of bounded retained-parent pairs."""
 
-    # A pair (p, q) of genome-retained M1 parents passes relevance screening when, in the full-data fit or in
-    # some leave-one-chromosome-out fit, a valid upper bound on its joint M2 likelihood (pedigree.pair_bound: both
-    # parents' transmission chains against the child's genotypes, bin by bin, summed over the fit's chromosomes)
-    # comes within this many raw nats of the child's best known configuration there (M0 or a retained M1). A pair
-    # left out therefore has an M2 more than this far below the best configuration in every such fit.
-    # Pairs outside contribute nothing to the M2 evidence (a lower bound).
-    pair_relevance_margin: float = field(
-        default=150.0,
-        metadata={
-            "provenance": (
-                "PS07; admit a retained-parent pair when its M2 upper bound is within 150 raw nats of the best "
-                "known score in any relevance fit."
-            ),
-        },
-    )
-    # At most this many admitted pairs of a child enter the M2 panel (an owner decision), the best
-    # by their largest bound gap over the relevance fits. Pairs tied with the last kept one (an equal gap) all enter,
-    # and a pair whose gap is not a number is always kept. A child with more admitted pairs is flagged
-    # (CandidatePanel.capped_children, the search diagnostics' m2_panel_capped): its M2 evidence then covers fewer
-    # pairs, so its calls rest on an incomplete panel. The cap binds only at very low depth, where admitted pairs grow
-    # with the square of the eligible parents (about 50,000 per child at 0.05x and N = 320, against about 1.4 at
-    # 0.35x), making the M2 scoring cubic in N.
+    # Every eligible pair (p, q) of a child's genome-retained M1 parents enters the M2 panel: there is no relevance
+    # screen (DESIGN_417 S8, 14 Nov 2026). A screen's exclusion guarantee covers only the fits it screens, and both
+    # screens measured (full data alone; full data plus leave-one-chromosome-out fits) dropped pairs that bootstrap
+    # and leave-one-unit-out fits select, changing released calls at low material. At most this many pairs of a
+    # child enter (an owner decision): above it, the pairs with the largest full-data bound on their joint M2
+    # likelihood (pedigree.pair_bound: both parents' transmission chains against the child's genotypes, bin by bin,
+    # summed over the genome). Pairs tied with the last kept one (an equal bound) all enter, and a pair whose bound is
+    # not a number is always kept. A child with more pairs is flagged (CandidatePanel.capped_children, the search
+    # diagnostics' m2_panel_capped): its M2 evidence then covers fewer pairs, a lower bound, so its calls rest on an
+    # incomplete panel. The cap binds when a child retains more than 23 parents (24 give 276 pairs): at low depth and
+    # in large sib-rich cohorts. It bounds the panel at cap x N rows, so M2 scoring stays linear in N per child.
     max_pairs_per_child: int = field(
         default=256,
         metadata={
             "provenance": (
-                "PS07; nominal cap of 256 admitted M2 pairs per child; boundary ties and unknown gaps remain, "
-                "and binding is flagged."
+                "PS07; nominal cap of 256 M2 pairs per child, every retained eligible pair below it (no relevance "
+                "screen, DESIGN_417 S8, owner 14 Nov 2026), the largest full-data bounds above it; boundary ties "
+                "and unknown bounds remain, and binding is flagged."
             ),
         },
     )
@@ -349,6 +344,10 @@ class DirectionParameters:
     # it follows from the relationship model's two-state failure process (RelationshipParameters
     # failure_region_rate and failure_region_length) and the unit's working length (orientation.unit_failure,
     # DESIGN_417 D8). It protects against short failures only; the window cap below bounds long ones.
+    # The reliability of a decisive unit contrast and the share of linked pairs whose units are fair coins are not
+    # parameters either: each run estimates them from its own linked pairs (orientation.direction_model: posterior
+    # means under uniform priors; no constant of this record enters except pair_failure_probability, which bounds
+    # the structural orientation used as the orientation prior).
     window_morgans: float = field(
         default=0.0,
         metadata={
@@ -372,12 +371,17 @@ class DirectionParameters:
         },
     )
     # Pair-level painting-failure mixture bounding the orientation correction to
-    # [log(epsilon), log(2 - epsilon)]. Independent of SelectionParameters.m0_contamination_probability, which has the
-    # same default but a different role.
+    # [log(epsilon), log(2 - epsilon)]; the same probability bounds the structural orientation that serves as the
+    # orientation prior of the run's direction model (orientation.structural_prior). Independent of
+    # SelectionParameters.m0_contamination_probability, which has the same default but a different role.
     pair_failure_probability: float = field(
         default=0.02,
         metadata={
-            "provenance": "PD06/PD08/PD09/PD10; pair-level failure probability 0.02 bounds the orientation correction.",
+            "provenance": (
+                "PD06/PD08/PD09/PD10; pair-level failure probability 0.02 bounds the orientation correction, and "
+                "the orientation prior that the run's direction model reads from the direction-free solve "
+                "(within [0.01, 0.99])."
+            ),
         },
     )
     # Synchronous cavity-message passes preparing the frozen short-ancestry path factor.
@@ -732,6 +736,82 @@ class RelationshipParameters:
 
 
 @dataclass(frozen=True)
+class FamilyTransmissionParameters:
+    """PD29 family transmission test of retained Tier B parent edges (after the sibling guard's fixed point)."""
+
+    role_prior: float = field(
+        default=0.01,
+        metadata={
+            "units": "probability",
+            "provenance": (
+                "PD29; prior of each non-child role of a witness (a half child through either latent parent, a "
+                "direct observation of a latent parent, or an outsider explained by its own mosaic); refitted per "
+                "1-Morgan segment, so the prior alone charges at most ln((1 - 5 rho) / rho) = 4.55 nats per segment "
+                "for a witness that is not a full sib (the decision rests on PAR - ALT). Fixed before the held-out "
+                "runs (sibpar_tx VALIDATION_PLAN; half-child role: VALIDATION_PLAN_419b amendment 3)."
+            ),
+        },
+    )
+    minimum_witnesses: int = field(
+        default=2,
+        metadata={
+            "units": "count",
+            "provenance": (
+                "PD29; edges with fewer retained witnesses (families of fewer than three children) are untested: "
+                "with one witness the evidence is near-pairwise and a single non-sib witness dominates it (sibpar_tx "
+                "R1 withheld 2 of 38,601 correct Tier A instances there; released sibs scored +10 to +18)."
+            ),
+        },
+    )
+    maximum_witnesses: int = field(
+        default=12,
+        metadata={
+            "units": "count",
+            "provenance": (
+                "PD29; witness cap bounding the per-edge cost (fits are linear to quadratic in the witness count); "
+                "witnesses are taken by relatedness member support, then observed-site counts in configured contig "
+                "order (the PD24 convention), names last."
+            ),
+        },
+    )
+    maximum_iterations: int = field(
+        default=30,
+        metadata={"units": "count", "provenance": "PD29; MAP-EM iteration bound per fit (each step is monotone)."},
+    )
+    start_rounds: int = field(
+        default=3,
+        metadata={
+            "units": "count",
+            "provenance": "PD29; rounds of cross-initialisation between the three models (stops when none improves).",
+        },
+    )
+    random_starts: int = field(
+        default=3,
+        metadata={
+            "units": "count",
+            "provenance": (
+                "PD29; data-seeded block perturbations of each model's best paths per round (the review's restarts "
+                "raised segment likelihoods by up to 32 nats without them)."
+            ),
+        },
+    )
+
+    def __post_init__(self) -> None:
+        import math
+
+        if not math.isfinite(self.role_prior) or not 0 < self.role_prior < 1 / 5:
+            raise SettingsError("pedigree family_transmission role_prior must lie in (0, 1/5)")
+        for name in ("minimum_witnesses", "maximum_witnesses", "maximum_iterations", "start_rounds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise SettingsError(f"pedigree family_transmission {name} must be a positive integer")
+        if isinstance(self.random_starts, bool) or not isinstance(self.random_starts, int) or self.random_starts < 0:
+            raise SettingsError("pedigree family_transmission random_starts must be a nonnegative integer")
+        if self.maximum_witnesses < self.minimum_witnesses:
+            raise SettingsError("pedigree family_transmission maximum_witnesses must be at least minimum_witnesses")
+
+
+@dataclass(frozen=True)
 class MaterialParameters:
     """The genome's material: equal-material units of the working map and the regime cut-offs (4.18, DESIGN_417).
 
@@ -843,6 +923,203 @@ class MaterialParameters:
             raise SettingsError("pedigree material cuts must increase: assessable <= standard <= Tier A")
 
 
+# [genetic_map] rate_estimate: what the estimated recombination rates may change (DESIGN_RELEASE section 1).
+RATE_ESTIMATE_MODES = ("veto", "ignore", "adopt")
+
+
+@dataclass(frozen=True)
+class MapScaleParameters:
+    """The painting-based genome-wide recombination rate and its use by the material rule (4.19, DESIGN_MAPSCALE
+    rev 5, DESIGN_RELEASE).
+
+    One rate in cM/Mb (Morgans per bp = rate 1e-8) for the fallback stretches of the working map (contigs without a
+    map file, stretches beyond a file's knots), estimated after painting from per-sib transmission frames of the
+    relatedness families (error-run chain on the painting's own emissions). It never changes the working map of any
+    stage; it decides only which material regime the pedigree applies (``mode``). Grids and guard constants are the
+    rev-5 frozen estimator's (md5 404a44b6); the gate replaces rev 5's contig rule by information and material
+    criteria (owner, 13 Nov: no count of chromosomes decides).
+    """
+
+    mode: str = field(
+        default="veto",
+        metadata={
+            "provenance": (
+                "Owner, 14 Nov 2026 ([genetic_map] rate_estimate): veto (default) releases only what both the working "
+                "map's and the estimated map's regimes release; ignore reports the estimate only; adopt uses the "
+                "estimated map's regime alone when its interval excludes the working rate (test-agree, review3 "
+                "MUST-FIX 2), else both."
+            ),
+        },
+    )
+    guard_nats: float = field(
+        default=10.0,
+        metadata={
+            "units": "nats",
+            "provenance": (
+                "DESIGN_MAPSCALE rev 4 G4: both relationship tests (pair, target) need a log-likelihood ratio above "
+                "10 nats (p about 1e-5 on the chi-square(1) scale) to keep a pair or remove a target."
+            ),
+        },
+    )
+    target_share: float = field(
+        default=0.2,
+        metadata={
+            "units": "fraction",
+            "provenance": (
+                "Rev 4 G4 (ii): a target is removed only when at least 20 % of its frames are posterior non-full-sib; "
+                "the share criterion prevents selection on crossover counts (review R4 note 1)."
+            ),
+        },
+    )
+    target_iterations: int = field(
+        default=12,
+        metadata={"provenance": "Rev 4: at most 12 target-test rounds (one removal per family and round)."},
+    )
+    rate_grid: tuple[float, float, int] = field(
+        default=(0.1, 50.0, 141),
+        metadata={
+            "units": "cM/Mb",
+            "provenance": (
+                "Rev 2-5: log-spaced rate grid (low, high, points) of the misfit-weight fit; the error-run chain "
+                "uses every second point (71, log step 0.089). An estimate at either end is at the grid edge."
+            ),
+        },
+    )
+    coarse_rate_grid_spec: tuple[float, float, int] = field(
+        default=(0.2, 50.0, 29),
+        metadata={
+            "units": "cM/Mb",
+            "provenance": "Rev 4: the coarse log grid (low, high, points) of the relationship tests' nuisance rate.",
+        },
+    )
+    misfit_weights: tuple[float, ...] = field(
+        default=(0.0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 0.03, 0.1, 0.3),
+        metadata={
+            "units": "probability",
+            "provenance": (
+                "Rev 3: weight delta of the misfit column (mean over all state pairs: panel or painting misfit) "
+                "mixed into each frame emission; profiled by maximum likelihood."
+            ),
+        },
+    )
+    pair_error_rates: tuple[float, ...] = field(
+        default=(0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2),
+        metadata={"units": "probability", "provenance": "Rev 2: observation error grid of the pair-test chains."},
+    )
+    target_entry_rates: tuple[float, ...] = field(
+        default=(0.0, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 0.1),
+        metadata={
+            "units": "probability per frame",
+            "provenance": "Rev 4 G4 (ii): entry grid of a track leaving its parents' classes (0 = the full-sib chain).",
+        },
+    )
+    target_exit_rates: tuple[float, ...] = field(
+        default=(3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 0.1, 0.3),
+        metadata={"units": "probability per frame", "provenance": "Rev 4 G4 (ii): exit grid of such an excursion."},
+    )
+    error_run_starts: tuple[float, ...] = field(
+        default=(0.0, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2),
+        metadata={
+            "units": "probability per frame",
+            "provenance": (
+                "Rev 4 er: start probability eps of an error run (the shown state leaves the true transmission "
+                "state); eps = 0 is the 4-state chain; profiled by maximum likelihood."
+            ),
+        },
+    )
+    error_run_ends: tuple[float, ...] = field(
+        default=(0.02, 0.1, 0.4),
+        metadata={"units": "probability per frame", "provenance": "Rev 4 er: end probability xi of an error run."},
+    )
+    consistency_alpha: float = field(
+        default=0.01,
+        metadata={
+            "units": "probability",
+            "provenance": (
+                "Rev 5 R5.2: family-wise level of the family-consistency test (Bonferroni over the active families, "
+                "t(df) reference of the quasi-likelihood z); null calibration 1 of 65 genomes (upper bound 7 %)."
+            ),
+        },
+    )
+    drop_margin: float = field(
+        default=1.25,
+        metadata={
+            "provenance": (
+                "Rev 4/5: with three or more families the most deviant family is dropped when |z| exceeds 1.25 "
+                "z_crit (an identifiable outlier, e.g. a guard failure), and the test repeats."
+            ),
+        },
+    )
+    bootstrap_replicates: int = field(
+        default=2000,
+        metadata={"provenance": "Rev 5 B_J: percentile-bootstrap replicates of the joint interval (count)."},
+    )
+    minimum_interval_units: int = field(
+        default=5,
+        metadata={
+            "provenance": (
+                "The joint interval needs at least five equal-material units (working Morgans of frame axis) and two "
+                "families: a percentile bootstrap over fewer units is degenerate. The same minimum as the relatedness "
+                "estimate's (RateParameters.minimum_interval_units) and the pedigree's assessable material; it "
+                "replaces rev 5's >= 5 contigs (owner, 13 Nov 2026). On the 195 lab genomes no adopted or usable "
+                "estimate had fewer than 5 units (matrix f3: 3 units, refused by R2 and the usable floor)."
+            ),
+        },
+    )
+    bootstrap_seed: int = field(
+        default=20261114,
+        metadata={"provenance": "Fixed seed of the joint bootstrap (integer, rev 5's); the interval is reproducible."},
+    )
+    minimum_events: float = field(
+        default=60.0,
+        metadata={
+            "units": "expected crossovers",
+            "provenance": (
+                "Rev 4/5 R2: adoption needs 60 expected crossovers on the kept families (2 x frame span x rate): "
+                "about a 25 % half-width (R3) at Poisson precision; the information criterion that replaces rev 5's "
+                ">= 5 contigs together with the material-unit interval (DESIGN_RELEASE section 4)."
+            ),
+        },
+    )
+    maximum_half_width: float = field(
+        default=0.25,
+        metadata={
+            "units": "fraction",
+            "provenance": "Rev 4/5 R3: adoption needs a joint 95 % interval half-width of at most 25 % of the estimate.",
+        },
+    )
+    usable_minimum_events: float = field(
+        default=20.0,
+        metadata={
+            "units": "expected crossovers",
+            "provenance": (
+                "Review3 SHOULD-FIX 4: a non-adopted estimate may still take part in the veto only with 20 expected "
+                "crossovers and an interval whose lower end lies above the grid floor; every dev and held-out "
+                "fallback had >= 46, the two V5 scaffold cells that decided on 19 and 4 events (interval lower end on "
+                "the floor) are refused."
+            ),
+        },
+    )
+
+    def __post_init__(self) -> None:
+        if self.mode not in RATE_ESTIMATE_MODES:
+            raise SettingsError(f"rate_estimate must be one of {', '.join(RATE_ESTIMATE_MODES)}")
+
+    def rate_grid_values(self) -> np.ndarray:
+        """The fine log grid (cM/Mb)."""
+        low, high, points = self.rate_grid
+        return np.exp(np.linspace(np.log(low), np.log(high), int(points)))
+
+    def error_run_grid(self) -> np.ndarray:
+        """The error-run chain's rate grid: every second fine point (cM/Mb), contiguous."""
+        return np.ascontiguousarray(self.rate_grid_values()[::2])
+
+    def coarse_rate_grid(self) -> np.ndarray:
+        """The relationship tests' coarse log grid (cM/Mb)."""
+        low, high, points = self.coarse_rate_grid_spec
+        return np.exp(np.linspace(np.log(low), np.log(high), int(points)))
+
+
 @dataclass(frozen=True)
 class PedigreeParameters:
     """Internal pedigree model and execution parameters."""
@@ -920,9 +1197,22 @@ class PedigreeParameters:
         default_factory=RelationshipParameters,
         metadata={"provenance": "PD27; painting relationship evidence parameters, with units declared by each field."},
     )
+    family_transmission: FamilyTransmissionParameters = field(
+        default_factory=FamilyTransmissionParameters,
+        metadata={"provenance": "PD29; family transmission test parameters, with units declared by each field."},
+    )
     material: MaterialParameters = field(
         default_factory=MaterialParameters,
         metadata={"provenance": "DESIGN_417; material units and regime cut-offs, with units declared by each field."},
+    )
+    map_scale: MapScaleParameters = field(
+        default_factory=MapScaleParameters,
+        metadata={
+            "provenance": (
+                "4.19 (DESIGN_RELEASE); the painting-based rate estimate and the mode of its use by the material "
+                "regime, with units declared by each field."
+            ),
+        },
     )
 
 @dataclass(frozen=True)
@@ -1010,6 +1300,26 @@ class ScoringNumerics:
         metadata={
             "provenance": (
                 "PD07; additive variance offset 1 in squared junction-count units for graph-ordering support."
+            ),
+        },
+    )
+    direction_reliability_grid: int = field(
+        default=40,
+        metadata={
+            "provenance": (
+                "PD06; number of midpoints of (0, 1) on which the posterior of the run's direction reliability is "
+                "summed (spacing 0.025; the posterior mean moves by less than 0.005 against 80 midpoints on the "
+                "calibration layouts). Numerical resolution, not a model constant."
+            ),
+        },
+    )
+    direction_coin_share_grid: int = field(
+        default=100,
+        metadata={
+            "provenance": (
+                "PD06; number of midpoints of (0, 1) on which the posterior of the run's coin share is summed "
+                "(spacing 0.01, so the smallest representable share is 0.005). Numerical resolution, not a model "
+                "constant."
             ),
         },
     )
@@ -1246,6 +1556,8 @@ TINY = SCORING_NUMERICS.tiny
 FAMILY_EXP_UNDERFLOW = SCORING_NUMERICS.family_exp_underflow
 ORDER_MINIMUM_UNIT_WEIGHT = SCORING_NUMERICS.order_minimum_unit_weight
 ORDER_VARIANCE_OFFSET = SCORING_NUMERICS.order_variance_offset
+DIRECTION_RELIABILITY_GRID = SCORING_NUMERICS.direction_reliability_grid
+DIRECTION_COIN_SHARE_GRID = SCORING_NUMERICS.direction_coin_share_grid
 JUNCTION_UNREACHABLE_STATE = SCORING_NUMERICS.junction_unreachable_state
 JUNCTION_UNREACHABLE_COUNT = SCORING_NUMERICS.junction_unreachable_count
 BOUND_WORKSPACE_BYTES = PEDIGREE_WORKSPACE.bound_workspace_bytes

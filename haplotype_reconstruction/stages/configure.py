@@ -126,7 +126,7 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
     from ..science.discovery.parameters import DiscoveryParameters
     from ..science.evidence.parameters import EvidenceParameters
     from ..science.painting.parameters import PaintingParameters
-    from ..science.pedigree.parameters import PedigreeParameters
+    from ..science.pedigree.parameters import MapScaleParameters, PedigreeParameters
     from ..science.phase.parameters import PhaseParameters
     from ..science.recombination.parameters import RecombinationParameters
     from ..science.refit.parameters import RefitParameters
@@ -155,8 +155,10 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
         SelectionParameters(),
         AssemblyParameters(),
         PaintingParameters(),
-        FamilyParameters(infer_rate=settings.genetic_map.infer_rate),
-        PedigreeParameters(),
+        FamilyParameters(
+            rate_estimate=settings.genetic_map.rate_estimate, source_populations=settings.input.source_populations
+        ),
+        PedigreeParameters(map_scale=MapScaleParameters(mode=settings.genetic_map.rate_estimate)),
         RefitParameters(),
         PhaseParameters(protected_intervals=tuple(protected)),
         RecombinationParameters(order_breakpoints=tuple(ordered)),
@@ -182,6 +184,8 @@ def simulation(settings: SettingsView, *, realised_seed: int | None = None) -> S
         SiteSpec,
         SourceSpec,
         StockSpec,
+        StructuralVariant,
+        StructureModel,
     )
 
     section = settings.simulation
@@ -234,6 +238,7 @@ def simulation(settings: SettingsView, *, realised_seed: int | None = None) -> S
                     "stretch_miss",
                     "miss",
                     "miss_sample_cv",
+                    "hom_alt_miss_factor",
                     "call_min_alt_fraction",
                     "block_band",
                     "balance_dispersion",
@@ -243,6 +248,29 @@ def simulation(settings: SettingsView, *, realised_seed: int | None = None) -> S
                 )
             },
             regions=tuple(ArtefactRegion(*r) for r in section.artefacts.regions),
+        ),
+        structure=StructureModel(
+            **{
+                f: getattr(section.structure, f)
+                for f in (
+                    "enabled",
+                    "inversion_rate",
+                    "inversion_span_lo",
+                    "inversion_span_hi",
+                    "small_inversion_rate_per_mb",
+                    "small_inversion_mean_bp",
+                    "deletion_rate_per_mb",
+                    "deletion_mean_bp",
+                    "duplication_rate_per_mb",
+                    "duplication_mean_bp",
+                    "dispersed_fraction",
+                    "paralog_divergence",
+                    "misorder_rate_per_mb",
+                    "misorder_mean_bp",
+                    "carrier_frequency",
+                )
+            },
+            variants=tuple(StructuralVariant(*v) for v in section.structure.variants),
         ),
         contigs=tuple(settings.input.contigs),
         seed=seed,
@@ -273,6 +301,19 @@ def simulation(settings: SettingsView, *, realised_seed: int | None = None) -> S
             site_loss_fine_window_bp=reads.site_loss_fine_window_bp,
             region_depth_cv=reads.region_depth_cv,
             region_depth_window_bp=reads.region_depth_window_bp,
+            long_read_mean_bp=reads.long_read_mean_bp,
+            long_read_length_sigma=reads.long_read_length_sigma,
+            read_quality_mean=reads.read_quality_mean,
+            read_quality_sd=reads.read_quality_sd,
+            substitution_share=reads.substitution_share,
+            context_sites=reads.context_sites,
+            context_factor=reads.context_factor,
+            context_convert=reads.context_convert,
+            reference_bias=reads.reference_bias,
+            reference_bias_window_bp=reads.reference_bias_window_bp,
+            reference_bias_power=reads.reference_bias_power,
+            reference_pull=reads.reference_pull,
+            foreign_read_share=reads.foreign_read_share,
         ),
     )
 
@@ -351,6 +392,7 @@ def resolve(
         sample_ids=samples,
         realised_seeds=seeds,
         map_identities=dict(map_ids),
+        map_documents={c: maps.identity(c) for c in order},
         simulation=jsonable(sim),
     )
     outputs = OutputSelection(bool(settings.export.enabled))

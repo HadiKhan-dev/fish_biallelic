@@ -29,12 +29,14 @@ from ...contracts.pedigree import (
     RelationshipRequest,
     ReleasedDecision,
     SearchDiagnosticView,
+    TransmissionEvidence,
+    TransmissionRequest,
 )
 from ...core.concurrency import threaded_each
 from ...core.errors import InputError, InvariantError
 from ...engine.cpu import TASK_THREADS
 from ...engine.workers import ResidentRef, release_resident, release_shared_value, resident_value, retain
-from ...science.pedigree import not_assessable, regimes, panel, resampling, stacking
+from ...science.pedigree import material_veto, not_assessable, regimes, panel, resampling, stacking
 from ...science.pedigree import run as science
 from ...science.pedigree.parameters import ExclusionParameters, PedigreeParameters
 from ...science.pedigree.resampling import FitResult
@@ -53,7 +55,7 @@ from ..framework import (
     publish_product,
 )
 from ..relatedness import families_records
-from . import exclusion, execution, prepare, relationship, relatives, scores
+from . import exclusion, execution, family_transmission, prepare, relationship, relatives, scores
 from .codec import PedigreeAdapter
 from .records import (
     FLOORED_SCORES,
@@ -132,6 +134,8 @@ class DecisionStageInputs:
     evidence: Mapping[str, ContigEvidence | StoredEvidence]
     identities: PedigreeDependencies
     omitted: dict[str, str]
+    material: Any = None  # MaterialChoice of regimes.material_choice (reported in the product)
+    map_scale: Any = None  # MapScaleEstimate (reported in the product)
 
 
 def _dependencies(
@@ -224,21 +228,28 @@ def _classification(inputs: DecisionStageInputs, parameters: PedigreeParameters)
     """The branch from the genome's material U (the stacking read it from the same prepared layouts as the
     barrier and the bound-input reader, regimes.axis)."""
     genome = inputs.genome
-    return regimes.classify(genome.material_morgans, len(genome.contigs), parameters)
+    return regimes.classify(genome.regime_basis_morgans, len(genome.contigs), parameters)
 
 
 def finish_not_assessable(
     sample_ids: tuple[str, ...], contigs: tuple[str, ...], summary: tuple[ChromosomeSummaryView, ...],
     classification: regimes.Regime, parameters: PedigreeParameters, identities: PedigreeDependencies,
     *, file: CheckpointFile | None = None, numerical_policy: NumericalPolicy | None = None, receipt: bool = False,
+    material: Any = None, map_scale: Any = None,
 ) -> Pedigree | dict[RecordKey, str]:
     identity = expected(parameters, sample_ids, contigs,
                         tuple(s.contig for s in summary if s.omitted_reason is None), identities,
                         numerical_policy=numerical_policy)
     adapter = PedigreeAdapter()
+    if material is not None:
+        # The not-assessable product releases nothing: identical to the working map alone when that is not
+        # assessable either; otherwise the working map's releases are not computed (no scoring runs).
+        material = material_veto.report(material, material_veto.Comparison(0, 0, 0, 0, 0, 0)
+                                        if material.working_regime == "not_assessable" else material_veto.NOT_COMPUTED)
     cached = load_product(file, PRODUCT, identity, adapter) if file is not None else None
-    product = cached if cached is not None else adapter.decode(adapter.encode(
-        not_assessable.product(sample_ids, contigs, summary, classification.reach, parameters)))
+    product = cached if cached is not None else adapter.decode(adapter.encode(replace(
+        not_assessable.product(sample_ids, contigs, summary, classification.reach, parameters),
+        material=material, map_scale=map_scale)))
     if file is not None and cached is None:
         publish_product(file, PRODUCT, identity, product, adapter)
     return _reply(identity, product, receipt)
@@ -253,12 +264,18 @@ def run(
     contig_files: Mapping[str, CheckpointFile] | None = None,
     numerical_policy: NumericalPolicy | None = None,
     receipt: bool = False,
-) -> Pedigree | dict[RecordKey, str] | Expansion:
+    veto_only: bool = False,
+    veto: material_veto.VetoSet | None = None,
+) -> Pedigree | dict[RecordKey, str] | Expansion | material_veto.VetoSet:
     """Resume or fit once, then expose independent per-contig exclusion work.
 
     With ``receipt`` (the stored route) the final reply is the published record's
-    key and identity rather than the product; it requires the run ``file``.
+    key and identity rather than the product; it requires the run ``file``. ``veto_only``: the chain of the both-maps
+    veto regime, which stops at its released calls (material_veto.VetoSet) and publishes nothing; ``veto``: those
+    calls, which the applied regime's release must also contain.
     """
+    if veto_only and (file is not None or receipt):
+        raise InvariantError("the veto regime's chain publishes nothing")
     precheck(len(inputs.genome.sample_ids), basis="configured")
     if tuple(p.contig for p in inputs.prepared) != inputs.contigs:
         raise InputError("prepared inputs do not follow configured contig order")
@@ -269,11 +286,14 @@ def run(
         if found is not None:
             return _reply(found[0], found[1], receipt)
     classification = _classification(inputs, parameters)
+    if veto_only and classification.name == "not_assessable":
+        raise InvariantError("a veto regime is assessable by construction")
     if classification is not None and classification.name == "not_assessable":
         return finish_not_assessable(inputs.genome.sample_ids, inputs.contigs,
             tuple(_summary(p) for p in inputs.prepared), classification, parameters,
             replace(inputs.identities, panel="", relatedness_families="", floored_scores=(), regime=classification.name),
-            file=file, numerical_policy=numerical_policy, receipt=receipt)
+            file=file, numerical_policy=numerical_policy, receipt=receipt, material=inputs.material,
+            map_scale=inputs.map_scale)
     if classification.name != inputs.genome.regime:
         raise InputError("unit scores' regime differs from their material")
     inputs = replace(inputs, identities=replace(inputs.identities, regime=classification.name))
@@ -281,7 +301,8 @@ def run(
     if isinstance(state, Pedigree):
         raise InputError("score block axis differs from its prepared layout")
     options: dict[str, Any] = dict(
-        file=file, contig_files=contig_files, numerical_policy=numerical_policy, receipt=receipt
+        file=file, contig_files=contig_files, numerical_policy=numerical_policy, receipt=receipt,
+        veto_only=veto_only, veto=veto,
     )
     planned = resampling.plan(state.inputs, parameters, workers)
     if planned.worker_count == 1:
@@ -312,6 +333,8 @@ def _resampled_retained(
     contig_files: Mapping[str, CheckpointFile] | None = None,
     numerical_policy: NumericalPolicy | None = None,
     receipt: bool = False,
+    veto_only: bool = False,
+    veto: material_veto.VetoSet | None = None,
 ) -> Expansion:
     """Reduce the fit subtasks' results in the plan's order on the affinity worker, then request exclusion."""
     inputs, parameters, state, planned, shared = resident_value(reference)
@@ -333,6 +356,8 @@ def _resampled_retained(
         contig_files=contig_files,
         numerical_policy=numerical_policy,
         receipt=receipt,
+        veto_only=veto_only,
+        veto=veto,
     )
 
 
@@ -346,6 +371,8 @@ def _requested(
     contig_files: Mapping[str, CheckpointFile] | None = None,
     numerical_policy: NumericalPolicy | None = None,
     receipt: bool = False,
+    veto_only: bool = False,
+    veto: material_veto.VetoSet | None = None,
 ) -> Expansion:
     """Freeze the exclusion request, then expose independent per-contig exclusion work."""
     request = science.exclusion_request(decided, inputs.contigs, inputs.relatedness, parameters,
@@ -391,7 +418,7 @@ def _requested(
         TaskKey("pedigree", "release"),
         _release_retained,
         args=(retained, tuple(ResultRef(t.key) for t in parts)),
-        kwargs=dict(file=file, numerical_policy=numerical_policy, receipt=receipt),
+        kwargs=dict(file=file, numerical_policy=numerical_policy, receipt=receipt, veto_only=veto_only, veto=veto),
         depends_on=tuple(t.key for t in parts),
         affinity=_AFFINITY,
         resources=ResourceRequest(max_cores=workers),
@@ -408,7 +435,9 @@ def _release_retained(
     file: CheckpointFile | None = None,
     numerical_policy: NumericalPolicy | None = None,
     receipt: bool = False,
-) -> Expansion:
+    veto_only: bool = False,
+    veto: material_veto.VetoSet | None = None,
+) -> Expansion | material_veto.VetoSet:
     """Borrow the original large input/decision bundle on its affinity worker."""
     inputs, parameters, decided, request = resident_value(reference)
     try:
@@ -422,6 +451,8 @@ def _release_retained(
             file=file,
             numerical_policy=numerical_policy,
             receipt=receipt,
+            veto_only=veto_only,
+            veto=veto,
         )
     finally:
         release_resident(reference)
@@ -438,7 +469,71 @@ def _release(
     file: CheckpointFile | None = None,
     numerical_policy: NumericalPolicy | None = None,
     receipt: bool = False,
-) -> Expansion:
+    veto_only: bool = False,
+    veto: material_veto.VetoSet | None = None,
+) -> Expansion | material_veto.VetoSet:
+    """Freeze the PD29 family transmission request after the guard's fixed point; score it per contig when any
+    retained edge has enough witnesses, then release. On the both-maps route each regime's chain runs this step,
+    so the family transmission vote acts in the veto regime's released calls as in the applied regime's."""
+    count_parts = len(science.exclusion_contigs(request))
+    relationship_evidence = tuple(x for x in evidence[count_parts:] if isinstance(x, RelationshipEvidence))
+    transmitted, _ = science.transmission_request(decided, request, inputs.relatedness, inputs.observed_counts,
+                                                  parameters, relationship_evidence=relationship_evidence)
+    kwargs = dict(workers=workers, file=file, numerical_policy=numerical_policy, receipt=receipt,
+                  veto_only=veto_only, veto=veto)
+    if not len(transmitted.parents):
+        return _release_final(inputs, parameters, decided, request, evidence, (), **kwargs)
+    parts = tuple(_transmission_task(p, parameters, transmitted, cores=workers) for p in inputs.prepared)
+    retained = retain((inputs, parameters, decided, request, evidence), "transmission")
+    gather = Task(
+        TaskKey("pedigree", "release_transmitted"),
+        _release_transmitted,
+        args=(retained, tuple(ResultRef(t.key) for t in parts)),
+        kwargs=dict(file=file, numerical_policy=numerical_policy, receipt=receipt, veto_only=veto_only, veto=veto),
+        depends_on=tuple(t.key for t in parts),
+        affinity=_AFFINITY,
+        resources=ResourceRequest(max_cores=workers),
+        thread_argument="workers",
+    )
+    return Expansion(parts, gather)
+
+
+def _release_transmitted(
+    reference: ResidentRef,
+    transmission_evidence: tuple[TransmissionEvidence, ...],
+    *,
+    workers: int = 1,
+    file: CheckpointFile | None = None,
+    numerical_policy: NumericalPolicy | None = None,
+    receipt: bool = False,
+    veto_only: bool = False,
+    veto: material_veto.VetoSet | None = None,
+) -> Expansion | material_veto.VetoSet:
+    """Borrow the retained decision bundle again with the per-contig family transmission evidence."""
+    inputs, parameters, decided, request, evidence = resident_value(reference)
+    try:
+        return _release_final(inputs, parameters, decided, request, evidence, tuple(transmission_evidence),
+                              workers=workers, file=file, numerical_policy=numerical_policy, receipt=receipt,
+                              veto_only=veto_only, veto=veto)
+    finally:
+        release_resident(reference)
+
+
+def _release_final(
+    inputs: DecisionStageInputs,
+    parameters: PedigreeParameters,
+    decided: Decision,
+    request: ExclusionRequest,
+    evidence: tuple[ExclusionEvidence | RelationshipEvidence, ...],
+    transmission_evidence: tuple[TransmissionEvidence, ...],
+    *,
+    workers: int = 1,
+    file: CheckpointFile | None = None,
+    numerical_policy: NumericalPolicy | None = None,
+    receipt: bool = False,
+    veto_only: bool = False,
+    veto: material_veto.VetoSet | None = None,
+) -> Expansion | material_veto.VetoSet:
     count_parts = len(science.exclusion_contigs(request))
     count_evidence = tuple(x for x in evidence[:count_parts] if isinstance(x, ExclusionEvidence))
     relationship_evidence = tuple(x for x in evidence[count_parts:] if isinstance(x, RelationshipEvidence))
@@ -452,7 +547,14 @@ def _release(
         inputs.observed_counts,
         parameters,
         relationship_evidence=relationship_evidence,
+        transmission_evidence=transmission_evidence,
     )
+    if veto_only:
+        return material_veto.veto_set(released, inputs.genome.regime)
+    outcome, before = None, released
+    if veto is not None and veto.role == "veto":
+        released, outcome = material_veto.apply(released, veto)
+    comparison = _working_comparison(inputs, before, released, veto)
     search = panel.search_diagnostics(
         decided.scores.panel,
         decided.eligibility,
@@ -471,7 +573,7 @@ def _release(
         if len(wanted.pairs)
         else ()
     )
-    retained = retain((inputs, parameters, released, search), "release")
+    retained = retain((inputs, parameters, released, search, outcome, comparison), "release")
     gather = Task(
         TaskKey("pedigree", "publish"),
         _publish_retained,
@@ -483,6 +585,31 @@ def _release(
     return Expansion(parts, gather)
 
 
+def _working_comparison(
+    inputs: DecisionStageInputs,
+    before: ReleasedDecision,
+    released: ReleasedDecision,
+    given: material_veto.VetoSet | None,
+) -> material_veto.Comparison | None:
+    """What the product withholds and adds relative to the working map alone (MaterialChoice.withheld_calls): the
+    working map's release is the reference chain's, the veto chain's when the veto regime is the working map's, the
+    applied chain's before the veto when the applied regime is the working map's, and nothing when the working map
+    is not assessable."""
+    material = inputs.material
+    if material is None:
+        return None
+    regime = inputs.genome.regime
+    if given is not None and (given.role == "reference" or given.regime == material.working_regime):
+        working = given
+    elif material.working_regime == regime:
+        working = material_veto.veto_set(before, regime)
+    elif material.working_regime == "not_assessable":
+        working = material_veto.empty_set(len(before.calls.state), "not_assessable")
+    else:
+        raise InvariantError("the working map's release is not available for the material report")
+    return material_veto.compare(working, material_veto.veto_set(released, regime))
+
+
 def _publish_retained(
     reference: ResidentRef,
     contrasts: tuple[relatives.ContigContrasts, ...],
@@ -492,7 +619,7 @@ def _publish_retained(
     receipt: bool = False,
 ) -> Pedigree | dict[RecordKey, str]:
     """Release the affinity's retained decision state after its last consumer."""
-    inputs, parameters, released, search = resident_value(reference)
+    inputs, parameters, released, search, outcome, comparison = resident_value(reference)
     try:
         return _publish(
             inputs,
@@ -500,6 +627,8 @@ def _publish_retained(
             released,
             search,
             contrasts,
+            outcome,
+            comparison,
             file=file,
             numerical_policy=numerical_policy,
             receipt=receipt,
@@ -514,6 +643,8 @@ def _publish(
     released: ReleasedDecision,
     search: tuple[SearchDiagnosticView, ...],
     contrasts: tuple[relatives.ContigContrasts, ...],
+    outcome: material_veto.VetoOutcome | None = None,
+    comparison: material_veto.Comparison | None = None,
     *,
     file: CheckpointFile | None = None,
     numerical_policy: NumericalPolicy | None = None,
@@ -523,7 +654,11 @@ def _publish(
     reports = PedigreeReportInputs(
         search, tuple(_summary(p) for p in inputs.prepared), relatives.aggregate(wanted.pairs, wanted.views, contrasts)
     )
-    product = science.assemble(released, inputs.omitted, parameters, reports).pedigree
+    product = science.assemble(released, inputs.omitted, parameters, reports, veto_outcome=outcome).pedigree
+    material = inputs.material
+    if material is not None and comparison is not None:
+        material = material_veto.report(material, comparison, outcome)
+    product = replace(product, material=material, map_scale=inputs.map_scale)
     adapter = PedigreeAdapter()
     # Freeze/validate through the identical publication boundary even without a store.
     product = adapter.decode(adapter.encode(product))
@@ -661,6 +796,39 @@ def _relationship_task(
     )
 
 
+def _transmission_stored(
+    reference: StoredPrepared,
+    parameters: PedigreeParameters,
+    request: TransmissionRequest,
+    *,
+    threads: int = 1,
+) -> TransmissionEvidence:
+    prepared = load_product(reference.file, PREPARED, reference.identity, prepare.PreparedAdapter())
+    if prepared is None:
+        raise InvariantError("family transmission requires complete prepared inputs")
+    return family_transmission.run(prepared, parameters, request, threads=threads)
+
+
+def _transmission_task(
+    prepared: PreparedChromosome | StoredPrepared,
+    parameters: PedigreeParameters,
+    request: TransmissionRequest,
+    *,
+    cores: int,
+) -> Task:
+    if not isinstance(prepared, StoredPrepared):
+        return family_transmission.task(prepared, parameters, request, cores=cores)
+    return Task(
+        TaskKey("pedigree", "family_transmission", prepared.contig),
+        _transmission_stored,
+        args=(prepared, parameters, request),
+        inputs=(RecordKey(prepared.contig, PREPARED),),
+        resources=ResourceRequest(max_cores=cores),
+        affinity=prepared.contig,
+        thread_argument="threads",
+    )
+
+
 def _relative_stored(
     reference: StoredPrepared,
     parameters: PedigreeParameters,
@@ -695,14 +863,17 @@ def _relative_task(
 
 
 def run_stored(
-    root: str, manifest: Mapping[str, Any] | None = None, *, workers: int = 1
-) -> dict[RecordKey, str] | Expansion:
+    root: str, manifest: Mapping[str, Any] | None = None, *, workers: int = 1, veto_only: bool = False,
+    veto: material_veto.VetoSet | None = None,
+) -> dict[RecordKey, str] | Expansion | material_veto.VetoSet:
     """Read one chromosome at a time; retain only scores and immutable descriptors.
 
     Fit work shares the one assembled genome bundle. Exclusion and relatives load
     their own per-contig records on their affinity workers. Resume validates the
     whole published product before loading scoring arrays or observed masks. The
     reply is the published product's receipt (``product_receipt``), never the product.
+    On the both-maps route with a veto regime, the veto regime's chain runs first (``veto_only``: it replies with
+    its released calls and publishes nothing), then the applied regime's chain with ``veto``.
     """
     store = CheckpointStore(root, nthreads=workers)
     store.check_layout()
@@ -710,16 +881,42 @@ def run_stored(
     if manifest is None:
         raise InputError("pedigree requires the bound run manifest")
     precheck(len(manifest["sample_ids"]), basis="configured")
-    reader = result_reader(store, manifest, product="pedigree")
-    if reader is not None:
-        cached = load_product(store.run, PRODUCT, reader.identity, PedigreeAdapter())
-        if cached is not None:
-            return product_receipt(reader.identity)
+    if not veto_only:
+        reader = result_reader(store, manifest, product="pedigree")
+        if reader is not None:
+            cached = load_product(store.run, PRODUCT, reader.identity, PedigreeAdapter())
+            if cached is not None:
+                return product_receipt(reader.identity)
     bound = bound_inputs(store, manifest)
     parameters = bound.parameters
+    if veto is not None and not bound.dependencies.veto:
+        veto = replace(veto, role="reference")  # the working regime's release, only counted
+    if (bound.dependencies.veto or bound.dependencies.reference) and veto is None and not veto_only:
+        first = Task(
+            TaskKey("pedigree", "decision.veto"),
+            _veto_call,
+            args=(run_stored, root, manifest),
+            kwargs=dict(veto_only=True),
+            affinity=_AFFINITY,
+            resources=ResourceRequest(max_cores=workers),
+            thread_argument="workers",
+        )
+        then = Task(
+            TaskKey("pedigree", "decision.vetoed"),
+            run_stored,
+            args=(root, manifest),
+            kwargs=dict(veto=ResultRef(first.key)),
+            depends_on=(first.key,),
+            resources=ResourceRequest(max_cores=workers),
+            thread_argument="workers",
+        )
+        return Expansion((first,), then)
     if bound.dependencies.regime == "not_assessable":
+        if veto_only:
+            raise InvariantError("a not-assessable run has no veto regime")
         completed_receipt = finish_not_assessable(bound.sample_ids, bound.contigs, bound.summary, bound.classification,
-            parameters, bound.dependencies, file=store.run, numerical_policy=bound.policy, receipt=True)
+            parameters, bound.dependencies, file=store.run, numerical_policy=bound.policy, receipt=True,
+            material=bound.material, map_scale=bound.map_scale)
         assert isinstance(completed_receipt, dict)
         return completed_receipt
     precheck(len(bound.sample_ids), basis="informative")
@@ -734,8 +931,11 @@ def run_stored(
 
     assert bound.panel is not None
     genome = stacking.stack(bound.sample_ids, bound.panel, chromosome_scores(), bound.eligibility, parameters,
-                            axis=bound.axis, summary=bound.summary)
-    if genome.regime != bound.dependencies.regime:
+                            axis=bound.axis, summary=bound.summary,
+                            regime_morgans=bound.veto_morgans if veto_only else bound.regime_morgans)
+    second = bound.dependencies.veto or bound.dependencies.reference  # the veto or the reference chain's regime
+    expected_regime = second if veto_only else bound.dependencies.regime
+    if genome.regime != expected_regime:
         raise InvariantError("stacked material differs from the prepared layouts' regime")
     family = families_records.load(store.run, bound.dependencies.relatedness_families)
     if family is None or family.sample_ids != bound.sample_ids:
@@ -778,9 +978,13 @@ def run_stored(
         relatedness,
         observed_counts,
         evidence,
-        bound.dependencies,
+        replace(bound.dependencies, regime=expected_regime) if veto_only else bound.dependencies,
         {row.contig: row.omitted_reason for row in bound.summary if row.omitted_reason is not None},
+        material=bound.material,
+        map_scale=bound.map_scale,
     )
+    if veto_only:
+        return run(inputs, parameters, workers=workers, numerical_policy=bound.policy, veto_only=True)
     reply = run(
         inputs,
         parameters,
@@ -789,10 +993,47 @@ def run_stored(
         contig_files={c: store.contig(c) for c in bound.contigs},
         numerical_policy=bound.policy,
         receipt=True,
+        veto=veto,
     )
     # The receipt route replies with a receipt or an expansion, never the product.
     assert not isinstance(reply, Pedigree)
     return reply
+
+
+# The veto regime's chain reuses the decision's task factories; its tasks carry this round so that their keys stay
+# distinct from the applied regime's chain, which runs after it in the same graph.
+_VETO_ROUND = "veto"
+
+
+def _veto_key(key: TaskKey) -> TaskKey:
+    return TaskKey(key.stage, key.unit, key.scope, f"{key.round}.{_VETO_ROUND}" if key.round else _VETO_ROUND)
+
+
+def _veto_refs(value: Any) -> Any:
+    if isinstance(value, ResultRef):
+        return ResultRef(_veto_key(value.task))
+    if isinstance(value, tuple):
+        return tuple(_veto_refs(item) for item in value)
+    if isinstance(value, list):
+        return [_veto_refs(item) for item in value]
+    if isinstance(value, dict):
+        return {name: _veto_refs(item) for name, item in value.items()}
+    return value
+
+
+def _veto_task(task: Task) -> Task:
+    """The same action under a veto-round key; references, dependencies and later expansions follow."""
+    return replace(task, key=_veto_key(task.key), function=_veto_call, args=(task.function, *_veto_refs(task.args)),
+                   kwargs=_veto_refs(dict(task.kwargs)), depends_on=tuple(_veto_key(k) for k in task.depends_on),
+                   outputs=())
+
+
+def _veto_call(function: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run one action of the veto regime's chain, keeping any expansion it returns in the veto round."""
+    value = function(*args, **kwargs)
+    if isinstance(value, Expansion):
+        return Expansion(tuple(_veto_task(task) for task in value.subtasks), _veto_task(value.gather))
+    return value
 
 
 def _stored_result(published: dict[RecordKey, str]) -> dict[RecordKey, str]:

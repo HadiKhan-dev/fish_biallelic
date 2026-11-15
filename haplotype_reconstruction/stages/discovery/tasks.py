@@ -31,7 +31,7 @@ from ...science.discovery.release import DiscoveredBlock
 from ...science.discovery.run import BlockEvidence, discover_block
 from ...store.container import CheckpointFile
 from ...store.protocol import claim, mark_complete, publish, resume
-from ..framework import ALL_CORES, Expansion, RecordKey, ResourceRequest, Task, TaskKey
+from ..framework import ALL_CORES, Expansion, RecordKey, ResourceRequest, Task, TaskKey, close_progress, unit_progress
 from .records import PLAN, BlockAdapter, PlanAdapter, block_key, diagnostic_key
 
 __all__ = [
@@ -101,6 +101,9 @@ def execute_block(
                 raise InvariantError("completed discovery claim has no record")
             return adapter.decode(record.payload).result
         collector = BlockDiagnostics(diagnostics)
+        # A long block snapshots its search at expansion boundaries (store.progress), so that a stopped run resumes
+        # inside it; the progress is removed once the block record is published.
+        progress = unit_progress(file, key, identity)
         wall, cpu = time.perf_counter(), time.process_time()
         # Refresh the task's live share at numerical and candidate-map boundaries.
         from ...engine.cpu import share_reader
@@ -113,6 +116,7 @@ def execute_block(
             diagnostics=collector,
             threads=share_reader(),
             map_work=threaded_each,
+            progress=progress,
         )
         measured = replace(
             collector.snapshot(), wall_seconds=time.perf_counter() - wall, cpu_seconds=time.process_time() - cpu
@@ -128,6 +132,7 @@ def execute_block(
                 )
             ),
         )
+        close_progress(progress)
         return result
 
 

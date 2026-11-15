@@ -12,6 +12,7 @@ from ..contracts.roles import freeze_record_arrays, record_field, schema_field
 from ..core.errors import InputError
 from .haplotypes import Mosaic, founder_mosaic, transmit
 from .pedigree import _map_crossovers
+from .structure import ContigStructure, sv_stream, structured_transmit
 
 
 def stock_stream(name: str, seed: int, *key) -> np.random.Generator:
@@ -97,8 +98,8 @@ def stock_record(name, specification, taken: int, first_source: int, seed: int) 
     return StockRecord(name, specification.population, sizes, parents, first_source, selected)
 
 
-def stock_gamete(parent, extent, chromosome_map, rng) -> Mosaic:
-    """Released crossover draws, without mutation draws, on labels."""
+def stock_gamete(parent, extent, chromosome_map, rng, structure: ContigStructure | None = None, coins=()) -> Mosaic:
+    """Released crossover draws, without mutation draws, on labels (filtered and ordered by ``structure``, if any)."""
     first = int(rng.choice([0, 1]))
     sites = np.array([extent.start_bp, extent.end_bp], np.float64)
     if chromosome_map.has_map:
@@ -113,10 +114,13 @@ def stock_gamete(parent, extent, chromosome_map, rng) -> Mosaic:
                 if current <= extent.end_bp:
                     events.append(float(current))
         events = np.asarray(events, np.float64)
+    if structure is not None:
+        return structured_transmit(parent, first, events, np.empty(0, np.int64), None, structure, coins)[0]
     return transmit(parent, first, events, np.empty(0, np.int64), None)
 
 
-def stock_founders(record: StockRecord, extent, chromosome_map, seed: int, contig: str):
+def stock_founders(record: StockRecord, extent, chromosome_map, seed: int, contig: str,
+                   structure: ContigStructure | None = None):
     """Retain only two successive generations of mosaics; return taken individuals."""
     previous = [
         (
@@ -131,7 +135,15 @@ def stock_founders(record: StockRecord, extent, chromosome_map, seed: int, conti
         for child in range(int(size)):
             rng = stock_stream("simulation.stock.gamete", seed, record.name, generation, child, contig)
             parents = record.parents[offset + child]
-            current.append(tuple(stock_gamete(previous[p], extent, chromosome_map, rng) for p in parents))
+            if structure is None:
+                current.append(tuple(stock_gamete(previous[p], extent, chromosome_map, rng) for p in parents))
+                continue
+            coins = sv_stream("simulation.sv.gamete", seed, "stock", record.name, generation, child, contig)
+            coins = coins.integers(0, 2, size=(2, len(structure.unlinked)))
+            current.append(tuple(
+                stock_gamete(previous[p], extent, chromosome_map, rng, structure, coins[slot])
+                for slot, p in enumerate(parents)
+            ))
         previous = current
         offset += int(size)
     return [previous[int(i)] for i in record.taken]

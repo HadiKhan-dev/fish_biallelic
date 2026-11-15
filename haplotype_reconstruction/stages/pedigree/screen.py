@@ -413,7 +413,8 @@ def panel_run(
     file: CheckpointFile | None = None,
     identity: str | None = None,
 ) -> CandidatePanel:
-    """Build and publish the M2 panel, including every cutoff tie and indeterminate sum."""
+    """Build and publish the M2 panel: every retained eligible pair, capped per child (ties and indeterminate bounds
+    kept)."""
     if (file is None) != (identity is None):
         raise InputError("publication requires both file and identity")
     adapter = PanelAdapter()
@@ -424,7 +425,7 @@ def panel_run(
             return previous
     c = screen.compact
     utility = panel.robust_screen_values(c.values, c.n_contigs, c.n_samples, c.markers, eligibility, parameters)
-    product, _ = panel.bounded_panel(c, screen.zero, bounds, utility, eligibility, parameters)
+    product, _ = panel.bounded_panel(c, bounds, utility, eligibility, parameters)
     if file is not None:
         assert identity is not None
         publish_product(file, PANEL, identity, product, adapter)
@@ -481,12 +482,12 @@ def bound_derivation(
 def panel_derivation(
     screen_identity: str,
     bound_identities: Sequence[tuple[str, str]],
-    margin: float,
+    cap: int,
     *,
     reverse: bool = False,
     numerical_policy: NumericalPolicy | None = None,
 ) -> str:
-    """Bind the screen and every bound identity; resource choices are absent."""
+    """Bind the screen, every bound identity and the per-child pair cap; resource choices are absent."""
     inputs = {"screen": screen_identity}
     for contig, identity in bound_identities:
         if "bounds:" + contig in inputs:
@@ -494,7 +495,7 @@ def panel_derivation(
         inputs["bounds:" + contig] = identity
     return Derivation(
         code_dependency_identity((__name__,)),
-        dict(pair_relevance_margin=float(margin), contigs=tuple(c for c, _ in bound_identities)),
+        dict(max_pairs_per_child=int(cap), contigs=tuple(c for c, _ in bound_identities)),
         numerical_policy or NumericalPolicy.current(),
         inputs,
         reverse,

@@ -1,5 +1,180 @@
 # Changelog
 
+## 4.19.0 (15 November 2026)
+
+This release checks the map's scale before the pedigree chooses its material regime, makes two-parent evidence exact
+below its cap, estimates direction reliability per run and adds a family transmission vote against relatives released as
+parents. Relatedness gains an opt-in two-population model, long units resume from inside, and the simulator gains long
+reads and structural rearrangements. With default settings, released results change only in the pedigree and what reads
+it.
+
+**Pedigree: the material regime checks the map's scale ([map scale](docs/methods/pedigree.md#map-scale)).** The cut-offs
+of 4.18.0 (5 and 12 Morgans) are in true Morgans, but U is measured on the working map, so a wrong fallback rate applies
+the wrong regime's rule. After painting, the pedigree stage now estimates one genome-wide recombination rate from
+per-sib transmission frames of the relatedness families on contigs without a map file. The new setting `[genetic_map]
+rate_estimate` (`--rate-estimate`) replaces `infer_rate`:
+
+- `veto` (default): every stage uses the configured map. The pedigree releases only calls that both the configured and
+  the estimated map's regimes release. This mode can only withhold.
+- `ignore`: the configured map everywhere (4.18's behaviour); the estimates only report and warn.
+- `adopt`: the relatedness estimate of 4.18.1 becomes the fallback rate under its gate. The pedigree applies the
+  painting estimate's regime alone when that estimate is adopted and excludes the working rate.
+
+Map files are never rescaled. No count of chromosomes decides: both intervals bootstrap families and 1-Morgan units. The
+relatedness interval, which needed five contigs, still covers the realised rate in 16 of 16 truth simulations. On 84
+simulations adopted painting estimates read 0.85 to 1.08 of the generating rate, and they are not pulled towards a
+too-long configured map. On release-matrix replays it withholds only 23 Tier B and 86 Tier A state calls, in two crosses
+simulated at 2 cM/Mb and configured at 5 (true material 5.9 M, low regime). On 18 genomes near the cut-offs nothing
+changes with the right map. With a map 2.5 times too long, the veto withholds the three Tier B non-parent edges that map
+released, one correct edge, and 406 Tier A edges the true material does not support. A real cichlid cross configured at
+5 cM/Mb reads 1.83 [1.07, 2.26] and 2.03 [1.76, 2.37] cM/Mb; both estimates warn, but its regime and pedigree are
+unchanged. `pedigree/summary.json` reports the working, estimate and applied regimes and the `withheld_*` counts
+relative to the working map, so withholdings by the lower regime's own rule are counted too.
+
+**Pedigree: the two-parent panel has no relevance screen ([PS15](docs/methods/pedigree.md#ps15)).** Every eligible pair
+of a child's retained parents now enters the two-parent panel. 4.18.2 screened pairs on the full-data and
+leave-one-chromosome-out fits, but resampled fits reuse the panel, so a missing pair lowered their evidence. Below the
+per-child cap of 256 pairs the evidence is now exact in every fit. A capped child keeps the pairs with the largest
+full-data bound. On 1,476 calibration layouts 34 decisions change: 8 correct edges gained, 15 withdrawn, nothing wrong
+added. Pedigree CPU rises by 4 to 61 % (+9 % on the real cichlid cross, which is unchanged).
+
+**Pedigree: direction evidence estimated per run ([PD06](docs/methods/pedigree.md#pd06)).** The direction term assumed
+that decisive 1-Morgan units point the right way 95 % of the time. On known truth that figure is 70 to 99 %. Full sibs,
+half sibs and cousins vote a fair coin, and their summed votes reached the orientation cut in 61 to 75 % of such pairs.
+Each run now estimates, from the pairs a direction-free fit links and without labels, the reliability of decisive units
+(median error 0.001; 0.014 for small families at low material) and the share of pairs voting coins, which stops
+relatives' votes accumulating. Thresholds are unchanged. On held-out simulations, stated support of 0.98 or more was
+right 2,428 times of 2,428 (before: 72 wrong of 4,168), and relatives reaching 0.98 fell to 0.3-6 %. The price is 0.1 to
+0.3 % of correct Tier B edges at the cuts: 13 fewer of 4,262 on 127 held-out simulations, with the same 7 non-parents.
+On calibration layouts, non-parents fall from 32 to 26 and reversed edges from 2 to 0. A looser threshold doubles the
+low-material non-parents.
+
+**Pedigree: family transmission vote ([PD29](docs/methods/pedigree.md#pd29)).** After the sibling guard, each retained
+Tier B edge whose child has at least two witnesses in its relatedness family is tested once more. The family's paintings
+are fitted jointly in 1-Morgan segments under three models with two unsequenced latent parents: the candidate is the
+child's parent, a full sib, or outside the family. In each segment a witness may be a full sib, a half sib through
+either latent parent, a sequenced parent or an outsider. The edge is withheld when the robust sum of segment log odds is
+below -ln 1000. This targets grandparents, double grandparents and full sibs released as parents in sib-rich crosses
+without sequenced parents, which the guard cannot see. The half-sib role stops a competing model's free latent parent
+from absorbing a half sib, which withheld correct edges in families without a full sib. Each segment is searched twice,
+with witnesses in a content-derived order and in its reverse. Decisions therefore do not depend on witness order or
+sample names: 0 flips under reordering and renaming on five validation sets. In the 4.18 material regime no correct
+tested edge is withheld on any set, in either tier (20,879 held-out layout edges among them). The vote withholds 61 of
+81 tested relatives on held-out layouts. Of true full sibs scored as candidate parents, it withholds 235 of 237 on fresh
+genomes and 24 of 24 on a 30-founder genome. A segment costs about twice a single search. New: sibling-guard columns
+`transmission_*` and withholding basis `transmission`.
+
+**Relatedness: crosses between two source populations (opt-in, [rl21](docs/methods/relatedness.md#rl21)).** A single
+Hardy-Weinberg law for unsequenced parents is false in an interspecies cross, where a first-generation hybrid is
+heterozygous at every fixed difference. The fit therefore merged sibships of one ancestry and broke up F2 sibships, and
+the rate estimate rested on one or two families. With `[input] source_populations = 2` the stage estimates source allele
+frequencies and each sample's local ancestry from the genotype likelihoods alone. Each unsequenced parent gets an
+ancestry class: pure, first-generation hybrid, backcross, or later. A child's term is conditional on its local ancestry,
+so a fixed difference is neutral for an F2 sibship. The default (1) is unchanged from 4.18.2, verified on 62 genomes.
+Pairs of sequenced samples (full sibs together / others together / full sibs split; control: the same pedigree from one
+population under 4.18.2):
+
+| design | 4.18.2 | two sources | control |
+|---|---|---|---|
+| interspecies F2, 116 samples, depth 5 (3 runs) | 224 / 445 / 829 | 1,034 / 26 / 19 | 1,037 / 13 / 16 |
+| two species, parents sequenced, depth 5 | 175 / 94 / 29 | 192 / 26 / 12 | 192 / 26 / 12 |
+| two species, parents sequenced, depth 1 | 132 / 91 / 72 | 166 / 4 / 38 | 181 / 44 / 23 |
+
+The F2 rate estimate now uses 14 or 15 families instead of 1 or 2, and its interval covered the simulated rate in all
+three runs. Pedigree calls replayed with the new families were unchanged in seven runs. It is validated at about 5 reads
+per site with pure or first-generation-hybrid parents, and warns below 3 reads or when under 1 % of sites separate the
+sources.
+
+**Long units resume from inside ([eng-08](docs/methods/execution.md#eng-08)).** A stopped run used to redo an
+interrupted unit, which can take hours (14 for a join batch of a second real cross). Discovery blocks, selection blocks
+and join batches now snapshot their complete search state at natural boundaries. Refinement components keep their
+finished fits in a container of their own. A snapshot is written every `[execution] progress_minutes` (default 5) and
+costs at most 0.3 % of a unit. It is keyed by the unit's derivation identity and removed when the unit publishes.
+Results are identical to 4.18.2: 144 of 144 join and selection resumes and 193 of 193 discovery resumes reproduced the
+uninterrupted records, as did runs killed inside each unit kind. Painting and later stages still restart a stopped unit.
+
+**Simulator: long reads, structural rearrangements and artefact corrections.** All are off by default; existing
+configurations generate the data of 4.18.2 exactly.
+
+- *Long reads* (`long_read_mean_bp`; preset `long_read_cohort`, calibrated on a 52-sample nanopore cohort). Reads cover
+  every site they span. Each read carries one Phred error rate, with homopolymer losses, local reference bias and
+  cross-sample reads.
+- *Structural rearrangements* (`[simulation.structure]`; preset `cichlid`, from published cichlid pangenome data). Inversions,
+  deletions, duplications and reference misorder are simulated. Meiosis drops crossovers inside carried deletions and
+  keeps only even numbers inside heterokaryotypic inversions. Evaluation adds `structurally_absent_cells` and
+  `called_intervals_at_rearrangement_switch`.
+- *Artefact layer.* New `hom_alt_miss_factor` (default 0.02, the ratio measured in long-read trios); the layer had
+  missed 3 to 4 % of hom-ALT cells. A non-zero `balance_dispersion` is refused with long reads, because it erased their
+  read sharing.
+
+On bounded known-truth runs (one seed per arm), called crossovers follow suppressed recombination in inversions: 53
+against 93 calls, for 85 against 129 true crossovers. Deletions and duplications make founder rows chimeric along whole
+contigs, with segment-label errors about nine times the base. Long reads cost little beyond uneven depth (founder errors
+16 % above a depth-matched control). With the long-read call-set layer, the correction cuts genotype errors from 204.9
+to 153.0 per 10^4 called genotypes. Parent edges are 72/0/48 (correct/extra/missing) against 82/0/38, a difference one
+seed cannot separate from noise; without the call set they are 114/0/6.
+
+**Removed and changed records.** Removed (no compatibility): `[genetic_map] infer_rate` and `--infer-rate` (use
+`rate_estimate = "adopt"`), the five-contig interval rule and `PanelParameters.pair_relevance_margin`. New record
+`pedigree/map_scale`; prepared pedigree schema 4; the panel identity binds the cap; junction evidence stores the run's
+direction estimates; relatedness families schema 3 adds `sources`. Earlier run roots are refused.
+
+**Effect** (release matrix of 17 crosses, end to end). Relatedness, painting and founder-refit
+outputs are byte-identical to 4.18.2 in all 17 cases. The exported VCF differs only in the backcross, where family phase
+reads the changed pedigree. The real cichlid cross releases the edges, tiers and states of 4.18.2 (68 complete Tier A
+edges). Every pedigree difference is attributed, and none is a wrong edge:
+
+- the panel leaves one backcross child unresolved, as the exhaustive panel does;
+- the direction evidence moves one backcross configuration and one F3 state below support;
+- the map veto leaves 15 zero-parent states of a sib-rich cross and 7 of an eight-contig F3 cross unresolved.
+
+These F3 and sib-rich crosses were simulated at 2 cM/Mb and configured at 5. Their true material (2.2 Morgans for the
+three-contig F3, 5.9 for the others) does not support the withdrawn calls. The transmission vote withholds nothing.
+
+**Limitations** (documented in the methods pages).
+
+- *Map scale.* When the configured map is too long, the veto removes non-parent edges at the cost of correct calls
+  that the true material does not support. Backcrosses give no frames, so
+  their configured map decides alone. Crossover interference may bias the estimate 2 to 5 % high (untested).
+  `adopt`-mode replays were not run.
+- *Panel.* A capped child's two-parent evidence is a lower bound.
+- *Direction.* Ancestral relatives vote like parents, and five to seven units cannot tell a sibling from a parent. The
+  structural part of the orientation is uncalibrated (wrong sign for 0.13 % of true pairs) and can release a reversed
+  edge (one on held-out simulations).
+- *Transmission vote.* Its gain inside the pipeline is unproven (24 fresh sib-rich runs release no relative under
+  4.18.2; the 30-founder run is not assessable). Power is lower in three-child families: in synthetic families with ten
+  segments, a grandparent with full-sib and half-sib witnesses is withheld in 48 % and a double grandparent in 32 %.
+  Families of fewer than three children are untested, and the vote is a single pass. A residual chimera remains: a child
+  with four half sibs by one mate and no full sib loses its correct edge in 30 to 62 % of synthetic replicates. A
+  second-mate role let relatives escape and was rejected; 2 of 53,510 tested correct instances had this configuration,
+  neither withheld.
+- *Two sources.* At depth 1 it merged double-first-cousin sibships (other pairs together rose from 81 to 1,113) and is
+  not shown to help. Later generations do no better than 4.18.2. Declaring two sources for one population splits
+  sibships. On a real cichlid cross, strongly supported family members fell from 15 to 4 for an unknown cause, so that
+  cross is run with one source. The family fit is slower (13 minutes on 76 threads against 53 s on 16).
+- *Simulator.* Calibration rests on one call set's allele depths. The model has no crossover interference or gene
+  conversion. With long reads the pipeline over-counts local evidence.
+
+*Relatives indistinguishable from parents at pair level.* A relative released as the parent of a child with fewer than
+two witnesses stays released as `pair_only`. No pairwise statistic can withhold it without withholding parents. The
+table gives the share (%) of each class scoring inside the worst 0.1 % of true parent-offspring pairs (60 simulated
+genomes, depth 1 / 5):
+
+| working Morgans | full sibs | half sibs | grandparents | double grandparents |
+|---|---|---|---|---|
+| 5-8 | 24.8 / 16.5 | 6.2 / 3.0 | 19.8 / 8.4 | 42.6 / 27.6 |
+| 8-12 | 7.6 / 4.2 | 0.7 / 0.2 | 5.4 / 1.5 | 24.5 / 12.1 |
+| 12-15 | 2.2 / 1.0 | 0.1 / 0.0 | 1.5 / 0.3 | 7.2 / 2.9 |
+| 15-20 | 1.1 / 0.2 | 0.0 / 0.0 | 0.7 / 0.1 | 4.9 / 1.8 |
+| 20-30 | 0.1 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 |
+
+Avuncular, half-avuncular and cousin pairs stay at or below 1.8 %.
+
+**Validation.** Each change was validated where it acts, on saved inputs, against pre-registered criteria. The default suite
+(4,899 tests) and the four stage-tier shards pass on the release candidate. The release matrix ran end to end on 17
+crosses: 16 on a candidate that differs from the release only in record-role metadata, documentation and a run-log
+reader, and the tie-reversed cross on the release itself, after that reader was fixed.
+
 ## 4.18.2 (14 November 2026)
 
 This release removes the code that was kept for earlier versions, adds an optional report of the founder sharing of

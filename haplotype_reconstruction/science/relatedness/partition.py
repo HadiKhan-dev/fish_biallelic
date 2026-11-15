@@ -9,6 +9,15 @@ import numpy as np
 from numba.typed import List
 
 from ...core.concurrency import ThreadSource
+from .class_kernels import (
+    FAMILY,
+    FAMILY_FAMILY,
+    FAMILY_SAMPLE,
+    SAMPLE,
+    class_family_table,
+    class_family_tasks,
+    class_half_sib_tasks,
+)
 from .family_kernels import (
     alone_logliks,
     family_loglik_parallel,
@@ -37,8 +46,26 @@ class _Partition:
     computed for and is evaluated again once that differs. join[f, c]: the change of family f's log-likelihood when
     sample c joins it; leave[c]: the change of c's family's log-likelihood when c leaves it."""
 
-    def __init__(self, C, logpi, logpost, parameters: FamilyParameters = _DEFAULT_FAMILY, threads: ThreadSource = 1):
+    def __init__(
+        self, C, logpi, logpost, parameters: FamilyParameters = _DEFAULT_FAMILY, threads: ThreadSource = 1,
+        class_prior=None, composition=None, ranges=(),
+    ):
         self.parameters = parameters
+        # rl21 (two source populations): C holds the child terms over parental configuration pairs [N, M, G x G],
+        # logpost each sample's configuration posterior [N, M, G] and class_prior the ancestry classes' log laws
+        # over the configurations [K, M, G]. A latent slot is then the marginal over the classes (class_kernels) and
+        # every gain is exact: no screen runs. None: one source, the Hardy-Weinberg law logpi and the screened kernels.
+        self.class_prior = class_prior
+        if class_prior is not None:
+            self.laws = np.ascontiguousarray(np.exp(class_prior))
+            self.logw = np.full(class_prior.shape[0], -np.log(class_prior.shape[0]))
+            # each sample's ancestry along the map under parents of given transmitted shares (ancestry.composition):
+            # row 0 the genome, then one row per support unit
+            self.composition = None  # terms without it (a test of the class kernels alone) add nothing
+            if composition is not None:
+                self.composition, self.class_type, self.sample_type = composition
+            self.span = {(0, C.shape[1]): 0, **{(int(lo), int(hi)): 1 + r for r, (lo, hi) in enumerate(ranges)}}
+            self.span[(0, C.shape[1])] = 0  # a single unit that covers the genome is the genome
         # Read this caller-owned source at batch/sweep boundaries. A live source
         # refreshes the ambient kernel team as siblings return their CPUs.
         self.threads = threads
@@ -46,7 +73,7 @@ class _Partition:
         self.N, self.M = C.shape[0], C.shape[1]
         # Every live family contains a sample; even a split or an undone merge needs at most N slots.
         capacity = self.N
-        self.empty_sum = np.empty((0, 9))
+        self.empty_sum = np.empty((0, C.shape[2]))
         self.S = List([self.empty_sum for _ in range(capacity)])
         self.shared_sum = np.zeros(capacity, dtype=np.bool_)
         self.ll = np.zeros(capacity)
@@ -58,8 +85,11 @@ class _Partition:
         self.content_order = np.argsort(-self.evidence_rank, kind="stable")
         # Numerical gain of forming a singleton; deliberately separate from the evidence order.
         self.solo = np.empty(self.N)
-        alone_logliks(C, logpi, self.solo)
         self.everyone = np.arange(self.N, dtype=np.int64)
+        if class_prior is None:
+            alone_logliks(C, logpi, self.solo)
+        else:
+            self.solo[:] = self.class_values(SAMPLE, self.everyone)
         self.clock = 0
         self.version = np.zeros(capacity, dtype=np.int64)
         self.join = np.zeros((capacity, self.N))
@@ -81,6 +111,131 @@ class _Partition:
         self.estimate_at = np.full(capacity, -1, dtype=np.int64)
         self.screen_margin = self.parameters.screen_margin + self.parameters.screen_margin_per_site * self.M
         self.screen_rounding = 2 * (self.M + self.parameters.screen_padding) * self.parameters.screen_rounding
+        if class_prior is not None:
+            self.screen_margin = self.screen_rounding = 0.0  # the "estimates" are exact gains
+
+    # --- ancestry classes (rl21) ---------------------------------------------------------------------------------
+
+    def class_values(self, kind, family, other=None, sign=1.0, slots=None, lo=0, hi=None):
+        """float64 [T]: class-marginal family log-likelihoods of a batch (class_kernels.class_family_tasks) over
+        sites [lo, hi): ``kind`` with families (or samples) ``family`` [T], ``other`` [T] where the kind reads it,
+        ``sign`` of a sample's terms and ``slots`` [T, 2] (default: both latent). A latent slot is summed over the
+        classes with their prior weights; a sequenced slot is its sample's one law."""
+        family = np.array(family, dtype=np.int64).reshape(-1)
+        n = len(family)
+        if n == 0:
+            return np.empty(0)
+        other = np.zeros(n, dtype=np.int64) if other is None else np.array(other, dtype=np.int64).reshape(-1)
+        slots = (
+            np.full((n, 2), -1, dtype=np.int64) if slots is None
+            else np.array(np.broadcast_to(np.asarray(slots, dtype=np.int64), (n, 2)))
+        )
+        classes = self.laws.shape[0]
+        tables = np.empty((n, classes, classes))
+        class_family_tasks(
+            self.S, self.C, np.full(n, kind, dtype=np.int64), family, other, np.full(n, float(sign)),
+            np.ascontiguousarray(slots[:, 0]), np.ascontiguousarray(slots[:, 1]), self.laws, self.logpost,
+            lo, self.M if hi is None else hi, tables,
+        )
+        tables += np.where(slots[:, 0, None, None] < 0, self.logw[None, :, None], 0.0)
+        tables += np.where(slots[:, 1, None, None] < 0, self.logw[None, None, :], 0.0)
+        if self.composition is not None:
+            tables += self._composition(kind, family, other, sign, slots, lo, self.M if hi is None else hi)
+        tables = tables.reshape(n, -1)  # unused entries are LOG_ZERO: no weight
+        top = tables.max(axis=1)
+        return top + np.log(np.exp(tables - top[:, None]).sum(axis=1))
+
+    def _held(self, kind, family, other, sign, row):
+        """float64 [T, types, types]: each task's sum over the samples it holds of their composition tables."""
+        table = self.composition[row]
+        if kind == SAMPLE:
+            return table[family]
+        families, index = np.unique(family, return_inverse=True)
+        out = np.stack([table[self.members[f]].sum(axis=0) for f in families])[index.reshape(-1)]
+        if kind == FAMILY_SAMPLE:
+            out = out + sign * table[other]
+        elif kind == FAMILY_FAMILY:
+            families, index = np.unique(other, return_inverse=True)
+            out = out + np.stack([table[self.members[g]].sum(axis=0) for g in families])[index.reshape(-1)]
+        return out
+
+    def _composition(self, kind, family, other, sign, slots, lo, hi):
+        """float64 [T, K, K]: what the held samples' ancestry along the map says about each class pair of the
+        task's slots (a latent slot: each class's transmitted share; a sequenced slot: its sample's)."""
+        held = self._held(kind, family, other, sign, self.span[(int(lo), int(hi))])
+        u = np.where(slots[:, 0, None] < 0, self.class_type[None, :], self.sample_type[np.maximum(slots[:, 0], 0)][:, None])
+        v = np.where(slots[:, 1, None] < 0, self.class_type[None, :], self.sample_type[np.maximum(slots[:, 1], 0)][:, None])
+        return held[np.arange(len(family))[:, None, None], u[:, :, None], v[:, None, :]]
+
+    def class_half_sib_gains(self, first, second):
+        """float64 [T]: the half-sib link gains of latent families first[t], second[t] (one shared latent parent,
+        each of the three parents marginal over its own class), over all sites."""
+        first, second = np.array(first, dtype=np.int64).reshape(-1), np.array(second, dtype=np.int64).reshape(-1)
+        if not len(first):
+            return np.empty(0)
+        classes = self.laws.shape[0]
+        tables = np.empty((len(first), classes, classes, classes))
+        class_half_sib_tasks(self.S, first, second, self.laws, 0, self.M, tables)
+        tables += (self.logw[:, None, None] + self.logw[None, :, None] + self.logw[None, None, :])[None]
+        if self.composition is not None:
+            latent = np.full((len(first), 2), -1, dtype=np.int64)
+            tables += self._composition(FAMILY, first, first, 1.0, latent, 0, self.M)[:, :, :, None]
+            tables += self._composition(FAMILY, second, second, 1.0, latent, 0, self.M)[:, :, None, :]
+        tables = tables.reshape(len(first), -1)
+        top = tables.max(axis=1)
+        return top + np.log(np.exp(tables - top[:, None]).sum(axis=1)) - self.ll[first] - self.ll[second]
+
+    def class_pair_entries(self, first, second):
+        """float64 [T]: the latent full-sib merge gain of each family pair when positive and above its half-sib link
+        gain, else -inf (the agglomeration's entries, exact)."""
+        first, second = np.array(first, dtype=np.int64).reshape(-1), np.array(second, dtype=np.int64).reshape(-1)
+        full = self.class_values(FAMILY_FAMILY, first, second) - self.ll[first] - self.ll[second]
+        entry = np.full(len(first), -np.inf)
+        positive = np.flatnonzero(full > 0)
+        if len(positive):
+            half = self.class_half_sib_gains(first[positive], second[positive])
+            entry[positive] = np.where(full[positive] > half, full[positive], -np.inf)
+        return entry
+
+    def slot_classes(self, families):
+        """(int64 [F, 2], float64 [F]): each listed family's most probable class per latent slot (-1 for a sequenced
+        slot) and that class pair's posterior probability (the classes' prior weights are equal)."""
+        classes = self.laws.shape[0]
+        best = np.full((len(families), 2), -1, dtype=np.int64)
+        probability = np.ones(len(families))
+        for j, f in enumerate(families):
+            u, v = (int(s) for s in self.slots[f])
+            if u >= 0 and v >= 0:
+                continue
+            table = np.empty((classes if u < 0 else 1, classes if v < 0 else 1))
+            class_family_table(self.S[f], self.S[f], 0.0, u, v, self.laws, self.logpost, 0, self.M, table)
+            if self.composition is not None:
+                table += self._composition(
+                    FAMILY, np.asarray([f]), np.asarray([f]), 1.0, np.asarray([[u, v]]), 0, self.M
+                )[0][: table.shape[0], : table.shape[1]]
+            weights = np.exp(table - table.max())
+            a, b = np.unravel_index(int(np.argmax(weights)), weights.shape)
+            # an all-latent family's slots are exchangeable: (a, b) and (b, a) are one class pair
+            mass = weights[a, b] + (weights[b, a] if u < 0 and v < 0 and a != b else 0.0)
+            probability[j] = mass / weights.sum()
+            if u < 0 and v < 0:
+                a, b = min(a, b), max(a, b)
+            best[j] = (a if u < 0 else -1, b if v < 0 else -1)
+        return best, probability
+
+    # --- single class-marginal evaluations (rl21) -----------------------------------------------------------------
+
+    def joined(self, g, c):
+        """Family g's class-marginal log-likelihood with sample c added (its slots as they are)."""
+        return float(self.class_values(FAMILY_SAMPLE, [g], [c], 1.0, self.slots[g])[0])
+
+    def left(self, f, c):
+        """Family f's class-marginal log-likelihood without its member c (its slots as they are)."""
+        return float(self.class_values(FAMILY_SAMPLE, [f], [c], -1.0, self.slots[f])[0])
+
+    def slotted(self, f, other, p):
+        """Family f's class-marginal log-likelihood with slot samples ``other`` (-1: latent) and p."""
+        return float(self.class_values(FAMILY, [f], slots=(other, p))[0])
 
     def screen_error(self, magnitude):
         """The bound on a screen estimate's error for a gain whose log-likelihoods have summed absolute values
@@ -98,6 +253,8 @@ class _Partition:
 
     def score(self, f):
         u, v = self.slots[f]
+        if self.class_prior is not None:
+            return float(self.class_values(FAMILY, [f], slots=(u, v))[0])
         return family_loglik_parallel(self.S[f], self.S[f], 0.0, self.law(u), self.law(v), 0, self.M)
 
     def singleton_slot_loglik(self, c, u):
@@ -107,6 +264,9 @@ class _Partition:
         """
         key = (int(c), int(u))
         value = self._singleton_slot.get(key)
+        if value is None and self.class_prior is not None:
+            value = float(self.class_values(SAMPLE, [c], slots=(u, -1))[0])
+            self._singleton_slot[key] = value
         if value is None:
             value = family_loglik_parallel(self.C[c], self.C[c], 0.0, self.logpost[u], self.logpi, 0, self.M)
             self._singleton_slot[key] = value
@@ -129,8 +289,9 @@ class _Partition:
             self.S[f] = self.C[members[0]]
             self.shared_sum[f] = True
             return
-        out = np.empty((self.M, 9))
-        step = max(1, self.parameters.sum_bytes // (len(members) * 9 * 8))
+        width = self.C.shape[2]
+        out = np.empty((self.M, width))
+        step = max(1, self.parameters.sum_bytes // (len(members) * width * 8))
         for lo in range(0, self.M, step):
             out[lo : lo + step] = self.C[members, lo : lo + step].sum(axis=0)
         self.S[f] = out
@@ -244,7 +405,10 @@ class _Partition:
         for f in live:
             self.sum_members(f)
         scores = np.empty(len(live))
-        family_logliks(self.S, self.slots, live, self.logpi, self.logpost, 0, self.M, scores)
+        if self.class_prior is not None:
+            scores[:] = self.class_values(FAMILY, live, slots=self.slots[live])
+        else:
+            family_logliks(self.S, self.slots, live, self.logpi, self.logpost, 0, self.M, scores)
         self.ll[live] = scores
         for f in live:
             saved = kept["S"].get(int(f)) if kept is not None else None
@@ -341,7 +505,10 @@ class _Partition:
             return
         families, samples = families[stale], samples[stale]
         out = np.empty(len(families))
-        join_entries(self.S, self.C, self.slots, self.ll, self.logpi, self.logpost, families, samples, out)
+        if self.class_prior is not None:
+            out[:] = self.class_values(FAMILY_SAMPLE, families, samples, 1.0, self.slots[families]) - self.ll[families]
+        else:
+            join_entries(self.S, self.C, self.slots, self.ll, self.logpi, self.logpost, families, samples, out)
         self.join[families, samples] = out
         self.join_at[families, samples] = self.version[families]
 
@@ -350,6 +517,17 @@ class _Partition:
         rows = np.asarray(rows, dtype=np.int64)
         rows = rows[self.estimate_at[rows] != self.version[rows]]
         if not len(rows):
+            return
+        if self.class_prior is not None:
+            # rl21: no screen; the estimates are the exact join gains of every sample, kept as such
+            families = np.repeat(rows, self.N)
+            exact = self.class_values(
+                FAMILY_SAMPLE, families, np.tile(self.everyone, len(rows)), 1.0, self.slots[families]
+            ).reshape(len(rows), self.N) - self.ll[rows][:, None]
+            self.estimate[rows] = exact
+            self.estimate_at[rows] = self.version[rows]
+            self.join[rows] = exact
+            self.join_at[rows] = self.version[rows][:, None]
             return
         if self._samples_screen is None:
             n, G = np.empty((self.N, self.M)), np.empty((self.N, self.M, 9), dtype=np.float32)
@@ -376,7 +554,16 @@ class _Partition:
         samples, families = samples[stale], families[stale]
         single = np.asarray([len(self.members[f]) == 1 for f in families], dtype=np.bool_)
         out = np.empty(len(samples))
-        leave_entries(self.S, self.C, self.slots, self.ll, self.logpi, self.logpost, families, samples, single, out)
+        if self.class_prior is not None:
+            out[:] = -self.ll[families]
+            many = ~single
+            out[many] += self.class_values(
+                FAMILY_SAMPLE, families[many], samples[many], -1.0, self.slots[families[many]]
+            )
+        else:
+            leave_entries(
+                self.S, self.C, self.slots, self.ll, self.logpi, self.logpost, families, samples, single, out
+            )
         self.leave[samples] = out
         self.leave_at[samples] = self.version[families]
 
@@ -393,6 +580,13 @@ class _Partition:
         every value tied with it."""
         key = (int(f), int(self.version[f]))
         out = self._slot_logliks.get(key)
+        if out is None and self.class_prior is not None:
+            k = int(np.flatnonzero(self.slots[f] == -1)[0])
+            candidates = np.flatnonzero(allowed)
+            slots = np.stack([np.full(len(candidates), int(self.slots[f][1 - k])), candidates], axis=1)
+            out = np.full(self.N, np.nan)
+            out[candidates] = self.class_values(FAMILY, np.full(len(candidates), f), slots=slots)
+            self._slot_logliks[key] = out
         if out is None:
             k = int(np.flatnonzero(self.slots[f] == -1)[0])
             law = self.law(int(self.slots[f][1 - k]))
@@ -417,7 +611,13 @@ class _Partition:
             k = int(np.flatnonzero(self.slots[f] == -1)[0])
             members = np.asarray(self.members[f], dtype=np.int64)
             values = np.empty(len(members))
-            member_parent_logliks(self.S[f], self.C, members, self.law(int(self.slots[f][1 - k])), self.logpost, values)
+            if self.class_prior is not None:
+                slots = np.stack([np.full(len(members), int(self.slots[f][1 - k])), members], axis=1)
+                values[:] = self.class_values(FAMILY_SAMPLE, np.full(len(members), f), members, -1.0, slots)
+            else:
+                member_parent_logliks(
+                    self.S[f], self.C, members, self.law(int(self.slots[f][1 - k])), self.logpost, values
+                )
             out = dict(zip(members.tolist(), values, strict=False))
             self._member_parent[key] = out
         return out

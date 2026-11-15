@@ -283,6 +283,8 @@ class ComponentSchedule:
     n_trajectories: int
     counts: np.ndarray
     callable_bins: np.ndarray
+    # int64 [T, B] bin-local class of each whole-component trajectory (PD29 family transmission); None when empty.
+    trajectory_classes: np.ndarray | None = None
 
 
 def schedules(
@@ -336,4 +338,5 @@ def schedules(
         int(len(trajectories)),
         counts,
         np.count_nonzero(present, axis=(1, 2)).astype(np.int64),
+        trajectories.astype(np.int64),
     )

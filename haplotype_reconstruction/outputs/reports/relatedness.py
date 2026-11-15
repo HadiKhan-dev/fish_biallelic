@@ -52,27 +52,60 @@ def write_relatedness(
         dict(FamilyA=product.half_sib[:, 0], FamilyB=product.half_sib[:, 1], Gain=product.half_sib_gain)
     )
     rate = getattr(product, "rate", None)  # absent from records built outside the relatedness stage
+    sources = getattr(product, "sources", None)  # the ancestry model of a two-source cohort (rl21), else None
     written = [write_frame(directory / "families.csv", frame_in_input_order(families, input_ids))]
     written.append(write_frame(directory / "half_sib_links.csv", links))
-    written.append(
-        write_json(
-            directory / "summary.json",
-            dict(
-                families=int(len(product.parents)),
-                sequenced_parent_slots=int(np.count_nonzero(product.parents >= 0)),
-                half_sib_links=int(len(product.half_sib)),
-                loglik=float(product.loglik),
-                sweeps=int(product.sweeps),
-                converged=bool(product.converged),
-                search=str(product.search),
-                search_margin=float(product.search_margin) if np.isfinite(product.search_margin) else None,
-                family_sites=int(product.family_sites),
-                chromosome_sites=dict(zip(product.contigs, product.chromosome_sites, strict=False)),
-                recombination_rate=_rate_summary(rate) if rate is not None else None,
-            ),
-        )
+    summary = dict(
+        families=int(len(product.parents)),
+        sequenced_parent_slots=int(np.count_nonzero(product.parents >= 0)),
+        half_sib_links=int(len(product.half_sib)),
+        loglik=float(product.loglik),
+        sweeps=int(product.sweeps),
+        converged=bool(product.converged),
+        search=str(product.search),
+        search_margin=float(product.search_margin) if np.isfinite(product.search_margin) else None,
+        family_sites=int(product.family_sites),
+        chromosome_sites=dict(zip(product.contigs, product.chromosome_sites, strict=False)),
+        recombination_rate=_rate_summary(rate) if rate is not None else None,
     )
+    if sources is not None:
+        summary["source_structure"] = _source_summary(product, sources)
+    written.append(write_json(directory / "summary.json", summary))
     return written
+
+
+def _source_summary(product, sources) -> dict:
+    """The two-source ancestry model as plain JSON (rl21). A sample's ancestry is its shares of the three states
+    (both homologues from source A, one from each, both from B); a latent slot's class joins its two homologue
+    types' shares of source B, as "0|0.5". Which source is called A is arbitrary."""
+    names = ["|".join(f"{sources.shares[t]:g}" for t in pair) for pair in np.asarray(sources.classes)]
+    return dict(
+        populations=int(sources.populations),
+        homologue_shares=[float(s) for s in sources.shares],
+        classes=names,
+        differentiated_site_fraction=_number(sources.differentiated_fraction),
+        strongly_differentiated_site_fraction=_number(sources.strong_fraction),
+        reads_per_site=_number(sources.depth),
+        warnings=list(sources.warnings),
+        fit_sites=int(sources.fit_sites),
+        fit_loglik=_number(sources.loglik),
+        fit_iterations=int(sources.iterations),
+        start_loglik_spread=_number(sources.start_spread),
+        samples=[
+            dict(sample=str(sample), state_shares=[round(float(x), 4) for x in shares])
+            for sample, shares in zip(product.sample_ids, np.asarray(sources.sample_shares), strict=True)
+        ],
+        families=[
+            dict(
+                family=int(f),
+                slot_classes=[names[c] if c >= 0 else None for c in slots],
+                probability=_number(p),
+            )
+            for f, (slots, p) in enumerate(
+                zip(np.asarray(sources.slot_class), sources.slot_class_probability, strict=True)
+            )
+        ],
+    )
 
 
 def _number(value) -> float | None:
@@ -95,11 +128,11 @@ def _rate_summary(rate) -> dict:
         gate_passed=bool(rate.gate_passed),
         gate_reason=rate.gate_reason,
         supplied_rate_cm_per_mb=_number(rate.supplied_rate_cm_per_mb),
-        infer_rate=bool(rate.infer_rate),
+        rate_estimate=rate.rate_estimate,
         decision=rate.decision,
         decision_reason=rate.decision_reason,
         working_rate_cm_per_mb=_number(rate.working_rate_cm_per_mb),
-        contigs_using_working_rate=list(rate.map_free_contigs) if rate.decision == "adopted" else [],
+        contigs_using_working_rate=list(rate.contigs) if rate.decision == "adopted" else [],
         warning=rate.warning or None,
         families=[
             dict(

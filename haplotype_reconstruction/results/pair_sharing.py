@@ -3,9 +3,9 @@
 A view over the public Results methods: the painting is read through its stage request (its released calls, without
 panels or the emission cache) and counted by contracts.pair_sharing. Results never opens input files, so the caller
 supplies the run's configured maps; each used contig's map must have the identity the run bound. Lengths are measured
-on the run's working map: the configured maps, or, when ``[genetic_map] infer_rate`` adopted the relatedness stage's
-rate estimate (rl20), the same map files with the estimate as fallback rate, as every map consumer of the run reads
-them. Nothing is stored and nothing feeds back. This module is kept out of the Results class so that the readers
+on the run's working map: the configured maps, or, when ``[genetic_map] rate_estimate = "adopt"`` adopted the
+relatedness stage's rate estimate (rl20), the same map files with the estimate as fallback rate, as every map consumer
+of the run reads them. Nothing is stored and nothing feeds back. This module is kept out of the Results class so that the readers
 inside every stage's code identity are unchanged.
 """
 
@@ -32,17 +32,17 @@ def painting_calls(results: Results, contig: str) -> Painting | None:
 
 
 def working_maps(results: Results, genetic_maps: GeneticMapSet) -> GeneticMapSet:
-    """The run's working maps from its configured ``genetic_maps``: unchanged without ``infer_rate`` or when the
-    relatedness stage kept the supplied rate; with an adopted rate, contigs without a map file use the estimate
-    (the rule of stages.relatedness.working_map.working_maps, read here through the public Results surface)."""
-    if not results.manifest.get("parameters", {}).get("relatedness", {}).get("infer_rate", False):
+    """The run's working maps from its configured ``genetic_maps``: unchanged unless rate_estimate = adopt and the
+    relatedness stage adopted its estimate, which then is the fallback rate (map-free contigs, beyond every file's
+    knots; the rule of stages.relatedness.working_map.working_maps, read here through the public Results surface)."""
+    if results.manifest.get("parameters", {}).get("relatedness", {}).get("rate_estimate", "veto") != "adopt":
         return genetic_maps
     families = results.relatedness()
     if families is None or families.rate is None:
-        raise InvariantError("pair sharing of a run with infer_rate needs the published relatedness record")
+        raise InvariantError("pair sharing of a run with rate_estimate = adopt needs the published relatedness record")
     if families.rate.decision != "adopted":
         return genetic_maps
-    return GeneticMapSet(genetic_maps.maps, default_rate_cm_per_mb=families.rate.working_rate_cm_per_mb)
+    return genetic_maps.with_fallback_rate(families.rate.working_rate_cm_per_mb)
 
 
 def pair_sharing(results: Results, genetic_maps: GeneticMapSet, contig: str | None = None) -> PairSharing | None:

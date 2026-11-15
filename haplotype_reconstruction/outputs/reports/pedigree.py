@@ -311,6 +311,11 @@ COLUMNS = {
         "EvidenceCall",
         "WithdrawalIteration",
         "WithholdingBasis",
+        "TransmissionCall",
+        "TransmissionWitnesses",
+        "TransmissionSegments",
+        "TransmissionScore",
+        "TransmissionAlternative",
     ],
 }
 
@@ -510,7 +515,8 @@ def render(
         if table == "sibling_guard":
             if not values:
                 # Assign empty lists after constructing the frame to preserve column dtypes.
-                for column in ("WithdrawalIteration", "WithholdingBasis"):
+                for column in ("WithdrawalIteration", "WithholdingBasis", "TransmissionWitnesses",
+                               "TransmissionSegments", "TransmissionScore"):
                     result[table][column] = np.empty(0, dtype=np.float64)
             result[table].attrs.update(
                 cleaning_iterations=guard.cleaning_iterations,
@@ -608,6 +614,8 @@ def write_pedigree(
                 eligibility=record_mapping(product.eligibility),
                 sibling_guard=record_mapping(product.guard_summary),
                 painted_junctions_per_morgan=_painted_junction_summary(rates),
+                material=None if product.material is None else record_mapping(product.material),
+                map_scale=None if product.map_scale is None else record_mapping(product.map_scale),
             ),
         )
     )
@@ -1240,6 +1248,11 @@ SIBLING_GUARD_COLUMNS = (
     "EvidenceCall",
     "WithdrawalIteration",
     "WithholdingBasis",
+    "TransmissionCall",
+    "TransmissionWitnesses",
+    "TransmissionSegments",
+    "TransmissionScore",
+    "TransmissionAlternative",
 )
 """Columns in published order.
 
@@ -1255,7 +1268,14 @@ SIBLING_GUARD_COLUMNS = (
     Call: withheld, kept or untested; withdrawals are irreversible (text).
     EvidenceCall: call under final retained-edge premises (text).
     WithdrawalIteration: first withdrawal pass, zero when retained (count).
-    WithholdingBasis: pair, family or none; first-withdrawal basis is retained (text).
+    WithholdingBasis: pair, family, transmission (PD29) or none; first-withdrawal basis is retained (text).
+    TransmissionCall: PD29 family transmission vote on guard-retained edges: kept, withheld or untested (fewer than
+        two witnesses); empty on edges the relationship guard withheld (text).
+    TransmissionWitnesses: witnesses retained for the PD29 test, after its cap (count).
+    TransmissionSegments: scored 1-Morgan component segments (count).
+    TransmissionScore: PD29 robust statistic, sum of capped segment log odds of PAR against the alternative; empty
+        when untested (nats).
+    TransmissionAlternative: REL (one more full sib) or UNR (not in the family), the better alternative (text).
 """
 
 EXCLUSION_INTERVAL_COLUMNS = ("LogELower", "LogEUpper", "LogEExact")

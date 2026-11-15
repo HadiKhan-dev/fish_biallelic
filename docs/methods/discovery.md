@@ -312,7 +312,7 @@ Cost and scope: One allele release per retained alternative plus intersection/de
 <a id="di28"></a>
 ## di28 Records, resume and stage execution
 
-Declare independent block tasks from checked evidence and parameters, publish each typed product under its derivation, and assemble results by block index. Reuse requires checked publications, not arrival order. Worker count and storage route change scheduling only.
+Declare independent block tasks from checked evidence and parameters, publish each typed product under its derivation, and assemble results by block index. Reuse requires checked publications, not arrival order. Worker count and storage route change scheduling only. A block that runs for longer than `execution.progress_minutes` snapshots its search at expansion boundaries (`SearchState.snapshot`: the archive, score cache, soft-birth memo, expansion sets, completeness, offsets, limits, omissions, counters and tie counter), and a stopped run resumes it from the last snapshot with the same released block ([eng-08](execution.md#eng-08)). The evidence-only workspaces and their fit, clustering and cavity memos are rebuilt from the inputs instead of saved: the memos are exact, so the resumed block refits what they held with equal results; only the diagnostics' fit-schedule and endpoint-family counts then count those refits.
 
 Implementation: [stages/discovery/tasks.py](../../haplotype_reconstruction/stages/discovery/tasks.py), [science/discovery/run.py](../../haplotype_reconstruction/science/discovery/run.py), [stages/discovery/records.py](../../haplotype_reconstruction/stages/discovery/records.py), [contracts/discovery.py](../../haplotype_reconstruction/contracts/discovery.py).
 

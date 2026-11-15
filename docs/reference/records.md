@@ -1298,6 +1298,76 @@ Source: [haplotype_reconstruction/contracts/likelihoods.py](../../haplotype_reco
 | `start` | `int` | — | () | 1 | See type | True | `required` |
 | `stop` | `int` | — | () | 1 | See type | True | `required` |
 
+## map_scale.MapScaleEstimate
+
+Source: [haplotype_reconstruction/contracts/map_scale.py](../../haplotype_reconstruction/contracts/map_scale.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `mode` | `str` | obs | () | 1 | str | True | `required` |
+| `working_rate_cm_per_mb` | `float` | obs | () | cM/Mb | float64 | True | `required` |
+| `map_free_contigs` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
+| `file_contigs` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
+| `estimate_cm_per_mb` | `float` | call | () | cM/Mb | float64 | True | `required` |
+| `interval_low_cm_per_mb` | `float` | call | () | cM/Mb | float64 | True | `required` |
+| `interval_high_cm_per_mb` | `float` | call | () | cM/Mb | float64 | True | `required` |
+| `at_grid_edge` | `bool` | diagnostic | () | 1 | bool | True | `required` |
+| `expected_events` | `float` | diagnostic | () | crossovers | float64 | True | `required` |
+| `material_units` | `int` | diagnostic | () | count | int64 | True | `required` |
+| `frame_morgans` | `float` | diagnostic | () | Morgans | float64 | True | `required` |
+| `frames` | `int` | diagnostic | () | count | int64 | True | `required` |
+| `targets` | `int` | diagnostic | () | count | int64 | True | `required` |
+| `consistent` | `bool` | diagnostic | () | 1 | bool | True | `required` |
+| `maximum_z` | `float` | diagnostic | () | 1 | float64 | True | `required` |
+| `critical_z` | `float` | diagnostic | () | 1 | float64 | True | `required` |
+| `dispersion` | `float` | diagnostic | () | 1 | float64 | True | `required` |
+| `adopted` | `bool` | call | () | 1 | bool | True | `required` |
+| `gate_reason` | `str` | diagnostic | () | 1 | str | True | `required` |
+| `usable` | `bool` | call | () | 1 | bool | True | `required` |
+| `usable_reason` | `str` | diagnostic | () | 1 | str | True | `required` |
+| `route` | `str` | call | () | 1 | str | True | `required` |
+| `route_reason` | `str` | diagnostic | () | 1 | str | True | `required` |
+| `family` | `NDArray[np.int64]` | diagnostic | ('F',) | 1 | int64 | True | `required` |
+| `family_estimate_cm_per_mb` | `NDArray[np.float64]` | diagnostic | ('F',) | cM/Mb | float64 | True | `required` |
+| `family_events` | `NDArray[np.float64]` | diagnostic | ('F',) | crossovers | float64 | True | `required` |
+| `family_z` | `NDArray[np.float64]` | diagnostic | ('F',) | 1 | float64 | True | `required` |
+| `family_status` | `tuple[str, ...]` | diagnostic | ('F',) | 1 | str | True | `required` |
+| `guard_pair_excluded` | `int` | diagnostic | () | count | int64 | True | `required` |
+| `guard_target_removed` | `int` | diagnostic | () | count | int64 | True | `required` |
+| `file_ratio` | `float` | diagnostic | () | 1 | float64 | True | `required` |
+| `file_ratio_low` | `float` | diagnostic | () | 1 | float64 | True | `required` |
+| `file_ratio_high` | `float` | diagnostic | () | 1 | float64 | True | `required` |
+| `file_ratio_events` | `float` | diagnostic | () | crossovers | float64 | True | `required` |
+| `warning` | `str` | report | () | 1 | str | True | `required` |
+
+## map_scale.MaterialChoice
+
+Source: [haplotype_reconstruction/contracts/map_scale.py](../../haplotype_reconstruction/contracts/map_scale.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `route` | `str` | call | () | 1 | str | True | `required` |
+| `mode` | `str` | obs | () | 1 | str | True | `required` |
+| `working_morgans` | `float` | obs | () | Morgans | float64 | True | `required` |
+| `estimate_morgans` | `float` | obs | () | Morgans | float64 | True | `required` |
+| `estimate_low_morgans` | `float` | obs | () | Morgans | float64 | True | `required` |
+| `estimate_high_morgans` | `float` | obs | () | Morgans | float64 | True | `required` |
+| `working_regime` | `str` | report | () | 1 | str | True | `required` |
+| `estimate_regime` | `str` | report | () | 1 | str | True | `required` |
+| `applied_regime` | `str` | call | () | 1 | str | True | `required` |
+| `veto_regime` | `str` | call | () | 1 | str | True | `required` |
+| `withheld_calls` | `int` | report | () | count | int64 | True | `0` |
+| `withheld_edges` | `int` | report | () | count | int64 | True | `0` |
+| `withheld_tier_a` | `int` | report | () | count | int64 | True | `0` |
+| `added_calls` | `int` | report | () | count | int64 | True | `0` |
+| `added_edges` | `int` | report | () | count | int64 | True | `0` |
+| `added_tier_a` | `int` | report | () | count | int64 | True | `0` |
+| `vetoed_calls` | `int` | report | () | count | int64 | True | `0` |
+| `vetoed_edges` | `int` | report | () | count | int64 | True | `0` |
+| `vetoed_tier_a` | `int` | report | () | count | int64 | True | `0` |
+| `straddles` | `tuple[float, ...]` | report | () | Morgans | tuple[float, ...] | True | `()` |
+| `statement` | `str` | report | () | 1 | str | True | `''` |
+
 ## observations.PairArray
 
 Source: [haplotype_reconstruction/contracts/observations.py](../../haplotype_reconstruction/contracts/observations.py).
@@ -1594,7 +1664,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
-Decision input: the run's material units, summed from every informative contig's pieces (not a record). contigs: one name per material unit (H rows, "unit:<k>"); real_contigs: the informative contigs (C) in configured order. Each unit is consecutive working-map material of about 1 Morgan (MaterialParameters) and may straddle components and contigs; every array below carries the leading unit axis H. edges: int64 [E, 2] the eligible (child, parent) edges, child-major with parents ascending (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [H, E] on this axis. zero float64 [H, N]; two, pair_explained, pair_exposed float64 [H, T] (panel rows); total_bins float64 [H]; informative_markers int64 [H]; junctions / callable_bins float64 [H, N]; junction_dyads int64 [D, 2] and transmission_log_likelihood float64 [H, D] in nats (sums of the pieces' per-bin increments); working_morgans float64 [H]: each unit's working length (Morgans of the configured working map: sum of -0.5 ln(1 - 2 theta) over its selector boundaries); it sets the unit's direction failure probability (orientation.unit_failure) and is reported. material_morgans: U, the working Morgans of the informative components (the regime reads it alone). regime: "standard" or "low_material" (material.classify of U). pieces / piece_contig / piece_unit: every contig-component piece of the units (report and audit only). contig_*: per informative contig sums of the pieces (reports: evidence summary, painted junction rates).
+Decision input: the run's material units, summed from every informative contig's pieces (not a record). contigs: one name per material unit (H rows, "unit:<k>"); real_contigs: the informative contigs (C) in configured order. Each unit is consecutive working-map material of about 1 Morgan (MaterialParameters) and may straddle components and contigs; every array below carries the leading unit axis H. edges: int64 [E, 2] the eligible (child, parent) edges, child-major with parents ascending (np.argwhere(eligibility.parents)). one, edge_matched and edge_exposed are float64 [H, E] on this axis. zero float64 [H, N]; two, pair_explained, pair_exposed float64 [H, T] (panel rows); total_bins float64 [H]; informative_markers int64 [H]; junctions / callable_bins float64 [H, N]; junction_dyads int64 [D, 2] and transmission_log_likelihood float64 [H, D] in nats (sums of the pieces' per-bin increments); working_morgans float64 [H]: each unit's working length (Morgans of the configured working map: sum of -0.5 ln(1 - 2 theta) over its selector boundaries); it sets the unit's direction failure probability (orientation.unit_failure) and is reported. material_morgans: U, the working Morgans of the informative components. regime: "standard" or "low_material" (material.classify of regime_basis_morgans). regime_morgans: the Morgans the regime reads when the material choice applies the estimated map's regime (regimes.material_choice); NaN: U itself. pieces / piece_contig / piece_unit: every contig-component piece of the units (report and audit only). contig_*: per informative contig sums of the pieces (reports: evidence summary, painted junction rates).
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
@@ -1618,6 +1688,7 @@ Decision input: the run's material units, summed from every informative contig's
 | `working_morgans` | `np.ndarray` | evidence | ('H',) | Morgans | float64 | True | `required` |
 | `material_morgans` | `float` | state | () | Morgans | float | True | `required` |
 | `regime` | `str` | state | () | 1 | str | True | `'standard'` |
+| `regime_morgans` | `float` | state | () | Morgans | float | True | `float('nan')` |
 | `real_contigs` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `()` |
 | `pieces` | `tuple[MapBlock, ...]` | obs | () | 1 | tuple[MapBlock, ...] | True | `()` |
 | `piece_contig` | `np.ndarray &#124; None` | obs | ('P',) | 1 | int64 | True | `None` |
@@ -1717,6 +1788,12 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `compared` | `np.ndarray` | evidence | ('H', 'U') | 1 | bool | True | `required` |
 | `window` | `np.ndarray &#124; None` | evidence | ('H',) | 1 | int64 | True | `None` |
 | `window_cap` | `float` | evidence | () | nats | float | True | `float('inf')` |
+| `reliability` | `float` | state | () | probability | float | True | `1.0` |
+| `coin_share` | `float` | state | () | probability | float | True | `0.0` |
+| `pair_failure` | `float` | state | () | probability | float | True | `0.0` |
+| `reference_pairs` | `int` | evidence | () | 1 | int | True | `0` |
+| `reference_units` | `int` | evidence | () | 1 | int | True | `0` |
+| `pair_log_cosh` | `np.ndarray &#124; None` | evidence | ('H', 'U') | nats | float64 | False | `None` |
 
 ## pedigree.Orientation
 
@@ -1758,6 +1835,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `callable_bins` | `np.ndarray` | evidence | ('N',) | 1 | float64 | True | `required` |
 | `pair_log_odds` | `np.ndarray` | evidence | ('U',) | 1 | float64 | True | `required` |
 | `order_statistics` | `np.ndarray` | evidence | ('N', 'N', '4') | 1 | float64 | True | `required` |
+| `pair_log_cosh` | `np.ndarray &#124; None` | evidence | ('U',) | nats | float64 | False | `None` |
 
 ## pedigree.DecisionInputs
 
@@ -2045,6 +2123,11 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `evidence_call` | `str` | call | () | 1 | str | True | `required` |
 | `withdrawal_iteration` | `int` | state | () | 1 | int | True | `required` |
 | `withholding_basis` | `str` | state | () | 1 | str | True | `required` |
+| `transmission_call` | `str` | call | () | 1 | str | True | `''` |
+| `transmission_witnesses` | `int` | state | () | count | int | True | `0` |
+| `transmission_segments` | `int` | state | () | count | int | True | `0` |
+| `transmission_score` | `float` | evidence | () | nats | float64 | True | `0.0` |
+| `transmission_alternative` | `str` | state | () | 1 | str | True | `''` |
 
 ## pedigree.GuardRecord
 
@@ -2093,6 +2176,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `retained` | `PedigreeRetained &#124; None` | state | () | 1 | PedigreeRetained &#124; None | True | `required` |
 | `reports_complete` | `bool` | diagnostic | () | 1 | bool | True | `required` |
 | `regime` | `str` | state | () | 1 | str | True | `'standard'` |
+| `material` | `MaterialChoice &#124; None` | report | () | 1 | MaterialChoice &#124; None | True | `None` |
+| `map_scale` | `MapScaleEstimate &#124; None` | report | () | 1 | MapScaleEstimate &#124; None | True | `None` |
 | `schema` | `int` | diagnostic | () | 1 | int | True | `9` |
 
 ## pedigree.PedigreeResult
@@ -2598,6 +2683,11 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `withdrawal_iteration` | `int` | report | () | 1 | int64 | True | `required` |
 | `withholding_basis` | `str` | report | () | 1 | str | True | `required` |
 | `relationship_basis` | `str` | report | () | 1 | str | True | `required` |
+| `transmission_call` | `str` | report | () | 1 | str | True | `''` |
+| `transmission_witnesses` | `int` | report | () | 1 | int64 | True | `0` |
+| `transmission_segments` | `int` | report | () | 1 | int64 | True | `0` |
+| `transmission_score` | `float` | report | () | nats | float64 | True | `float('nan')` |
+| `transmission_alternative` | `str` | report | () | 1 | str | True | `''` |
 
 ## pedigree.GuardView
 
@@ -2668,6 +2758,32 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `pair_log_likelihoods` | `np.ndarray` | evidence | ('D', '4') | nats | float64 | True | `required` |
 | `trio_log_likelihoods` | `np.ndarray` | evidence | ('T', '4') | nats | float64 | True | `required` |
 | `components` | `tuple[RelationshipChance, ...]` | evidence | () | 1 | tuple[RelationshipChance, ...] | True | `required` |
+
+## pedigree.TransmissionRequest
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `sample_ids` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
+| `contigs` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
+| `parents` | `np.ndarray` | state | ('E',) | 1 | int64 | True | `required` |
+| `children` | `np.ndarray` | state | ('E',) | 1 | int64 | True | `required` |
+| `offsets` | `np.ndarray` | state | ('E+1',) | 1 | int64 | True | `required` |
+| `members` | `np.ndarray` | state | ('M',) | 1 | int64 | True | `required` |
+
+## pedigree.TransmissionEvidence
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `contig` | `str` | obs | () | 1 | str | True | `required` |
+| `sample_ids` | `tuple[str, ...]` | obs | () | 1 | tuple[str, ...] | True | `required` |
+| `request_digest` | `str` | state | () | 1 | str | True | `required` |
+| `offsets` | `np.ndarray` | state | ('E+1',) | 1 | int64 | True | `required` |
+| `log_likelihoods` | `np.ndarray` | evidence | ('U', '3') | nats | float64 | True | `required` |
+| `morgans` | `np.ndarray` | evidence | ('U',) | Morgan | float64 | True | `required` |
 
 ## pedigree.ExclusionRequest
 
@@ -2748,6 +2864,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `observed` | `np.ndarray` | state | ('N', 'M') | 1 | bool | True | `required` |
 | `state_classes` | `np.ndarray` | state | ('N', 'B', '2') | 1 | int16 | True | `required` |
 | `information_exponent` | `np.ndarray` | state | ('N', 'B') | 1 | float64 | True | `required` |
+| `selector_fallback_bp` | `np.ndarray &#124; None` | state | ('B-1',) | bp | float64 | True | `None` |
 
 ## pedigree.PreparedChromosome
 
@@ -2760,7 +2877,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `components` | `tuple[PreparedComponent, ...]` | state | ('components',) | 1 | tuple[PreparedComponent, ...] | True | `required` |
 | `omitted_reason` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
 | `configured_morgans` | `float` | state | () | Morgans | float64 | True | `float('nan')` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `4` |
 
 ## pedigree.ChromosomeScores
 
@@ -3429,22 +3546,43 @@ Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reco
 | `gate_passed` | `bool` | call | () | 1 | bool | True | `required` |
 | `gate_reason` | `str` | diagnostic | () | 1 | str | True | `required` |
 | `supplied_rate_cm_per_mb` | `float` | obs | () | cM/Mb | float | True | `required` |
-| `infer_rate` | `bool` | obs | () | 1 | bool | True | `required` |
+| `rate_estimate` | `str` | obs | () | 1 | str | True | `required` |
 | `map_free_contigs` | `tuple[str, ...]` | obs | () | 1 | str | True | `required` |
 | `decision` | `str` | call | () | 1 | str | True | `required` |
 | `decision_reason` | `str` | diagnostic | () | 1 | str | True | `required` |
 | `working_rate_cm_per_mb` | `float` | call | () | cM/Mb | float | True | `required` |
 | `warning` | `str` | report | () | 1 | str | True | `required` |
 
+## relatedness.SourceStructure
+
+Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `populations` | `int` | obs | () | count | int | True | `required` |
+| `shares` | `tuple[float, ...]` | obs | ('T',) | share | tuple[float, ...] | True | `required` |
+| `classes` | `NDArray[np.int64]` | obs | ('K', '2') | 1 | int64 | True | `required` |
+| `sample_shares` | `NDArray[np.float64]` | call | ('N', '3') | share | float64 | True | `required` |
+| `slot_class` | `NDArray[np.int64]` | diagnostic | ('F', '2') | 1 | int64 | True | `required` |
+| `slot_class_probability` | `NDArray[np.float64]` | diagnostic | ('F',) | probability | float64 | True | `required` |
+| `differentiated_fraction` | `float` | diagnostic | () | share | float | True | `required` |
+| `fit_sites` | `int` | diagnostic | () | site | int | True | `required` |
+| `loglik` | `float` | diagnostic | () | nats | float | True | `required` |
+| `start_spread` | `float` | diagnostic | () | nats | float | True | `required` |
+| `iterations` | `int` | state | () | count | int | True | `required` |
+| `strong_fraction` | `float` | diagnostic | () | share | float | True | `float('nan')` |
+| `depth` | `float` | diagnostic | () | reads | float | True | `float('nan')` |
+| `warnings` | `tuple[str, ...]` | report | () | 1 | tuple[str, ...] | True | `()` |
+
 ## relatedness.RelatednessFamilies
 
 Source: [haplotype_reconstruction/contracts/relatedness.py](../../haplotype_reconstruction/contracts/relatedness.py).
 
-Full-sib families with aligned parent-slot/support and half-sib tables. Families are numbered by smallest member; half_sib and gains share one sorted row order. ``parents`` holds sequenced slot samples whose genotypes serve the family model as a parent's would. A slot sample may be a parent, child (the two directions tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. NaN slot support denotes a latent slot, and search_margin may be NaN when the alternate search was not measured. Canonicalisation is RL1 science. member_support / parent_support (FamilySupport, ParentSlot*Support): Morgan-weighted shares of the ``support_units`` pooled 1-Morgan units of the family sites' working map (DESIGN_417 D5). ``rate`` is the genome-wide recombination-rate estimate from these families (rl20); records built outside the relatedness stage may omit it.
+Full-sib families with aligned parent-slot/support and half-sib tables. Families are numbered by smallest member; half_sib and gains share one sorted row order. ``parents`` holds sequenced slot samples whose genotypes serve the family model as a parent's would. A slot sample may be a parent, child (the two directions tie for a one-member family), sib or another close relative. Parent calls, direction and their support belong to the pedigree stage. NaN slot support denotes a latent slot, and search_margin may be NaN when the alternate search was not measured. Canonicalisation is RL1 science. member_support / parent_support (FamilySupport, ParentSlot*Support): Morgan-weighted shares of the ``support_units`` pooled 1-Morgan units of the family sites' working map (DESIGN_417 D5). ``rate`` is the genome-wide recombination-rate estimate from these families (rl20); records built outside the relatedness stage may omit it. ``sources`` is the ancestry model of a cohort declared to descend from two source populations (rl21), None with one.
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
 | `sample_ids` | `tuple[str, ...]` | obs | ('N',) | 1 | str | True | `required` |
 | `contigs` | `tuple[str, ...]` | obs | ('C',) | 1 | str | True | `required` |
 | `family` | `NDArray[np.int64]` | call | ('N',) | 1 | int64 | True | `required` |
@@ -3462,6 +3600,7 @@ Full-sib families with aligned parent-slot/support and half-sib tables. Families
 | `search` | `str` | state | () | 1 | str | True | `''` |
 | `search_margin` | `float` | diagnostic | () | nats | float | True | `float('nan')` |
 | `rate` | `RecombinationRateEstimate &#124; None` | diagnostic | () | 1 | RecombinationRateEstimate | True | `None` |
+| `sources` | `SourceStructure &#124; None` | diagnostic | () | 1 | SourceStructure | True | `None` |
 
 ## relatedness.RelatednessDiagnostics
 
@@ -3834,6 +3973,7 @@ Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstru
 | `block` | `np.ndarray &#124; None` | obs | ('N', 'L') | 1 | bool &#124; None | True | `None` |
 | `systematic_site` | `np.ndarray &#124; None` | obs | ('L',) | 1 | bool &#124; None | True | `None` |
 | `spurious` | `np.ndarray &#124; None` | obs | ('L',) | 1 | bool &#124; None | True | `None` |
+| `structure` | `StructureTruth &#124; None` | obs | () | 1 | StructureTruth &#124; None | True | `None` |
 | `schema` | `int` | diagnostic | () | 1 | int | True | `SCHEMA` |
 
 ## pedigree.PedigreeTable
@@ -3856,3 +3996,4 @@ Source: [haplotype_reconstruction/simulation/pedigree.py](../../haplotype_recons
 | `haplotypes` | `list` | obs | () | 1 | list | True | `required` |
 | `ancestry` | `list` | obs | () | 1 | list | True | `required` |
 | `gametes` | `list` | obs | () | 1 | list | True | `required` |
+| `switches` | `dict` | obs | () | 1 | dict | True | `dict()` |

@@ -135,12 +135,20 @@ def pedigree_counts(
     return result
 
 
-def map_counts(product: Recombination, events: dict[tuple[str, str], np.ndarray], names: Sequence[str]) -> MetricRow:
+def map_counts(
+    product: Recombination,
+    events: dict[tuple[str, str], np.ndarray],
+    names: Sequence[str],
+    switches: dict[tuple[str, str], np.ndarray] | None = None,
+) -> MetricRow:
     """Recombination calls of one chromosome vs the true crossovers of its meioses.
 
     ``product``: recombination.records RecombinationProduct; ``events``: {(parent, child): sorted true crossover
     positions (bp)}. Only edges of the true pedigree count; an interval (left, right] localizes a true crossover
     when it contains one. Edge indices refer to the product's own sample axis (any order of ``names``).
+    ``switches`` (simulated structure only): {(parent, child): reference-axis switch points}; adds the count of called
+    intervals that contain no true crossover but a switch made by a rearrangement (an inversion's or misordered
+    segment's breakpoints), which reference coordinates show as transmission changes.
     """
     if getattr(product, "sample_ids", None) is not None:
         if set(map(str, product.sample_ids)) != set(names):
@@ -148,7 +156,7 @@ def map_counts(product: Recombination, events: dict[tuple[str, str], np.ndarray]
         names = tuple(map(str, product.sample_ids))
     true_observed = unmatched = 0
     expected = exposure = 0.0
-    called = called_hits = reported_hits = 0
+    called = called_hits = reported_hits = breakpoint_hits = 0
     called_widths, reported_widths = [], []
     for edge, (parent, child) in enumerate(zip(product.edge_parent, product.edge_child, strict=False)):
         raw = events.get((names[int(parent)], names[int(child)]))
@@ -164,14 +172,22 @@ def map_counts(product: Recombination, events: dict[tuple[str, str], np.ndarray]
         for index, interval in enumerate(product.edge_crossovers(edge)):
             left, right = interval[:2]
             called += 1
-            called_hits += int(np.searchsorted(raw, right, side="right") > np.searchsorted(raw, left, side="right"))
+            hit = int(np.searchsorted(raw, right, side="right") > np.searchsorted(raw, left, side="right"))
+            called_hits += hit
+            if switches is not None and not hit:
+                apparent = switches.get((names[int(parent)], names[int(child)]), np.empty(0))
+                breakpoint_hits += int(
+                    np.searchsorted(apparent, right, side="right") > np.searchsorted(apparent, left, side="right")
+                )
             called_widths.append(float(right - left))
             # Same rule on the reported interval (low, high]: a change placed at a
             # painting-bin edge can lie anywhere in the bins around that edge.
             low, high = reported[index]
             reported_hits += int(np.searchsorted(raw, high, side="right") > np.searchsorted(raw, low, side="right"))
             reported_widths.append(float(high - low))
+    extra = {} if switches is None else dict(called_intervals_at_rearrangement_switch=breakpoint_hits)
     return dict(
+        **extra,
         true_crossovers_in_inferred_exposure=true_observed,
         expected_crossovers_on_correct_edges=expected,
         correct_edge_exposure_meiosis_bp=exposure,
@@ -184,6 +200,16 @@ def map_counts(product: Recombination, events: dict[tuple[str, str], np.ndarray]
         called_interval_median_width_bp=float(np.median(called_widths)) if called_widths else None,
         reported_interval_median_width_bp=(float(np.median(reported_widths)) if reported_widths else None),
     )
+
+
+def true_switch_events(crossovers: TruthCrossovers, structure) -> dict[tuple[str, str], np.ndarray]:
+    """{(parent, child): reference-axis switch points} of one chromosome's gametes (simulated structure only)."""
+    offsets = np.asarray(structure.switch_offsets)
+    positions = np.asarray(structure.switch_positions)
+    return {
+        (parent, child): positions[offsets[gamete] : offsets[gamete + 1]]
+        for gamete, (parent, child) in enumerate(zip(crossovers.parent, crossovers.child, strict=False))
+    }
 
 
 def true_crossover_events(crossovers: TruthCrossovers) -> dict[tuple[str, str], np.ndarray]:
@@ -325,6 +351,16 @@ def phase_scores(
         raise InputError(f"{contig}: incompatible true/final allele axes")
     if not np.array_equal(np.asarray(product["positions"]), positions):
         raise InputError(f"{contig}: final positions differ from truth")
+    absent_cells = None
+    if truth.structure is not None:
+        # A haplotype inside a deletion it carries has no allele there: such cells are scored as uncalled.
+        absent = truth.structure.absent(positions).any(axis=2)
+        absent_cells = int(absent.sum())
+        if absent_cells:
+            mask = np.zeros(absent.shape, dtype=bool)
+            mask[order] = absent
+            calls = calls.copy()
+            calls[mask] = -1
     undetermined = product.get("frame_undetermined")
     breaks, offsets = product.get("phase_breaks"), product.get("phase_break_offsets")
     sample_breaks = (
@@ -344,6 +380,8 @@ def phase_scores(
     )
     total_alleles, called_alleles = int(calls.size), int(np.count_nonzero(calls >= 0))
     columns: MetricRow = dict(total_alleles=total_alleles, called_alleles=called_alleles)
+    if absent_cells is not None:
+        columns["structurally_absent_cells"] = absent_cells
     columns["called_fraction"] = called_alleles / total_alleles if calls.size else None
     del calls, true_alleles
     members = {"all": np.ones(len(names), dtype=bool)}
@@ -409,6 +447,9 @@ def evaluate_chromosome(
     if inputs.founders:
         founder_truth = np.asarray(truth.founder_haplotypes, dtype=np.int8)
         represented = represented_ancestry(truth.painting, positions, len(founder_truth))
+        if truth.structure is not None:
+            # A founder haplotype's alleles inside a deletion it carries were never sequenced anywhere.
+            represented = represented & ~truth.structure.founder_absent(positions)
         counts = copy_counts(truth.painting, positions, len(founder_truth))
         grid = dict(haplotypes=founder_truth, positions=positions)
         diversity = identity_window_diversity(truth, founder_truth)
@@ -445,7 +486,8 @@ def evaluate_chromosome(
             skipped.append(f"{contig}/family_phase")
     if automatic or "recombination" in requested:
         if inputs.recombination is not None:
-            map_metrics = map_counts(inputs.recombination, true_crossover_events(truth.crossovers), names)
+            switches = None if truth.structure is None else true_switch_events(truth.crossovers, truth.structure)
+            map_metrics = map_counts(inputs.recombination, true_crossover_events(truth.crossovers), names, switches)
             reported = {key: map_metrics.pop(key) for key in REPORTED_INTERVAL_COLUMNS}
             row.update(map_metrics)
         elif not automatic:

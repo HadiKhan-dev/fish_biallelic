@@ -30,6 +30,7 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | `serial` | bool | `false` | — | no | Discover, assemble and paint one contig at a time, each recorded before the next (short allocations). Provenance: Discover, assemble and paint one contig at a time, each recorded before the next (short allocations). |
 | `max_contigs` | int | `0` | — | no | Finish at most this many more contigs in this invocation, then stop cleanly (0 = no limit; > 0 implies serial). Provenance: Finish at most this many more contigs in this invocation, then stop cleanly (0 = no limit; > 0 implies serial). |
 | `profile` | bool | `false` | — | no | Print per-phase timings and thread-allocation traces. Provenance: Print per-phase timings and thread-allocation traces. |
+| `progress_minutes` | float | `5.0` | — | no | Minimum minutes between snapshots of a long unit's partial progress (discovery blocks, selection blocks, join batches; refinement records its fits), so that a stopped run resumes inside the unit; 0 = at every boundary. Progress is read only by the same code and inputs and removed when the unit publishes. Provenance: Minimum minutes between snapshots of a long unit's partial progress (discovery blocks, selection blocks, join batches; refinement records its fits), so that a stopped run resumes inside the unit; 0 = at every boundary. Progress is read only by the same code and inputs and removed when the unit publishes. |
 | `scratch` | path | `""` | — | no | Mapped scratch and kernel-cache base; defaults to the checkpoint filesystem. Provenance: Mapped scratch and kernel-cache base; defaults to the checkpoint filesystem. |
 ## input
 
@@ -38,6 +39,7 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | `kind` | str | `"vcf"` | vcf, simulation | yes | Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from a file panel or a coalescent genealogy. Provenance: Observations: an indexed VCF/BCF with FORMAT/AD, or a simulation from a file panel or a coalescent genealogy. |
 | `vcf` | path | `""` | — | yes | Input VCF/BCF (kind = vcf). Provenance: Input VCF/BCF (kind = vcf). |
 | `contigs` | strings | `[]` | — | yes | Contigs to analyse, in order (required unless the preset lists them). Provenance: Contigs to analyse, in order (required unless the preset lists them). |
+| `source_populations` | int | `1` | — | yes | Source populations the cohort descends from: 1 (default) one population; 2 a cross between two diverged populations or species, such as an interspecies F2. With 2 the relatedness families give every unsequenced parent an ancestry class (pure, first-generation hybrid, backcross, later generation) with source-specific allele frequencies, estimated from the genotype likelihoods alone (rl21). Validated at about 5 reads per site for crosses whose parents are pure or first-generation hybrids. At about 1 read it merges sibships whose parents are sibs around an aunt or uncle and is not shown to be better than 1; unsequenced later-generation parents (F3 sibships and later) are not followed along the map. Declare 2 only for a real two-source cross: for a one-population cohort, even one from few founders, it splits sibships. The stage warns in the run log and in relatedness/summary.json at low depth and when the fitted sources hardly differ. Provenance: Source populations the cohort descends from: 1 (default) one population; 2 a cross between two diverged populations or species, such as an interspecies F2. With 2 the relatedness families give every unsequenced parent an ancestry class (pure, first-generation hybrid, backcross, later generation) with source-specific allele frequencies, estimated from the genotype likelihoods alone (rl21). Validated at about 5 reads per site for crosses whose parents are pure or first-generation hybrids. At about 1 read it merges sibships whose parents are sibs around an aunt or uncle and is not shown to be better than 1; unsequenced later-generation parents (F3 sibships and later) are not followed along the map. Declare 2 only for a real two-source cross: for a one-population cohort, even one from few founders, it splits sibships. The stage warns in the run log and in relatedness/summary.json at low depth and when the fitted sources hardly differ. |
 ## quality
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
@@ -51,7 +53,7 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 |---|---|---|---|---|---|
 | `rate_cm_per_mb` | float | `5.0` | — | yes | Fallback recombination rate (cM/Mb) without a map or beyond its knots. Provenance: Fallback recombination rate (cM/Mb) without a map or beyond its knots. |
 | `file` | path | `""` | — | yes | Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). Provenance: Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV). |
-| `infer_rate` | bool | `false` | — | yes | Use the genome-wide recombination rate estimated from full-sib families in the relatedness stage as the fallback rate of contigs without a map file, when its gate passes, rate_cm_per_mb lies outside its 95 % interval and at least five informative families were used. Off (keep the supplied rate): the estimate is reported, with a warning when rate_cm_per_mb lies outside the interval, and nothing downstream changes. Map files are always kept. Provenance: Use the genome-wide recombination rate estimated from full-sib families in the relatedness stage as the fallback rate of contigs without a map file, when its gate passes, rate_cm_per_mb lies outside its 95 % interval and at least five informative families were used. Off (keep the supplied rate): the estimate is reported, with a warning when rate_cm_per_mb lies outside the interval, and nothing downstream changes. Map files are always kept. |
+| `rate_estimate` | str | `"veto"` | veto, ignore, adopt | yes | What the two genome-wide recombination-rate estimates (from full-sib families before discovery; from the paintings before the pedigree) may change. Both stand in only for the fallback rate (rate_cm_per_mb: contigs without a map file and stretches beyond a file's knots); map-file distances are never rescaled. veto: the configured map is the map of every stage and the pedigree releases only what both the configured map's and the painting estimate's material regimes release (it can only withhold). ignore: the configured map everywhere, pedigree included; the estimates are reported, with a warning when they disagree with rate_cm_per_mb, and nothing reads them. adopt: the family estimate becomes the fallback rate of every stage when its gate passes, rate_cm_per_mb lies outside its 95 % interval and at least five informative families were used; the pedigree then applies the painting estimate's regime alone when its interval excludes the working rate, else releases only what both maps' regimes release. Provenance: What the two genome-wide recombination-rate estimates (from full-sib families before discovery; from the paintings before the pedigree) may change. Both stand in only for the fallback rate (rate_cm_per_mb: contigs without a map file and stretches beyond a file's knots); map-file distances are never rescaled. veto: the configured map is the map of every stage and the pedigree releases only what both the configured map's and the painting estimate's material regimes release (it can only withhold). ignore: the configured map everywhere, pedigree included; the estimates are reported, with a warning when they disagree with rate_cm_per_mb, and nothing reads them. adopt: the family estimate becomes the fallback rate of every stage when its gate passes, rate_cm_per_mb lies outside its 95 % interval and at least five informative families were used; the pedigree then applies the painting estimate's regime alone when its interval excludes the working rate, else releases only what both maps' regimes release. |
 ## painting
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
@@ -134,6 +136,7 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | `stretch_miss` | float | `0.8` | — | yes | Miss probability inside a low-sensitivity stretch. Provenance: Miss probability inside a low-sensitivity stretch. |
 | `miss` | float | `0.012` | — | yes | Baseline non-reference miss probability. Provenance: Baseline non-reference miss probability. |
 | `miss_sample_cv` | float | `0.5` | — | yes | Sample miss-factor coefficient of variation. Provenance: Sample miss-factor coefficient of variation. |
+| `hom_alt_miss_factor` | float | `0.02` | — | yes | Miss probability of a homozygous-ALT cell relative to a heterozygote (callers rarely miss hom-ALT). Provenance: Miss probability of a homozygous-ALT cell relative to a heterozygote (callers rarely miss hom-ALT). |
 | `call_min_alt_fraction` | float | `0.15` | — | yes | Minimum ALT fraction calling a hom-reference cell. Provenance: Minimum ALT fraction calling a hom-reference cell. |
 | `block_band` | float | `0.5` | — | yes | Relative logarithmic depth-band width. Provenance: Relative logarithmic depth-band width. |
 | `balance_dispersion` | float | `0.05` | — | yes | Beta-binomial heterozygote intraclass correlation. Provenance: Beta-binomial heterozygote intraclass correlation. |
@@ -141,6 +144,27 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | `systematic_lo` | float | `0.1` | — | yes | Lower systematic ALT-error probability. Provenance: Lower systematic ALT-error probability. |
 | `systematic_hi` | float | `0.4` | — | yes | Upper systematic ALT-error probability. Provenance: Upper systematic ALT-error probability. |
 | `regions` | regions | `[]` | — | yes | Intervals {contig, start, end, factor}; half-open bp bounds, no overlaps. Provenance: Intervals {contig, start, end, factor}; half-open bp bounds, no overlaps. |
+## simulation.structure
+
+| Key | Kind | Default | Choices | Affects results | Meaning and provenance |
+|---|---|---|---|---|---|
+| `preset` | str | `""` | cichlid | yes | Named structure preset; explicit keys override it. Provenance: Named structure preset; explicit keys override it. |
+| `enabled` | bool | `false` | — | yes | Generate structural variants (inversions, deletions, duplications, misorder). Provenance: Generate structural variants (inversions, deletions, duplications, misorder). |
+| `inversion_rate` | float | `0.22727272727272727` | — | yes | Expected large inversions per contig (Poisson). Provenance: Expected large inversions per contig (Poisson). |
+| `inversion_span_lo` | float | `0.45` | — | yes | Smallest large-inversion span, as a fraction of the contig. Provenance: Smallest large-inversion span, as a fraction of the contig. |
+| `inversion_span_hi` | float | `0.65` | — | yes | Largest large-inversion span, as a fraction of the contig. Provenance: Largest large-inversion span, as a fraction of the contig. |
+| `small_inversion_rate_per_mb` | float | `0.0` | — | yes | Small inversions per Mb. Provenance: Small inversions per Mb. |
+| `small_inversion_mean_bp` | float | `10000.0` | — | yes | Mean exponential small-inversion length in bp. Provenance: Mean exponential small-inversion length in bp. |
+| `deletion_rate_per_mb` | float | `40.0` | — | yes | Deletions (reference sequence a haplotype lacks) per Mb. Provenance: Deletions (reference sequence a haplotype lacks) per Mb. |
+| `deletion_mean_bp` | float | `3000.0` | — | yes | Mean deletion length in bp. Provenance: Mean deletion length in bp. |
+| `duplication_rate_per_mb` | float | `5.0` | — | yes | Duplications (an extra copy absent from the reference) per Mb. Provenance: Duplications (an extra copy absent from the reference) per Mb. |
+| `duplication_mean_bp` | float | `2000.0` | — | yes | Mean duplicated-segment length in bp. Provenance: Mean duplicated-segment length in bp. |
+| `dispersed_fraction` | float | `0.5` | — | yes | Share of duplications whose copy lies elsewhere (else tandem). Provenance: Share of duplications whose copy lies elsewhere (else tandem). |
+| `paralog_divergence` | float | `0.02` | — | yes | Share of a duplicated segment's sites where the copy differs. Provenance: Share of a duplicated segment's sites where the copy differs. |
+| `misorder_rate_per_mb` | float | `0.012` | — | yes | Reference segments in the wrong orientation, place or chromosome (every haplotype), per Mb. Provenance: Reference segments in the wrong orientation, place or chromosome (every haplotype), per Mb. |
+| `misorder_mean_bp` | float | `500000.0` | — | yes | Mean misordered-segment length in bp. Provenance: Mean misordered-segment length in bp. |
+| `carrier_frequency` | float | `0.5` | — | yes | File sources: probability that a source haplotype carries a polymorphic variant (coalescent: genealogy). Provenance: File sources: probability that a source haplotype carries a polymorphic variant (coalescent: genealogy). |
+| `variants` | variants | `[]` | — | yes | Explicit variants {kind, contig, start, end, target, carriers}; they replace the random ones on their contig. Provenance: Explicit variants {kind, contig, start, end, target, carriers}; they replace the random ones on their contig. |
 ## simulation
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
@@ -158,7 +182,7 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 
 | Key | Kind | Default | Choices | Affects results | Meaning and provenance |
 |---|---|---|---|---|---|
-| `preset` | str | `""` | realistic, short_read_cohort | yes | Generating read preset; explicit read keys override its values. Provenance: Generating read preset; explicit read keys override its values. |
+| `preset` | str | `""` | realistic, short_read_cohort, long_read_cohort | yes | Generating read preset; explicit read keys override its values. Provenance: Generating read preset; explicit read keys override its values. |
 | `error_rate` | float | `0.02` | — | yes | Generating sequencing error rate. Provenance: Generating sequencing error rate. |
 | `depth_cv` | float | `0.0` | — | yes | Between-sample depth coefficient of variation. Provenance: Between-sample depth coefficient of variation. |
 | `heterozygote_alt_probability` | float | `0.5` | — | yes | Alternate-read probability in heterozygotes. Provenance: Alternate-read probability in heterozygotes. |
@@ -174,6 +198,19 @@ Empty strings represent an unset optional value. A default is not necessarily a 
 | `region_depth_window_bp` | int | `0` | — | yes | Regional depth window width in bp; positive when regional CV is nonzero. Provenance: Regional depth window width in bp; positive when regional CV is nonzero. |
 | `site_loss_fine_fraction` | float | `0.0` | — | yes | Impaired share of independent fine windows; uniform retained share, multiplied without renormalisation; 0 = off. Provenance: Impaired share of independent fine windows; uniform retained share, multiplied without renormalisation; 0 = off. |
 | `site_loss_fine_window_bp` | int | `0` | — | yes | Fine-loss window width in bp; positive when fine loss is nonzero. Provenance: Fine-loss window width in bp; positive when fine loss is nonzero. |
+| `long_read_mean_bp` | float | `0.0` | — | yes | Mean long-read length in bp; > 0 samples single long reads (lognormal lengths) with per-read errors; 0 = off. Provenance: Mean long-read length in bp; > 0 samples single long reads (lognormal lengths) with per-read errors; 0 = off. |
+| `long_read_length_sigma` | float | `0.9` | — | yes | Log-scale SD of the lognormal long-read length law. Provenance: Log-scale SD of the lognormal long-read length law. |
+| `read_quality_mean` | float | `20.0` | — | yes | Mean per-read Phred accuracy (long reads; error 10^(-Q/10) per base). Provenance: Mean per-read Phred accuracy (long reads; error 10^(-Q/10) per base). |
+| `read_quality_sd` | float | `4.0` | — | yes | SD of per-read Phred accuracy across reads. Provenance: SD of per-read Phred accuracy across reads. |
+| `substitution_share` | float | `0.35` | — | yes | Share of long-read errors that are substitutions (rest: indels). Provenance: Share of long-read errors that are substitutions (rest: indels). |
+| `context_sites` | float | `0.0` | — | yes | Share of sites where one allele extends a homopolymer (long reads). Provenance: Share of sites where one allele extends a homopolymer (long reads). |
+| `context_factor` | float | `10.0` | — | yes | Indel-rate multiplier on the run-extending allele at a context site. Provenance: Indel-rate multiplier on the run-extending allele at a context site. |
+| `context_convert` | float | `0.5` | — | yes | Share of context indel errors read as the other allele (rest: no base). Provenance: Share of context indel errors read as the other allele (rest: no base). |
+| `reference_bias` | float | `0.0` | — | yes | Loss hazard scale of a long read's base: 1 - exp(-bias x k^power), k = ALT alleles of its homologue nearby. Provenance: Loss hazard scale of a long read's base: 1 - exp(-bias x k^power), k = ALT alleles of its homologue nearby. |
+| `reference_bias_window_bp` | int | `0` | — | yes | Half-width in bp of the reference-bias ALT-count window. Provenance: Half-width in bp of the reference-bias ALT-count window. |
+| `reference_bias_power` | float | `1.0` | — | yes | Exponent of the ALT count in the reference-bias loss hazard. Provenance: Exponent of the ALT count in the reference-bias loss hazard. |
+| `reference_pull` | float | `0.0` | — | yes | Mean probability that a long read's ALT base is reported as REF. Provenance: Mean probability that a long read's ALT base is reported as REF. |
+| `foreign_read_share` | float | `0.0` | — | yes | Share of long reads from another sequenced sample (contamination). Provenance: Share of long reads from another sequenced sample (contamination). |
 
 ## Presets
 

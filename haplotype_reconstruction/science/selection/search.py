@@ -25,6 +25,8 @@ import numpy as np
 
 from ...contracts.selection import PackedFit, PackedPanel, RoundTrace, SearchOutcome, SelectionMemo
 from ...core.digest import array_digest, json_digest
+from ...core.errors import InvariantError
+from ...core.progress import Progress
 from ...core.ties import TieCounter, census, census_enabled, fixed_policy, improves, tie_classes
 from .diagnostics import CensusSink
 from .fit import PathFit, canonical, fit_fixed, fit_posteriors, unique_rows
@@ -624,6 +626,33 @@ def fitted_start(
     return result
 
 
+def _search_start(start, fit_panel, objective, incumbent_fit, tolerance, collect, census_key, census_sink):
+    """The fit a search starts from: the start's, or the incumbent's (LS14). Returns (search_start label, fit,
+    start_was_incumbent_panel, empty trace, first round)."""
+    search_start = "start"
+    fit = fit_panel(start)
+    start_was_incumbent_panel = False
+    if incumbent_fit is not None:
+        if collect:
+            census("ls.start", f"{census_key}/start", (-objective(incumbent_fit), -objective(fit)), sink=census_sink)
+        if np.array_equal(fit.panel, incumbent_fit.panel):
+            # The start's fit reached the incumbent's founders: the two fits differ only by EM
+            # residuals, so continue from the incumbent fit (deterministic), unless the start's
+            # frequencies are better by more than the decision tolerance.
+            start_was_incumbent_panel = True
+            if not improves(objective(fit), objective(incumbent_fit), tolerance):
+                fit = incumbent_fit
+                search_start = "incumbent"
+        elif improves(objective(incumbent_fit), objective(fit), tolerance):
+            # Climbing from the context start back to a better incumbent dominated the context
+            # rounds' cost; explore the incumbent's neighbourhood instead (its refit only when that
+            # improves it by more than the decision tolerance, e.g. an unconverged incumbent).
+            trial = fit_panel(incumbent_fit.panel, incumbent_fit.frequencies)
+            fit = trial if improves(objective(trial), objective(incumbent_fit), tolerance) else incumbent_fit
+            search_start = "incumbent"
+    return search_start, fit, start_was_incumbent_panel, [], 0
+
+
 def search_panel(
     start: np.ndarray,
     bank: np.ndarray,
@@ -637,13 +666,23 @@ def search_panel(
     census_key: str | None = None,
     reverse: bool,
     census_sink: CensusSink | None = None,
+    progress: Progress | None = None,
 ) -> SearchOutcome:
     """Local search from ``start``, or from ``incumbent`` (a previous round's selected outcome of
     the same block) when the start's fit reaches the incumbent's panel or the incumbent scores
     better by more than the decision tolerance; reuses the incumbent's whole search when the
     inputs are identical. ``founders``: the assembled context's founders in this block (context
     rounds); None codes every row as free. ``ties``: counts the decisions taken inside a tie class
-    (and guard events); ``census_key``: the block's key for the valley census (core.ties)."""
+    (and guard events); ``census_key``: the block's key for the valley census (core.ties).
+
+    ``progress`` (core.progress): at the start of every round the search offers its "search" frame: the round
+    number, the current fit exactly as held (with or without its posterior arrays, which decide whether the next
+    round completes it by an E-step), the trace, the start labels and the work counters. The memo and tie
+    counter it updates are the caller's (select_block's "block" frame). A resumed search continues from that
+    round. The search-local fit, score and completion caches are not saved: with the memo restored, a fit or
+    score the uninterrupted search found in them is the memo's entry of identical value (fit hits are stripped
+    either way; completion is a deterministic E-step of (panel, frequencies)), so only the work and memo-hit
+    counters (execution observations) can differ."""
     tolerance = search_config.decision_tolerance
     ties = TieCounter() if ties is None else ties
     collect = census_key is not None and census_enabled(sink=census_sink)
@@ -731,30 +770,33 @@ def search_panel(
     def objective(value: PathFit) -> float:
         return selection_objective(value, context)
 
-    search_start = "start"
-    fit = fit_panel(start)
-    start_was_incumbent_panel = False
-    if incumbent_fit is not None:
-        if collect:
-            census("ls.start", f"{census_key}/start", (-objective(incumbent_fit), -objective(fit)), sink=census_sink)
-        if np.array_equal(fit.panel, incumbent_fit.panel):
-            # The start's fit reached the incumbent's founders: the two fits differ only by EM
-            # residuals, so continue from the incumbent fit (deterministic), unless the start's
-            # frequencies are better by more than the decision tolerance.
-            start_was_incumbent_panel = True
-            if not improves(objective(fit), objective(incumbent_fit), tolerance):
-                fit = incumbent_fit
-                search_start = "incumbent"
-        elif improves(objective(incumbent_fit), objective(fit), tolerance):
-            # Climbing from the context start back to a better incumbent dominated the context
-            # rounds' cost; explore the incumbent's neighbourhood instead (its refit only when that
-            # improves it by more than the decision tolerance, e.g. an unconverged incumbent).
-            trial = fit_panel(incumbent_fit.panel, incumbent_fit.frequencies)
-            fit = trial if improves(objective(trial), objective(incumbent_fit), tolerance) else incumbent_fit
-            search_start = "incumbent"
-    trace = []
+    saved = None if progress is None else progress.take("search")
+    if saved is not None:
+        if saved["input_key"] != input_key:
+            raise InvariantError("selection search progress belongs to another search")
+        search_start, fit, trace = saved["search_start"], saved["fit"], list(saved["trace"])
+        start_was_incumbent_panel, first_round = saved["start_was_incumbent_panel"], saved["round"]
+        work.update(saved["work"])
+    else:
+        search_start, fit, start_was_incumbent_panel, trace, first_round = _search_start(
+            start, fit_panel, objective, incumbent_fit, tolerance, collect, census_key, census_sink
+        )
+
+    def round_state():
+        return dict(
+            input_key=input_key,
+            round=round_index,
+            search_start=search_start,
+            fit=fit,
+            trace=tuple(trace),
+            start_was_incumbent_panel=start_was_incumbent_panel,
+            work=dict(work),
+        )
+
     round_backstop = False
-    for round_index in itertools.count():
+    for round_index in itertools.count(first_round):
+        if progress is not None:
+            progress.boundary("search", round_state)
         if round_index >= search_config.round_backstop(len(fit.panel)):
             round_backstop = True
             break

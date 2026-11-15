@@ -59,7 +59,9 @@ Limitations of the rule:
   cut down by k in true Morgans: with a configured rate 2.5 times the true one, 12 configured Morgans are about
   4.8 true Morgans, where the released thresholds release relatives as parents (a sib-rich parent-free design read
   on such a map with the cut at 9.5 released 4.5 edges per 100 parentless children). The cuts hold only on a
-  working map in true Morgans: a measured map or a correct genome-wide rate.
+  working map in true Morgans: a measured map or a correct genome-wide rate. Since 4.19 the painting-based
+  estimate of the fallback rate guards the regime ([map scale](#map-scale)): by default a call is released only when
+  the configured map's and the estimated map's regimes both release it.
 - **Sib-rich parent-free designs.** Where no parent is sequenced and full-sib families are large, both tiers can
   release a sibling or other relative as a parent at any material level: in the calibration Tier A released 2, 2
   and 1 such edges at 12-13, 13-15 and at least 15 Morgans, so no higher Tier A cut removes them. An end-to-end
@@ -85,8 +87,9 @@ exactly. Retained M1 uses raw piece scores. Other identities share the child's f
 by bins, so the floors of a child sum to its genome floor. This is an imputed profile, not raw M1. Per-contig
 reports (evidence summary, painted junctions) are built from the pieces before they are summed into units.
 
-The M2 panel's exclusion guarantee covers the full-data and leave-one-chromosome-out relevance fits only, not every
-unit omission or bootstrap fit; capped/incomplete diagnostics remain. Resampling is conditional on full-data
+The M2 panel holds every retained eligible pair of a child below the per-child cap, so the full fit, the unit
+omissions and the bootstrap fits all see the same complete set of two-parent configurations of retained parents; a
+capped child's panel is incomplete in every fit and flagged. Resampling is conditional on full-data
 preparations, source factors and schedules: later increments still depend on the filter states propagated through
 an omitted unit. It measures conditional stability, not calibrated confidence or independent segregation.
 
@@ -105,6 +108,140 @@ Implementation: [science/pedigree/regimes.py](../../haplotype_reconstruction/sci
 [science/pedigree/blocks.py](../../haplotype_reconstruction/science/pedigree/blocks.py),
 [science/pedigree/stacking.py](../../haplotype_reconstruction/science/pedigree/stacking.py),
 [science/shared/material.py](../../haplotype_reconstruction/science/shared/material.py).
+
+<a id="map-scale"></a>
+## Map scale: the material regime under an estimated fallback rate
+
+The cuts above are in true Morgans, but U is measured on the working map. Where the working map is the fallback rate
+(`[genetic_map] rate_cm_per_mb`: contigs without a map file, and stretches beyond a map file's knots), the pedigree
+checks that rate against a painting-based estimate before it chooses the regime. The estimate is the late of the
+run's two rate estimates ([rl20](relatedness.md#rl20) is the early one): it never changes the working map of any
+stage, only which regime's rule the pedigree applies.
+
+**Estimate (er).** One genome-wide rate r in cM/Mb, from the released paintings of the relatedness families of at
+least two members. For each member (the target) and painting component, the other carriers (members and the
+family's sequenced slot samples, firm stage-1 tracks only) define a frame wherever they show four parental classes
+with four distinct bin keys and exactly one supported 2 + 2 split; consecutive frames are linked by shared classes
+into the two parents' homologue chains (a link across an undetermined stretch needs both classes shared). The frame's
+emission is the painting's own pair emission of the target for the four full-sib configurations (power 1, ratios to
+their maximum), mixed with a misfit column (the mean over all state pairs) at a weight delta fitted by maximum
+likelihood on the 4-state chain. The estimate maximises the composite likelihood of every frame sequence under an
+error-run chain: the hidden pair (true transmission state, shown state), the true state following the Haldane chain
+of the target's two meioses at r per Morgan of physical distance x 1e-8, error runs starting with probability eps and
+ending with probability xi per frame (profiled; eps = 0 is the plain chain). A relationship guard first removes
+members whose evidence is not full-sib like: a pair test (the full-sib IBD-count chain must beat the half-sib and
+parent-offspring chains by `guard_nats`, each at its own best rate; a member is kept when it passes with at least half
+of the others) and an iterative target test (tracks that may leave the parents' classes; a removal needs a gain above
+`guard_nats` and at least `target_share` posterior non-full-sib frames; the parental switches follow the same Haldane
+process in both models, so the test does not select on a sib's crossover count).
+
+- **What it estimates.** The event-weighted mean recombination rate of the meioses of the sibships that give frames.
+  In a multi-generation cross those may be one generation's meioses (in a real cichlid cross 175 of 181 expected
+  events came from two sibships). This is a statement about which sibships give frames, not about parentage.
+- **Bias, stated honestly (review3 MUST-FIX 1).** On held-out simulations the adopted estimates read 0.85 to 1.08 of
+  the generating rate. The bias depends on the rate: about -5 % at 5 to 8 cM/Mb, but approximately unbiased at
+  2 cM/Mb, where seven genomes read 0.95 to 1.08 (mean +0.2 %; up to +8 %). Rerunning those seven genomes with a
+  correct configured map (2 instead of 5 cM/Mb; same meioses) moved the estimate by -0.4 % on average (-3.2 % to
+  +2.7 %): the high readings at 2 cM/Mb are the estimator's own, not a pull towards a too-long configured map. The
+  simulations follow Haldane's model; under crossover interference the chain over-reads by about 2 to 5 % (an
+  untested bias on real data, in the risky direction). The estimate is therefore not a conservative (low) reading at
+  low rates, which is why it may only veto by default and is adopted only under test-agree.
+- **Family consistency.** z_f = d_f / sqrt(phi_f (v_f + v_rest)), d_f the log difference between a family's own
+  estimate and the others', v the profile-curvature variances, phi_f the family-within-contig deviance per degree of
+  freedom of the other families (floored at 1), referred to t(df) at a Bonferroni level `consistency_alpha`; the most
+  deviant family is dropped above `drop_margin` z_crit (three or more families) and the test repeats; any remaining
+  |z| > z_crit makes the estimate inconsistent. Null calibration: 1 of 65 simulated genomes refused (upper bound 7 %).
+  Contigs are the strata of the dispersion only.
+- **Interval.** A crossed percentile bootstrap (`bootstrap_replicates`, fixed `bootstrap_seed`) of families and
+  equal-material units: the material units of the working map along the frame-bearing span of the map-free contigs
+  (configured order, no gap between contigs; `MaterialParameters.unit_morgans` and `tail_morgans`, the pedigree's
+  own), from the exact split of every sequence's forward log-likelihood into per-frame predictive terms summed per
+  unit. At least `minimum_interval_units` units and two families are needed. No count of chromosomes decides
+  anything (owner, 13 Nov 2026; rev 5 required five contigs and bootstrapped contigs).
+- **Adopted** (may replace the working map's regime in adopt mode): not at a grid edge, at least `minimum_events`
+  expected crossovers on the kept families (2 x frame span x r), 95 % half-width at most `maximum_half_width`, at
+  least two families with frames, consistent. **Usable** (may veto): consistent, two families, not at a grid edge, at
+  least `usable_minimum_events` expected crossovers and an interval whose lower end lies above the grid floor.
+
+**Map files.** The estimate is fitted on the map-free contigs only: it must estimate the fallback rate, the quantity
+it stands in for, and file contigs (another, varying rate) would contaminate it. Frames on map-file contigs, inside
+the files' knots, give a diagnostic instead: the same chain on file-map coordinates estimates the ratio of the painted
+crossover rate to the file map's, with a warning when its interval excludes 1. A genome fully covered by map files has
+the same map under every mode, so the veto never acts there.
+
+**Routes.** `[genetic_map] rate_estimate` (command line `--rate-estimate`):
+
+| Mode | Route | Regime |
+|---|---|---|
+| `ignore` | working_map | the working map's alone; the estimate and its warnings are reported, nothing reads them (the forced configured map) |
+| `veto` (default) | both_maps when the estimate is adopted or usable, else working_map | a call is released only when both maps' regimes release it |
+| `adopt` | estimate when adopted and its interval excludes the working rate (test-agree, review3 MUST-FIX 2); both_maps when adopted with an interval covering the working rate, or usable; else working_map | the estimated map's regime alone on the estimate route |
+
+The working rate is the working map's fallback rate: `rate_cm_per_mb`, or in adopt mode the early estimate when
+[rl20](relatedness.md#rl20) adopted it. Both estimates are fitted on paintings made under that one working map.
+
+**Material under the estimated map.** U is recomputed from the same prepared layouts: preparation records, for every
+selector boundary, the part of its bin-centre interval measured by the fallback rate (all of it on a map-free contig,
+the stretches beyond the knots otherwise; `PreparedComponent.selector_fallback_bp`), and each boundary's working
+Morgans d becomes d + (r - r_working) 1e-8 x that length, its switch probability recomputed as preparation computes it.
+The same is done at the interval's ends: when the cut-offs lie inside [U(lower end), U(upper end)] the run log, the
+pedigree summary and the material statement carry a straddle warning, whatever the route (the decision uses the point
+estimate).
+
+**Which pedigree quantities read the estimated map.** Only the regime: U against the assessable, standard and Tier A
+cut-offs. The material units, the genome axis, unit weights, the D7 floors, the D8 orientation caps and the exclusion
+weights keep the working map. The cut-offs are what the calibration fixed in true Morgans and what the map-scale
+studies measured; moving the rest would need its own validation and a second scoring of every contig. In adopt mode
+the early estimate already moves the whole working map when it is confident.
+
+**Both maps: the explicit intersection.** When the two maps put U in different regimes, the lower regime's rule runs
+the whole pedigree and the higher regime's rule runs to its released calls (no publication); a Tier B call is
+released only when the higher regime releases the same call (observed-parent count and parents), and an edge only
+when both release it. The intersection is computed, not assumed: low-material Tier B is not a subset of standard
+Tier B (minimum units 1 against 3, bootstrap cut-offs 0.95 against 0.70; non-nested on 363 of 2,026 calibration
+layouts). Withheld calls become unresolved with status `tier_b_material_veto` (release evidence `material_veto`);
+edges released by both survive as marginal edges, as after the sibling guard; the views keep the parents before the
+veto. A not-assessable lower regime gives the not-assessable product. The route can only withhold relative to the
+working map's regime: it never releases a call that regime does not release. When the lower regime is the estimated
+map's, its own rule usually withholds what the working map's regime alone would release (the veto pass then has
+nothing left to withhold); the report therefore counts what the product withholds relative to the working map alone,
+whichever rule withheld it, and the veto pass's share separately. On the estimate route (adopt) the working map's
+regime also runs to its released calls, only to be counted (the product can then also add calls).
+
+**Reports.** The run log prints the estimate, its route and its warning once, in every mode, then the material
+statement: the regime under the working map alone and under the estimated map, the applied regime, and the Tier B
+calls, Tier B edges and Tier A calls the product withholds (and adds) relative to the working map alone.
+`pedigree/summary.json` carries `material` (U of each map, `working_regime`, `estimate_regime`, `applied_regime`,
+`veto_regime`, the `withheld_*` and `added_*` counts relative to the working map alone, the veto pass's `vetoed_*`
+share, straddled cut-offs and the statement; the counts are -1 when the product is not assessable but the working map
+alone is, since its releases are then not computed) and, with `veto` and `adopt`, `map_scale` (the estimate, interval,
+gate, route, family rows, file-map ratio and warning: record `pedigree/map_scale`; null with `ignore`, where nothing
+in the pedigree reads the record).
+
+**Evidence.** On 195 lab genomes the release code reproduces the rev-5 lab estimator's (contig, family) tables to
+4e-12 nats and every rev-5 gate decision. With the release gate (families x units, no contig rule): adopted estimates
+read 0.85 to 1.08 of the generating rate on the development sets (46), held-out sets (23) and single- and
+two-chromosome cells (15); none above 1.10; no interval's lower end above the generating rate. Usable-only estimates
+(veto) read 0.70 to 1.33; every interval covered the generating rate. The intertwined-families case that rev 5's
+contig rule guarded (three contigs, 30 expected crossovers, interval at the grid floor) is neither adopted nor usable.
+
+Cost: frames, guard and fit in seconds to minutes on 8 cores (35 to 225 s on simulated genomes of 66 samples); memory
+O(relevant samples x S^2 x B) for the emission caches of every component, and the target test's 25-symbol emissions.
+No dependence on K beyond the painting's S states.
+
+Parameters by name: `mode`, `guard_nats`, `target_share`, `target_iterations`, `rate_grid`, `coarse_rate_grid_spec`,
+`misfit_weights`, `pair_error_rates`, `target_entry_rates`, `target_exit_rates`, `error_run_starts`,
+`error_run_ends`, `consistency_alpha`, `drop_margin`, `bootstrap_replicates`, `bootstrap_seed`,
+`minimum_interval_units`, `minimum_events`, `maximum_half_width`, `usable_minimum_events`
+(`PedigreeParameters.map_scale`). Values and provenance are in the [generated parameter
+reference](../reference/parameters.md).
+
+Implementation: [science/pedigree/map_scale.py](../../haplotype_reconstruction/science/pedigree/map_scale.py),
+[science/pedigree/map_scale_frames.py](../../haplotype_reconstruction/science/pedigree/map_scale_frames.py),
+[science/pedigree/map_scale_kernels.py](../../haplotype_reconstruction/science/pedigree/map_scale_kernels.py),
+[science/pedigree/material_veto.py](../../haplotype_reconstruction/science/pedigree/material_veto.py),
+[science/pedigree/regimes.py](../../haplotype_reconstruction/science/pedigree/regimes.py),
+[stages/pedigree/map_scale.py](../../haplotype_reconstruction/stages/pedigree/map_scale.py).
 
 <a id="ps01"></a>
 ## ps01 Scoring-side candidate universe, dyad sets and evidence-free candidates
@@ -265,15 +402,15 @@ Parameters by name: `pair_bound_high_mass`. Values and provenance are in the [ge
 Cost and scope: O(R² B G²); O(G³); O(K³). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps15"></a>
-## ps15 Bounded M2 panel admission
+## ps15 M2 panel admission
 
-For the full fit and each leave-one-contig-out fit, compare every retained-parent pair bound with the best known M0/raw-M1 score. Admit a pair if any fit reaches the inclusive relevance margin or has a NaN gap, then apply pair eligibility and canonical parent ordering. Weighted sums skip zero weights and add positive rows in contig order. The bounded M2 panel has no top-parent cap; it is a score-defined model approximation. A per-child pair cap (`max_pairs_per_child`) bounds it. A child with more admitted pairs keeps the best by its largest gap over the fits, with the whole tie class at the last kept gap and every NaN-gap pair. It is flagged (`capped_children`, `M2PanelCapped`): its M2 evidence then covers an incomplete panel. Relevance rejection certifies that a pair is outside the competitive margin in every screened fit. The cap has no such guarantee: it can discard a competitive pair. Low depth can admit quadratically many pairs in the eligible-parent count, which motivates the cap.
+Admit every eligible pair of a child's retained parents (canonical parent ordering); there is no relevance screen. A screen proves exclusion only for the fits it screens, while the decision reuses the panel in every bootstrap and leave-one-unit-out fit: a pair rejected on the full data (or on any fixed family of fits) can be the best configuration of a resampled fit, and its missing row then lowers the two-parent evidence there. Below the cap the M2 evidence is therefore exact over the retained parents in every fit. A per-child pair cap (`max_pairs_per_child`) bounds the panel at cap x N rows. A child with more pairs keeps those with the largest full-data pair bound (the per-contig bounds summed in contig order; no chromosome or unit structure enters), with the whole tie class at the last kept bound and every pair whose bound is not a number. It is flagged (`capped_children`, `M2PanelCapped`): its M2 evidence then covers an incomplete panel, a lower bound, and the cap can discard a competitive pair. Children retain many parents, and so reach the cap, at low depth and in large sib-rich cohorts.
 
 Implementation: [stages/pedigree/screen.py](../../haplotype_reconstruction/stages/pedigree/screen.py), [science/pedigree/panel.py](../../haplotype_reconstruction/science/pedigree/panel.py).
 
-Parameters by name: `pair_relevance_margin`, `max_pairs_per_child`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_pairs_per_child`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(C² P); O(C P). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(C P); O(C P). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps16"></a>
 ## ps16 Panel M2 scoring, fallback rows and the piece record
@@ -437,29 +574,77 @@ straight and crossed alignments equally when tied. Apply this independently to p
 four-state paths, rescaling at each bin and accumulating natural log mass, and add independent component log
 likelihoods. The stored quantity is `transmission_log_likelihood`, in nats.
 
-For each material unit compare the forward and reverse joint log likelihoods. With d = log L(c ← p) − log L(p ← c)
-and epsilon the unit's painting-failure probability, its robust orientation log odds are
+For each material unit compare the forward and reverse joint log likelihoods, d = log L(c ← p) − log L(p ← c).
+A unit's contrast carries direction only through the transmitting meiosis: where the transmitted homologue shows a
+crossover the reverse direction pays mismatches and d is large; where it shows none, forward and reverse explain
+the same mosaics and d is near zero, unless painting noise on the shared homologue makes it large either way. A
+decisive contrast is therefore the transmitting meiosis with some probability rho and a fair coin otherwise, and
+rho depends on the paintings. With epsilon the unit's painting-failure probability and pi = (1 − epsilon) rho, the
+unit's robust orientation log odds are
 
-`log[(1 − epsilon) sigmoid(d) + epsilon/2] − log[(1 − epsilon) sigmoid(−d) + epsilon/2]`,
+`v = log[pi sigmoid(d) + (1 − pi)/2] − log[pi sigmoid(−d) + (1 − pi)/2]`,
 
-capped at ln((2 − epsilon)/epsilon). epsilon follows the relationship model's two-state failure process on the
+capped at ln((1 + pi)/(1 − pi)). epsilon follows the relationship model's two-state failure process on the
 working map ([PD28](#pd28)): failure regions start at lambda = `failure_region_rate` per Morgan and end at
 mu = 1/`failure_region_length` per Morgan; from its stationary law the probability that a region touches a unit of L
-working Morgans is epsilon(L) = 1 − mu/(lambda + mu) exp(−lambda L) (a 1-Morgan unit: 0.0997, cap 2.95 nats; a
-0.5-Morgan unit: 0.054, cap 3.59). No unit of 0.36 Morgan or more can therefore orient an edge alone (the release
-needs ln 49 = 3.89 nats). Scope: this protects against the short painting failures of the relationship model only.
-A chromosome-wide failure (a misassembly or a label inconsistency over a whole chromosome) is not capped: a chromosome
-of 1.5 working Morgans or more (two units) can orient an edge by itself. The optional window cap bounds such votes
-without counting chromosomes: with `window_morgans` W > 0 the units are grouped into consecutive windows of W working
-Morgans along the unit axis and each window's summed log odds is capped at `window_cap` (ln 39) before the windows
-are summed; it is off by default (W = 0).
+working Morgans is epsilon(L) = 1 − mu/(lambda + mu) exp(−lambda L) (a 1-Morgan unit: 0.0997). With rho = 1 a
+1-Morgan unit is capped at 2.95 nats; with rho = 0.76, a typical value on low-coverage simulated paintings, at 1.68.
+Scope of epsilon: it protects against the short painting failures of the relationship model only. The optional
+window cap bounds a chromosome-wide failure's votes without counting chromosomes: with `window_morgans` W > 0 the
+units are grouped into consecutive windows of W working Morgans along the unit axis and each window's summed log
+odds is capped at `window_cap` (ln 39) before the windows are summed; it is off by default (W = 0).
+
+A linked pair's units are either all informative or all fair coins. They are coins when the pair is a symmetric
+relative that the configuration evidence links in place of a parent (full sibs, half sibs and cousins vote a fair
+coin at every magnitude of d), or a parent-offspring pair whose crossovers are invisible in the paintings. Let eta be
+the run's share of linked pairs whose units are coins, e = `pair_failure_probability` the pair-level failure, Pf the
+product over units of the probability of each unit's sign under the forward orientation, Pr its mirror image and
+C = 2^−n. The pair law is
+
+`P(D | forward) = (1 − e − eta) Pf + (e/2)(Pf + Pr) + eta C`,
+
+and its mirror image for the reverse. A fit with unit multiplicities w needs two unit-additive sums, L = sum w v and
+G = sum w log cosh(v/2): the two orientations' log likelihoods against a coin are A = L/2 − G and B = −L/2 − G, and
+the fit's effective orientation log odds are
+
+`L_eff = log[(1 − e − eta) e^A + k] − log[(1 − e − eta) e^B + k]`, `k = eta (e (e^A + e^B)/2 + 1 − e)`.
+
+The direction correction of the family terms, ln 2 + ln((1 − e) sigmoid(L_eff) + e/2), is then exactly
+log[P(D | forward)/P_ref(D)] with P_ref the mean of the two orientations: direction evidence splits the support of a
+link between its two orientations and never changes the support of the link. Coin data drive A and B down linearly
+in the number of units while L only wanders as its square root, so a symmetric relative's random walk does not
+accumulate (L_eff tends to zero); an informative pair keeps L_eff near L. Because L and G are sums over units, the
+leave-one-unit-out shortcut and the bootstrap multiplicities stay exact.
+
+**The run estimates rho and eta from its own linked pairs.** No constant states how reliable a run's paintings
+are. One additional full-data fit leaves every pair's direction evidence out; the pairs named in its samples' local
+configurations are the reference pairs: the pairs the configuration evidence links as parent and offspring. The same
+fit gives each reference pair a structural orientation S0 (its orientation log odds without direction evidence),
+used as the prior w = (1 − e) sigmoid(S0) + e/2 of the pair's orientation. The marginal likelihood of the reference
+pairs' unit signs given their magnitudes is
+
+`sum_i log[(1 − eta)(w_i Pf_i(rho) + (1 − w_i) Pr_i(rho)) + eta C_i]`.
+
+With uniform priors on rho and eta, the estimates are the posterior means, summed on fixed grids of midpoints
+(`direction_reliability_grid` by `direction_coin_share_grid`; no optimiser, no random draw). For a pair of known
+orientation the count of right votes is binomial with the informative probability, and with probability 1/2 for a
+coin pair: a two-component binomial mixture, identified once pairs have three or more compared units (every assessed
+run has at least five). The likelihood is flat where rho tends to 0 or eta to 1; both state that the run has no
+direction evidence. With few reference pairs nothing is replaced by a default: without any, the posterior is the
+prior (rho = eta = 1/2: a 1-Morgan cap of 0.97 nats and half the pairs presumed coins), and n clearly informative
+pairs leave eta near 1/(n + 2). A run that cannot show that its direction data are informative gets little
+direction evidence. The estimate reads no sample name, cohort, relatedness family or released edge, and the
+reference pairs are not treated as true pairs: the mixture decides which of them are informative. rho and eta are
+run constants, estimated once on the full data; every resampled fit conditions on them, as on the preparations.
+They are recorded with the junction evidence (`reliability`, `coin_share`, `reference_pairs`,
+`reference_units`).
 
 Require positive bins and callability. Jointly impossible or exactly equal directions contribute zero. Sum in
-unit order with resampling multiplicities, then apply the existing pair-failure direction correction to finite
-configuration scores. Reciprocal messages, resampling, release tiers retain their
-existing definitions; the relationship guard is defined in [PD23](#pd23). The junction-density `order_probability` in [PD07](#pd07) still supplies graph search order
-and reports; it is a separate quantity. This intermediate direction evidence differs from final released
-orientation log odds.
+unit order with resampling multiplicities, then apply the pair-failure direction correction to finite configuration
+scores. Reciprocal messages, resampling and release tiers retain their existing definitions; the relationship guard
+is defined in [PD23](#pd23). The junction-density `order_probability` in [PD07](#pd07) still supplies graph search
+order and reports; it is a separate quantity. This intermediate direction evidence differs from the released
+orientation log odds ([PD10](#pd10)).
 
 **Identifiability limit.** A parent-offspring pair sharing one unrecombined homologue on every chromosome is
 near-neutral under this evidence. Alternative mismatch paths can leave residual direction odds of a fraction of a
@@ -467,20 +652,50 @@ nat rather than exactly zero. The shared homologue itself does not identify dire
 decides these cases. A child homologue that recombines the parent's two can supply direction. Painted junction
 totals do not identify biological ages in an inferred founder frame.
 
+**Limits of the direction evidence.**
+
+- *Ancestral relatives vote like parents.* Grandparents, double grandparents and uncles or aunts point
+  ancestor-to-descendant in 64 to 75 % of their units on known truth. Linked in place of a parent they count as
+  informative pairs, lower the run's rho slightly and stay oriented. No direction statistic separates them from
+  parents.
+- *Few units cannot tell a sibling's run from a parent's votes.* Five equal signs have probability 1/16 under a
+  coin. In small families at 5 to 8 Morgans a released single-parent edge can be a full sib whose few units happened
+  to agree; such edges should be read as "parent or close relative". The coin component removes the accumulation
+  over many units, not this.
+- *Pedigree loops.* For the child of a parent-offspring mating the child's other homologue is also identical by
+  descent with the parent, the reverse transmission explains the paintings as well, and the unit votes can oppose
+  the true orientation. The pair-level failure keeps the direction correction within ln((2 − e)/e) = 4.60 nats,
+  and the configuration evidence of such children (two sequenced parents) decides.
+- *The structural orientation is not calibrated.* The released orientation log odds ([PD10](#pd10)) add the
+  direction contrast to a difference of composite configuration likelihoods. On known-truth calibration layouts
+  that structural part had the wrong sign for 0.13 % of linked true pairs (111 of 84,075; over half of them with a
+  contrast below 4 nats); where it is wrong by more and the direction evidence is weak, the edge is released
+  reversed. Direction evidence that is honestly weak cannot veto it. Two calibrations of the structural part were
+  tested and withheld more correct edges than they removed errors (the same pair-level failure applied to it: 1 to
+  2 % of correct edges, mostly in pedigree loops; a jackknife over units: 3 % of correct low-material edges), so
+  neither is used.
+- *Few linked pairs.* With few reference pairs rho and eta stay near their priors and the run gets little
+  direction evidence. The estimate conditions on the full data; resampled fits do not propagate its uncertainty.
+
 Validation uses constructed schedules, independent Python path sums, homologue-order symmetries, saved likelihood
-and decision replays, and known-truth simulations. Inspect lost, gained and reversed true edges separately: net
-edge counts can hide losses. Direction log odds determine pedigree calls, release tiers and edges, and can affect
-subsequent phase and recombination outputs.
+and decision replays, and known-truth simulations: the run's estimate against the same fit on true pairs with
+known orientation (median absolute difference in rho at most 0.001 in every design and material band of the
+calibration layouts except small families at low material, 0.014), and the stated direction support against truth on held-out simulations. Inspect lost, gained
+and reversed true edges separately: net edge counts can hide losses. Direction log odds determine pedigree calls,
+release tiers and edges, and can affect subsequent phase and recombination outputs.
 
 Implementation: [science/pedigree/transmission.py](../../haplotype_reconstruction/science/pedigree/transmission.py),
 [science/pedigree/orientation.py](../../haplotype_reconstruction/science/pedigree/orientation.py).
 
 Parameters by name: `mismatch_probability`, `transmission_switch_floor`, `failure_region_rate`,
-`failure_region_length`, `window_morgans`, `window_cap`, `pair_failure_probability`. Values and rationale are in the
+`failure_region_length`, `window_morgans`, `window_cap`, `pair_failure_probability`,
+`direction_reliability_grid`, `direction_coin_share_grid`. Values and rationale are in the
 [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(D B) for the likelihood and O(H U) for the unit contrasts; the likelihood has four states,
-independent of founder count once the schedules are built.
+Cost and scope: O(D B) for the likelihood and O(H U) for the unit contrasts and their log cosh (one more H by U
+array in memory, not stored); the run's estimate costs one full fit without resampling and O(H P G) arithmetic
+for P reference pairs and G grid points. The likelihood has four states, independent of founder count once the
+schedules are built.
 
 <a id="pd07"></a>
 ## pd07 Junction-density order probability (graph visit order, role probability)
@@ -708,6 +923,7 @@ alone crosses the negative threshold, otherwise
 `family`; a retained edge has `none`.
 
 Recompute all original edges against the retained edge set until no more withdrawals, in at most E+1 passes.
+The retained edges then receive the family transmission vote of [PD29](#pd29) once.
 Withdrawals are irreversible; a prior withdrawal can remain an abstention under final premises, recorded by its
 separate evidence call and first-withdrawal basis. Freeze requests for every original family member, including
 linked members that can return after a premise is withdrawn. Request dyads (w,p), trios (c,p,w) and the bounded
@@ -854,7 +1070,126 @@ Cost and scope: O(B) per requested sequence and process; O(E · f · P) requeste
 including ring sibship checks, with at most O(f²P) distinct sequences per family. Pair persistence uses
 O(N² B) and reference trios O(K_ref B) per component. Sequence kernels parallelise over independent sequences.
 
+<a id="pd29"></a>
+## pd29 Family transmission test of retained parent edges
+
+After the sibling guard's fixed point ([PD23](#pd23)), every Tier B edge p -> c the guard retains receives one more
+vote. Its family is c plus witnesses: the guard's tested members of c's relatedness family (members linked by a
+retained edge to c or another member removed), minus members failing the guard's family check (the median trio
+sib-feasibility margin of (c, w, w') over w's ring partners at or below w's price), minus members with a retained
+parent other than p or a retained parent of c. The guard's other set-aside condition (both of its hypothesis margins
+at or below the price) is not applied: it depends on p, the hypothesis under test, and it removes the witnesses whose
+failure exposes a grandparent. At most `maximum_witnesses` witnesses are kept, by relatedness member support
+(descending), then observed-site counts in configured contig order (descending, the [PD24](#pd24) convention), then
+the witness's own family-check margins; no sample name enters (complete ties keep the guard's member order). An edge with fewer than `minimum_witnesses` witnesses (a family of fewer than three children) is `untested`
+and its statistic is not published: with one witness the evidence is near-pairwise and a single non-sib witness
+dominates it.
+
+Three joint models of the family on the PS19 schedules, each with two latent (unsequenced) diploids whose four
+homologues are founder mosaics under PD06's law (start 1/T, stay 1 - theta, change to a named other trajectory
+theta / (T - 1)):
+
+- PAR: p is a parent: p is a direct observation of latent 0 and every family child has a paternal meiotic selector
+  over latent 0's homologues and a maternal selector over latent 1's (the other parent), each switching with the
+  prepared selector probability theta (floored by `transmission_switch_floor`);
+- REL: p is one more full sib: p and the children are children of the two latent diploids;
+- UNR: p is not in the family: the children are children of the two latent diploids and p is its own best mosaic
+  (grandparents, double grandparents, half sibs, avuncular and other relatives).
+
+A member's unordered painted pair {x, y} given true classes (u, v) emits f(x,u) f(y,v) + f(y,u) f(x,v) (x != y) or
+f(x,u) f(x,v), with f = 1 - delta when equal and delta otherwise (delta = `DirectionParameters.mismatch_probability`,
+PD06's convention); bins without both labels emit 1. A witness may instead be a half child of latent 0 or of latent
+1 (one homologue through a meiotic selector over that diploid's homologues, the other a free founder mosaic under
+the same law, summed), a direct observation of a latent diploid (a sequenced parent of the family; under PAR only
+latent 1) or an outsider explained by its own mosaic, each at log prior ln(`role_prior`), a child at
+ln(1 - 5 `role_prior`); c is always a child. Roles are refitted in each segment. The role prior alone thus charges at
+most ln((1 - 5 rho) / rho) = 4.55 nats per segment for a witness that is not a full sib; that bounds the prior only:
+the decision rests on l_PAR - l_ALT, to which several contaminating witnesses contribute together.
+
+**Half children, and why roles stay per segment.** Without the half-child role, a half sib of c through the other
+parent is a full child under UNR in every segment, its foreign homologue absorbed by the spare homologue of UNR's free
+latent parent (a chimeric parent), while PAR, whose latent 0 is p's two homologues, cannot explain it at all: about 30
+nats per segment against a correct edge whose family holds no full sib of c. The half-child role gives PAR a
+comparably cheap explanation of one such half sib. It reduces the chimera but does not stop it: UNR's spare homologue
+is shared by every witness that inherited the same homologue of the other parent's other mate, while each half child
+pays its own role prior and its own foreign mosaic. A shared second mate for such witnesses was tried and rejected: on
+the 4.19 harness it never rescued a correct edge, withheld two more correct edges outside the assessable material and
+let six released relatives (half sibs in large sib-rich families) escape, because PAR could then call all of a
+child's full sibs half sibs from one mate for a single prior. Roles fixed for the whole genome were tried and
+rejected too: chosen by the summed likelihood, a single segment with a painting failure decides every witness's role
+genome-wide; chosen with PD06's per-unit robustness, a wrong role passes as capped unit failures when the segments are
+few. Per-segment roles keep the statistic's per-unit robustness.
+
+Each painting component is cut into consecutive segments of `unit_morgans` working Morgans (a final piece shorter
+than `tail_morgans` joins the previous one; a unit that receives no bin, behind one bin step longer than a unit,
+joins the unit before it); each segment is fitted independently. The profile log likelihood of a model maximises
+over the latent paths and the witness roles and sums each child's selectors exactly: MAP-EM (exact selector
+posteriors; Viterbi over ordered homologue pairs of one diploid with the others fixed, O(T^2) per bin by row and
+column maxima), exact homologue-label flip moves (the gain of swapping one diploid's labels after any boundary, from
+the pairwise posteriors of its children and half children), role updates, adopt moves (a witness becomes a latent
+diploid initialised at its own mosaic, or a half child of either latent diploid), starts seeded at members' own mosaics, `random_starts` block perturbations per round
+drawn from the named `pedigree.family_transmission.starts` stream keyed by a digest of the segment's data, and
+cross-initialisation of every model from every other model's best paths for up to `start_rounds` rounds. Every step
+is monotone; the optimum is local, not certified. Each segment is searched twice, with the witnesses ordered by a
+digest of their painted classes and in the reverse order, and each model keeps the better value; the value then
+depends neither on the order in which witnesses are supplied nor on sample names (witnesses with identical data are
+interchangeable).
+
+With d_u = l_PAR,u - l_ALT,u, ALT the better of REL and UNR summed over the edge's segments, the statistic is the
+sum of PD06's robust per-unit log odds of d_u with the PD28 painting-failure probability of the segment's length
+(0.0997 and a cap of 2.95 nats for 1 Morgan; shorter segments have larger caps). The edge is withheld when the
+statistic is below -`withholding_score` (the guard's, ln 1000). A withheld edge has the guard's consequences (calls
+of the child unresolved in both tiers, count bounds [survivors, 2]); its vote is `call = withheld`,
+`withholding_basis = transmission`, `withdrawal_iteration` one more than the guard's passes. The vote runs once:
+the guard's cleaning is not recomputed after it, and no fixed point is sought. The sibling-guard table publishes
+`transmission_call` (kept, withheld, untested; empty on guard-withheld edges), the witness and segment counts, the
+statistic and the alternative.
+
+Scope and limits:
+
+- The test acts only where the child has at least two retained witnesses, which in practice means sib-rich and
+  small-family designs; it cannot reach a relative released as the parent of a child without sequenced full sibs
+  (two-child families, parent-free half sibs), nor separate relatives whose paintings are identical by state over the
+  whole family.
+- The gain inside the pipeline is unproven: in the 4.19 validation, a clean-gain set of 24 sib-rich simulations
+  released no relative for the test to withhold, and the K = 30 run was not assessable. The evidence is the
+  harness's released relatives and true relatives scored as candidate parents.
+- Power is lower in families of three children whose witnesses include a half sib, and for double grandparents,
+  because PAR can explain a witness that did not receive p's homologue as a half child. In simulated three-child
+  families (10 one-Morgan segments, 40 replicates; six founder trajectories painted as four classes), the relatives
+  withheld were, against the form without the half-child role: a grandparent with one full-sib and one half-sib
+  witness 48 % (68 %), with two half-sib witnesses 60 % (80 %), with two full-sib witnesses 72 % (82 %), a double
+  grandparent 32 % (52 %); with distinct classes 82 % (95 %), 88 % (90 %), 98 % (98 %) and 65 % (78 %). Larger
+  families keep their power (a grandparent with four full-sib witnesses 100 %).
+- A residual chimera remains for correct edges whose families hold no full sib of c. In the simulations above, c plus
+  four half sibs from one other mate was withheld in 30-62 % of replicates at 6-20 segments (without the half-child
+  role 42-95 %), c with its other parent and two half sibs through it in 0-35 %, two half sibs in 0-10 %. On the 4.19
+  harness the configuration is rare: of 46,923 tested correct instances, 123 had no full-sib witness, 10 had at least
+  two half sibs through the other parent (2 from one mate) and none was withheld; a correct edge with c's parent and
+  one half sib as witnesses, just outside the assessable material (4.96 M), scores -9.5.
+- The result depends on the search: the optimum is local, and before the two searches another start stream moved
+  harness statistics by several nats near the threshold (-6.4 against -9.5 for the edge above); the two searches
+  remove the dependence on witness order and names, not on the starts.
+- The half child's foreign homologue is summed while latent homologues are maximised, so a half child is cheaper than
+  an equivalent latent path; this is what lets PAR match the chimera for one witness.
+- The statistic is not a posterior probability.
+
+Implementation: [science/pedigree/family_transmission.py](../../haplotype_reconstruction/science/pedigree/family_transmission.py),
+[stages/pedigree/family_transmission.py](../../haplotype_reconstruction/stages/pedigree/family_transmission.py),
+[science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py).
+
+Parameters by name: `role_prior`, `minimum_witnesses`, `maximum_witnesses`, `maximum_iterations`, `start_rounds`,
+`random_starts`, `mismatch_probability`, `transmission_switch_floor`, `failure_region_rate`, `failure_region_length`,
+`withholding_score`, `unit_morgans`, `tail_morgans`. Values and rationale are in the
+[generated parameter reference](../reference/parameters.md).
+
+Cost and scope: per tested edge and segment of B_s bins with k children and T trajectories, O(R I B_s k T^2) for R
+fits of I EM iterations, with O(k) adopt fits each, so the cost is quadratic in the capped witness count, and two
+searches per segment; witnesses are capped, so the per-edge cost is bounded independently of family size. Per-contig
+work runs as independent tasks after the guard's fixed point and is not checkpointed.
+
 <!-- named mechanism anchors -->
+
 
 ## Named mechanisms
 

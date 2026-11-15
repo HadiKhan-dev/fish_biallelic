@@ -33,6 +33,7 @@ from . import alternatives as alternatives_module
 from . import release, selection
 from .alternatives import Alternatives
 from .eligibility import ParentEligibility
+from . import orientation as orientation_module
 from .orientation import direction_windows, junction_evidence, unit_failure
 from .regimes import classify
 from .parameters import PedigreeParameters
@@ -91,20 +92,33 @@ def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: Pedi
     }
     scores = replace(scores, **contiguous)
     alternatives = alternatives_module.build(scores, eligibility)
-    inputs = DecisionInputs(
-        alternatives,
-        selection.build_exposure(scores, alternatives, config.exposure),
-        junction_evidence(
+    failure = unit_failure(scores.working_morgans, config.relationship.failure_region_rate,
+                           config.relationship.failure_region_length)
+    window = direction_windows(scores.working_morgans, config.direction.window_morgans)
+    exposure = selection.build_exposure(scores, alternatives, config.exposure)
+
+    def evidence(**model):
+        return junction_evidence(
             scores.junctions,
             scores.callable_bins,
             scores.total_bins,
-            unit_failure(scores.working_morgans, config.relationship.failure_region_rate,
-                         config.relationship.failure_region_length),
+            failure,
             scores.junction_dyads,
             scores.transmission_log_likelihood,
-            window=direction_windows(scores.working_morgans, config.direction.window_morgans),
+            window=window,
             window_cap=config.direction.window_cap,
-        ),
+            pair_failure=config.direction.pair_failure_probability,
+            **model,
+        )
+
+    reliability, coin_share, reference_pairs, reference_units = _direction_model(
+        scores, DecisionInputs(alternatives, exposure, evidence(), regime=scores.regime), failure, config
+    )
+    inputs = DecisionInputs(
+        alternatives,
+        exposure,
+        evidence(reliability=reliability, coin_share=coin_share, reference_pairs=reference_pairs,
+                 reference_units=reference_units),
         regime=scores.regime,
     )
     # Leave-one-unit-out fits read full totals minus the left-out unit (one pass; decisions equal per-unit refits).
@@ -126,6 +140,40 @@ def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: Pedi
     )
 
 
+def _direction_model(scores: GenomeScores, inputs: DecisionInputs, failure: np.ndarray,
+                     config: PedigreeParameters) -> tuple[float, float, int, int]:
+    """The run's own direction model (orientation.direction_model) from the pairs its configuration evidence links.
+
+    One full-data fit with every pair's direction evidence left out (its unit log odds zero) names, in each
+    sample's local configuration, the pairs the configuration evidence links as parent and offspring: the reference
+    pairs. The same solve's orientation log odds, bounded by the pair-level failure, are each pair's orientation
+    prior. No label, relatedness family or released edge enters; the mixture decides which reference pairs are
+    informative. Its ties are not the decision's (own counter, discarded)."""
+    junctions = inputs.junctions
+    neutral = replace(inputs, junctions=replace(
+        junctions, pair_log_odds=np.zeros_like(junctions.pair_log_odds), compared=np.zeros_like(junctions.compared)))
+    trace: dict = {}
+    full, _, _ = selection.fit(np.ones(len(scores.contigs)), neutral, config, trace, counter=TieCounter())
+    rows = inputs.alternatives.rows
+    samples = inputs.alternatives.n_samples
+    linked = np.zeros((samples, samples), dtype=np.bool_)
+    for child, row in enumerate(full.local_row.tolist()):
+        if row >= 0:
+            for parent in rows[row, 1:].tolist():
+                if parent >= 0:
+                    linked[child, parent] = linked[parent, child] = True
+    reference = np.flatnonzero(linked[junctions.pair_child, junctions.pair_parent])
+    structural = np.asarray(trace["orientation_log_odds"])[junctions.pair_child[reference],
+                                                            junctions.pair_parent[reference]]
+    return orientation_module.direction_model(
+        orientation_module.reference_contrasts(scores.junction_dyads, scores.transmission_log_likelihood, samples,
+                                               len(junctions.total_bins), reference),
+        junctions.compared[:, reference],
+        failure,
+        orientation_module.structural_prior(structural, config.direction.pair_failure_probability),
+    )
+
+
 def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreeParameters) -> Decision:
     """Support, tiers, views and candidate sets from the full fit and its resampling."""
     scores, eligibility, inputs = state.scores, state.eligibility, state.inputs
@@ -141,7 +189,7 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreePara
     # Each material unit counts one (DESIGN_417 D2); its working Morgans are reported.
     informative_count = ordered_sum(winners.astype(np.float64), axis=0)
     informative_morgans = ordered_sum(winners * scores.working_morgans[:, None], axis=0)
-    regime = classify(scores.material_morgans, len(scores.contigs), config)
+    regime = classify(scores.regime_basis_morgans, len(scores.contigs), config)
     if regime.name != scores.regime:
         raise InputError("unit scores' regime differs from their material")
     tie_events = counter.record()

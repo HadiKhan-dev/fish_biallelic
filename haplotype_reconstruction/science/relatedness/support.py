@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 
 from ...core.concurrency import thread_count
+from .class_kernels import FAMILY, FAMILY_SAMPLE, SAMPLE
 from .family_kernels import family_logliks, latent_alternatives, unit_terms
 from .partition import _Partition
 
@@ -45,19 +46,45 @@ def _support(part: _Partition, ranges, weights=None):
     for lo, hi, weight in kept:
         thread_count(part.threads)
         llk = np.empty(F)
-        family_logliks(part.S, part.slots, live, part.logpi, part.logpost, lo, hi, llk)
-        unit_terms(
-            part.S, part.C, part.slots, live, llk, family_of, part.logpi, part.logpost, lo, hi, joins, rest, alone
-        )
+        classed = getattr(part, "class_prior", None) is not None  # rl21: two source populations
+        if classed:
+            _class_unit(part, live, family_of, named, lo, hi, llk, joins, rest, alone, latent)
+        else:
+            family_logliks(part.S, part.slots, live, part.logpi, part.logpost, lo, hi, llk)
+            unit_terms(
+                part.S, part.C, part.slots, live, llk, family_of, part.logpi, part.logpost, lo, hi, joins, rest, alone
+            )
         rest[single] = 0.0
         stay = llk[family_of] - rest
         joins[excluded_rows, excluded_cols] = -np.inf
         elsewhere = np.maximum(joins.max(axis=0) if F else np.full(N, -np.inf), alone)
         hits += weight * (stay > elsewhere + part.parameters.gain_tolerance)
-        latent_alternatives(part.S, part.slots, live, part.logpi, part.logpost, lo, hi, latent)
+        if not classed:
+            latent_alternatives(part.S, part.slots, live, part.logpi, part.logpost, lo, hi, latent)
         parent_hits[live] += weight * (named & (llk[:, None] > latent + part.parameters.gain_tolerance))
     total = total if total > 0 else 1.0
     return hits / total, parent_hits / total
+
+
+def _class_unit(part: _Partition, live, family_of, named, lo, hi, llk, joins, rest, alone, latent):
+    """One support unit with two source populations (rl21): family_logliks, unit_terms and latent_alternatives as
+    class marginals over the unit's own sites (the unit is scored as if it were the genome)."""
+    F, N = len(live), part.N
+    llk[:] = part.class_values(FAMILY, live, slots=part.slots[live], lo=lo, hi=hi)
+    families = np.repeat(live, N)
+    joins[:] = part.class_values(
+        FAMILY_SAMPLE, families, np.tile(part.everyone, F), 1.0, part.slots[families], lo, hi
+    ).reshape(F, N) - llk[:, None]
+    own = live[family_of]
+    rest[:] = part.class_values(FAMILY_SAMPLE, own, part.everyone, -1.0, part.slots[own], lo, hi)
+    alone[:] = part.class_values(SAMPLE, part.everyone, lo=lo, hi=hi)
+    latent[:] = np.nan
+    for k in (0, 1):
+        rows = np.flatnonzero(named[:, k])
+        if len(rows):
+            slots = part.slots[live[rows]].copy()
+            slots[:, k] = -1
+            latent[rows, k] = part.class_values(FAMILY, live[rows], slots=slots, lo=lo, hi=hi)
 
 
 __all__: list[str] = []

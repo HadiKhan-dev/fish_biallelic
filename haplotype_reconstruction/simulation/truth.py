@@ -17,6 +17,7 @@ import numpy as np
 from ..contracts.roles import freeze_record_arrays, record_field, require_schema, schema_field
 from ..core.errors import InputError
 from .pedigree import PedigreeTable
+from .structure import StructureTruth
 
 MANIFEST = "simulation/manifest"
 READS = "simulation/reads"
@@ -176,6 +177,7 @@ class ContigTruth:
     block: np.ndarray | None = record_field("obs", axes=("N", "L"), units="1", dtype="bool | None", default=None)
     systematic_site: np.ndarray | None = record_field("obs", axes=("L",), units="1", dtype="bool | None", default=None)
     spurious: np.ndarray | None = record_field("obs", axes=("L",), units="1", dtype="bool | None", default=None)
+    structure: StructureTruth | None = record_field("obs", units="1", dtype="StructureTruth | None", default=None)
     schema: int = schema_field(SCHEMA)
 
     def __post_init__(self) -> None:
@@ -292,6 +294,11 @@ def truth_record(truth: ContigTruth) -> dict:
     result = dict(truth.__dict__)
     for name in ("painting", "source_painting", "founder_mosaics", "flips", "crossovers"):
         result[name] = getattr(truth, name).__dict__
+    # Without structure the record is the released one (no key); with it, a nested record.
+    if truth.structure is None:
+        result.pop("structure")
+    else:
+        result["structure"] = truth.structure.__dict__
     return result
 
 
@@ -308,4 +315,6 @@ def truth_from_record(payload: dict) -> ContigTruth:
         ("crossovers", TruthCrossovers),
     ):
         values[name] = cls(**values[name])
+    if values.get("structure") is not None:
+        values["structure"] = StructureTruth(**values["structure"])
     return ContigTruth(**values)

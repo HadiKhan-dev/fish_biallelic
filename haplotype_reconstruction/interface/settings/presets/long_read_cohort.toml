@@ -1,0 +1,31 @@
+# Long-read cohort read model, calibrated on a 52-sample ONT cohort (Clair3 per sample, GenotypeGVCFs; six trios
+# inferred from the data) with one estimator applied alike to real and simulated trios, on heterozygous cells that
+# show both alleles (cells with no ALT or no REF read are call-set misses, the artefact layer's): allele-fraction and
+# depth correlation by distance, heterozygote balance by local ALT density, allele bias shared between trios,
+# background error rates and within-sample error co-occurrence. long_read_mean_bp is the effective length of the reads
+# that reach the allele depths (split and filtered alignments included), not the library's read length. For missed
+# variants and reference blocks add the reference_blocks artefact preset with balance_dispersion = 0: this read model
+# already gives heterozygotes their spread.
+[simulation.reads]
+read_length_bp = 0
+long_read_mean_bp = 3000.0
+long_read_length_sigma = 0.9
+read_quality_mean = 22.0
+read_quality_sd = 4.0
+substitution_share = 0.12
+context_sites = 0.2
+context_factor = 20.0
+context_convert = 0.0
+reference_bias = 0.0005
+reference_bias_power = 2.0
+reference_bias_window_bp = 200
+reference_pull = 0.007
+foreign_read_share = 0.01
+depth_cv = 0.3
+site_depth_cv = 0.15
+region_depth_cv = 0.15
+region_depth_window_bp = 12000
+
+# The call-set layer's per-cell balance redraw does not apply to long reads (the settings refuse a nonzero value).
+[simulation.artefacts]
+balance_dispersion = 0.0

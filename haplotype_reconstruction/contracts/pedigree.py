@@ -18,6 +18,7 @@ import numpy as np
 
 from ..core.errors import InputError
 from ..core.ties import TieCounts
+from .map_scale import MapScaleEstimate, MaterialChoice
 from .roles import freeze_record_arrays, record_field, schema_field
 
 M0, M1, M2 = 0, 1, 2
@@ -72,8 +73,10 @@ class GenomeScores:
     working_morgans float64 [H]: each unit's working length (Morgans of the configured working map: sum of
     -0.5 ln(1 - 2 theta) over its selector boundaries); it sets the unit's direction failure probability
     (orientation.unit_failure) and is reported.
-    material_morgans: U, the working Morgans of the informative components (the regime reads it alone).
-    regime: "standard" or "low_material" (material.classify of U).
+    material_morgans: U, the working Morgans of the informative components.
+    regime: "standard" or "low_material" (material.classify of regime_basis_morgans).
+    regime_morgans: the Morgans the regime reads when the material choice applies the estimated map's regime
+        (regimes.material_choice); NaN: U itself.
     pieces / piece_contig / piece_unit: every contig-component piece of the units (report and audit only).
     contig_*: per informative contig sums of the pieces (reports: evidence summary, painted junction rates).
     """
@@ -102,6 +105,7 @@ class GenomeScores:
     material_morgans: float = record_field("state", units="Morgans", dtype="float", kw_only=True)
 
     regime: str = record_field("state", dtype="str", default="standard", kw_only=True)
+    regime_morgans: float = record_field("state", units="Morgans", dtype="float", default=float("nan"), kw_only=True)
 
     real_contigs: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]", default=(), kw_only=True)
     pieces: tuple[MapBlock, ...] = record_field("obs", dtype="tuple[MapBlock, ...]", default=(), kw_only=True)
@@ -120,6 +124,11 @@ class GenomeScores:
     contig_markers: np.ndarray | None = record_field("report", axes=("C",), dtype="int64", default=None, kw_only=True)
 
     chromosome_summary: tuple[ChromosomeSummaryView, ...] = record_field("obs", dtype="tuple[ChromosomeSummaryView, ...]", default=(), kw_only=True)
+
+    @property
+    def regime_basis_morgans(self) -> float:
+        """The Morgans the regime reads: regime_morgans when set, else U."""
+        return float(self.material_morgans if np.isnan(self.regime_morgans) else self.regime_morgans)
 
     @property
     def informative_contigs(self) -> tuple[str, ...]:
@@ -267,6 +276,15 @@ class JunctionEvidence:
     window:        int64 [H] the direction window of each unit (consecutive windows of
                    DirectionParameters.window_morgans of the unit axis), or None when the window cap is off;
                    window_cap: the cap (nats) on each window's summed log odds.
+    reliability:   the run's share of decisive unit contrasts that come from the transmitting meiosis (rho; 1 states
+                   every decisive contrast informative); coin_share: the run's share of linked pairs whose units are
+                   fair coins (eta). Both are posterior means of the run's own linked pairs
+                   (orientation.direction_model), estimated once on the full data; reference_pairs and
+                   reference_units count the pairs and compared units they rest on. pair_failure: the pair-level
+                   failure probability of the family term (DirectionParameters.pair_failure_probability), which the
+                   coin mixture of a fit needs.
+    pair_log_cosh: float64 [H, U] log cosh(pair_log_odds / 2), zero where not compared: with pair_log_odds it gives
+                   each weighted fit the two orientations' log likelihoods against a coin. Derived (not stored).
     """
 
     junctions: np.ndarray = record_field("evidence", axes=("H", "N"), units="painting bins", dtype="float64")
@@ -278,6 +296,14 @@ class JunctionEvidence:
     compared: np.ndarray = record_field("evidence", axes=("H", "U"), units="1", dtype="bool")
     window: np.ndarray | None = record_field("evidence", axes=("H",), units="1", dtype="int64", default=None)
     window_cap: float = record_field("evidence", units="nats", dtype="float", default=float("inf"))
+    reliability: float = record_field("state", units="probability", dtype="float", default=1.0)
+    coin_share: float = record_field("state", units="probability", dtype="float", default=0.0)
+    pair_failure: float = record_field("state", units="probability", dtype="float", default=0.0)
+    reference_pairs: int = record_field("evidence", units="1", dtype="int", default=0)
+    reference_units: int = record_field("evidence", units="1", dtype="int", default=0)
+    pair_log_cosh: np.ndarray | None = record_field(
+        "evidence", axes=("H", "U"), units="nats", dtype="float64", stored=False, default=None
+    )
 
 
 @dataclass(frozen=True)
@@ -333,6 +359,9 @@ class OmissionTotals:
     callable_bins: np.ndarray = record_field("evidence", axes=("N",), dtype="float64")
     pair_log_odds: np.ndarray = record_field("evidence", axes=("U",), dtype="float64")
     order_statistics: np.ndarray = record_field("evidence", axes=("N", "N", "4"), dtype="float64")
+    pair_log_cosh: np.ndarray | None = record_field(
+        "evidence", axes=("U",), units="nats", dtype="float64", stored=False, default=None
+    )
 
 
 @dataclass(frozen=True)
@@ -702,6 +731,13 @@ class GuardVote:
     evidence_call: str = record_field("call", dtype="str")
     withdrawal_iteration: int = record_field("state", dtype="int")
     withholding_basis: str = record_field("state", dtype="str")
+    # PD29 family transmission vote on edges the relationship guard retained ("" on edges it withheld): witnesses
+    # retained for the test, scored 1-Morgan segments, the robust statistic and the alternative it was taken against.
+    transmission_call: str = record_field("call", dtype="str", default="", kw_only=True)
+    transmission_witnesses: int = record_field("state", units="count", dtype="int", default=0, kw_only=True)
+    transmission_segments: int = record_field("state", units="count", dtype="int", default=0, kw_only=True)
+    transmission_score: float = record_field("evidence", units="nats", dtype="float64", default=0.0, kw_only=True)
+    transmission_alternative: str = record_field("state", dtype="str", default="", kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -752,6 +788,10 @@ class Pedigree:
     retained: PedigreeRetained | None = record_field("state", dtype="PedigreeRetained | None", kw_only=True)
     reports_complete: bool = record_field("diagnostic", dtype="bool", kw_only=True)
     regime: str = record_field("state", dtype="str", default="standard", kw_only=True)
+    material: MaterialChoice | None = record_field("report", dtype="MaterialChoice | None", default=None, kw_only=True)
+    map_scale: MapScaleEstimate | None = record_field(
+        "report", dtype="MapScaleEstimate | None", default=None, kw_only=True
+    )
     schema: int = schema_field(9)
 
 
@@ -1376,6 +1416,11 @@ class GuardViewRow:
     withdrawal_iteration: int = record_field("report", dtype="int64")
     withholding_basis: str = record_field("report", dtype="str")
     relationship_basis: str = record_field("report", dtype="str")
+    transmission_call: str = record_field("report", dtype="str", default="")
+    transmission_witnesses: int = record_field("report", dtype="int64", default=0)
+    transmission_segments: int = record_field("report", dtype="int64", default=0)
+    transmission_score: float = record_field("report", units="nats", dtype="float64", default=float("nan"))
+    transmission_alternative: str = record_field("report", dtype="str", default="")
 
 
 @dataclass(frozen=True)
@@ -1472,6 +1517,57 @@ class RelationshipEvidence:
             raise InputError("feasible relationship likelihoods must be finite")
         if np.any(np.isnan(self.pair_log_likelihoods)) or np.any(np.isnan(self.trio_log_likelihoods)):
             raise InputError("relationship likelihoods contain NaN")
+        freeze_record_arrays(self)
+
+
+@dataclass(frozen=True)
+class TransmissionRequest:
+    """PD29: retained Tier B edges with enough witnesses, frozen after the guard's fixed point. Edge e tests parent
+    ``parents[e]`` of child ``children[e]`` with witnesses ``members[offsets[e]:offsets[e + 1]]`` (in test order)."""
+
+    sample_ids: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
+    contigs: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
+    parents: np.ndarray = record_field("state", axes=("E",), dtype="int64")
+    children: np.ndarray = record_field("state", axes=("E",), dtype="int64")
+    offsets: np.ndarray = record_field("state", axes=("E+1",), dtype="int64")
+    members: np.ndarray = record_field("state", axes=("M",), dtype="int64")
+
+    def __post_init__(self) -> None:
+        n, e = len(self.sample_ids), len(self.parents)
+        if self.children.shape != (e,) or self.offsets.shape != (e + 1,) or (e and self.offsets[0] != 0):
+            raise InputError("transmission request axes differ")
+        if self.offsets[-1] != len(self.members) or np.any(np.diff(self.offsets) < 0):
+            raise InputError("transmission request offsets must cover its members")
+        for rows in (self.parents, self.children, self.members):
+            if len(rows) and (np.any(rows < 0) or np.any(rows >= n)):
+                raise InputError("transmission request indices must lie on the sample axis")
+        freeze_record_arrays(self)
+
+    @property
+    def digest(self) -> str:
+        digest = hashlib.sha256(json.dumps([list(self.sample_ids), list(self.contigs)]).encode())
+        for rows in (self.parents, self.children, self.offsets, self.members):
+            digest.update(np.ascontiguousarray(rows, dtype=np.int64).tobytes())
+        return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class TransmissionEvidence:
+    """PD29 per-contig segment profile log likelihoods of each requested edge: rows
+    ``offsets[e]:offsets[e + 1]`` hold its 1-Morgan segments in component order, columns PAR, REL, UNR."""
+
+    contig: str = record_field("obs", dtype="str")
+    sample_ids: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]")
+    request_digest: str = record_field("state", dtype="str")
+    offsets: np.ndarray = record_field("state", axes=("E+1",), dtype="int64")
+    log_likelihoods: np.ndarray = record_field("evidence", axes=("U", "3"), units="nats", dtype="float64")
+    morgans: np.ndarray = record_field("evidence", axes=("U",), units="Morgan", dtype="float64")
+
+    def __post_init__(self) -> None:
+        if self.log_likelihoods.shape != (len(self.morgans), 3) or self.offsets[-1] != len(self.morgans):
+            raise InputError("transmission evidence axes differ")
+        if np.any(~np.isfinite(self.log_likelihoods)):
+            raise InputError("transmission segment log likelihoods must be finite")
         freeze_record_arrays(self)
 
 
@@ -1575,7 +1671,10 @@ class PreparedComponent:
     observed:          bool [N, M] read depth > 0 at the selected markers.
     state_classes:     int16 [N, B, 2] painting MAP state class per sample, bin and track; -1 = unknown
                        (abstention, BACKGROUND or unanchored trajectory). Junction-count input.
-    information_exponent: float64 [N, B] tempered-view emission exponent of each child and bin."""
+    information_exponent: float64 [N, B] tempered-view emission exponent of each child and bin.
+    selector_fallback_bp: float64 [B-1] the part of each boundary's bin-centre interval (bp) that the working map
+                       measures at its fallback rate (all of it on a map-free contig, the stretches beyond a map
+                       file's knots otherwise): the material under an estimated fallback rate (DESIGN_RELEASE)."""
 
     component_index: int = record_field("state", axes=(), units="1", dtype="int64")
     named_alleles: np.ndarray = record_field("state", axes=("S-1", "M"), units="1", dtype="int8")
@@ -1589,6 +1688,9 @@ class PreparedComponent:
     observed: np.ndarray = record_field("state", axes=("N", "M"), units="1", dtype="bool")
     state_classes: np.ndarray = record_field("state", axes=("N", "B", "2"), units="1", dtype="int16")
     information_exponent: np.ndarray = record_field("state", axes=("N", "B"), units="1", dtype="float64")
+    selector_fallback_bp: np.ndarray | None = record_field(
+        "state", axes=("B-1",), units="bp", dtype="float64", default=None, kw_only=True
+    )
 
     @property
     def n_states(self) -> int:
@@ -1629,7 +1731,7 @@ class PreparedChromosome:
     def informative_markers(self) -> int:
         return sum(component.informative_markers for component in self.components)
 
-    schema: int = schema_field(3)
+    schema: int = schema_field(4)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)

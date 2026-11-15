@@ -117,6 +117,15 @@ class ExecutionSection:
     profile: bool = setting(
         False, "bool", "Print per-phase timings and thread-allocation traces.", affects_results=False
     )
+    progress_minutes: float = setting(
+        5.0,
+        "float",
+        "Minimum minutes between snapshots of a long unit's partial progress (discovery blocks, selection blocks, "
+        "join batches; refinement records its fits), so that a stopped run resumes inside the unit; "
+        "0 = at every boundary. Progress is read only by the same code and inputs and removed when the unit "
+        "publishes.",
+        affects_results=False,
+    )
 
     scratch: Path | None = setting(
         None,
@@ -137,6 +146,19 @@ class InputSection:
     vcf: Path | None = setting(None, "path", "Input VCF/BCF (kind = vcf).")
     contigs: tuple[str, ...] = setting(
         (), "strings", "Contigs to analyse, in order (required unless the preset lists them)."
+    )
+    source_populations: int = setting(
+        1,
+        "int",
+        "Source populations the cohort descends from: 1 (default) one population; 2 a cross between two diverged "
+        "populations or species, such as an interspecies F2. With 2 the relatedness families give every unsequenced "
+        "parent an ancestry class (pure, first-generation hybrid, backcross, later generation) with "
+        "source-specific allele frequencies, estimated from the genotype likelihoods alone (rl21). Validated at about "
+        "5 reads per site for crosses whose parents are pure or first-generation hybrids. At about 1 read it merges "
+        "sibships whose parents are sibs around an aunt or uncle and is not shown to be better than 1; unsequenced "
+        "later-generation parents (F3 sibships and later) are not followed along the map. Declare 2 only for a real "
+        "two-source cross: for a one-population cohort, even one from few founders, it splits sibships. The stage "
+        "warns in the run log and in relatedness/summary.json at low depth and when the fitted sources hardly differ.",
     )
 
 
@@ -170,15 +192,20 @@ class GeneticMapSection:
         5.0, "float", "Fallback recombination rate (cM/Mb) without a map or beyond its knots."
     )
     file: Path | None = setting(None, "path", "Cumulative cM map (PLINK, or chromosome/position_bp/map_cm TSV).")
-    infer_rate: bool = setting(
-        False,
-        "bool",
-        "Use the genome-wide recombination rate estimated from full-sib families in the relatedness "
-        "stage as the fallback rate of contigs without a map file, when its gate passes, "
-        "rate_cm_per_mb lies outside its 95 % interval and at least five informative families were "
-        "used. Off (keep the supplied rate): the estimate is reported, with a warning when "
-        "rate_cm_per_mb lies outside the interval, and nothing downstream changes. Map files are "
-        "always kept.",
+    rate_estimate: str = setting(
+        "veto",
+        "str",
+        "What the two genome-wide recombination-rate estimates (from full-sib families before discovery; from "
+        "the paintings before the pedigree) may change. Both stand in only for the fallback rate "
+        "(rate_cm_per_mb: contigs without a map file and stretches beyond a file's knots); map-file distances are "
+        "never rescaled. veto: the configured map is the map of every stage and the pedigree releases only what "
+        "both the configured map's and the painting estimate's material regimes release (it can only withhold). "
+        "ignore: the configured map everywhere, pedigree included; the estimates are reported, with a warning "
+        "when they disagree with rate_cm_per_mb, and nothing reads them. adopt: the family estimate becomes the "
+        "fallback rate of every stage when its gate passes, rate_cm_per_mb lies outside its 95 % interval and "
+        "at least five informative families were used; the pedigree then applies the painting estimate's regime "
+        "alone when its interval excludes the working rate, else releases only what both maps' regimes release.",
+        ("veto", "ignore", "adopt"),
     )
 
 
@@ -234,7 +261,8 @@ class ExportSection:
 @dataclass(frozen=True)
 class SimulationReadsSection:
     preset: str = setting(
-        "", "str", "Generating read preset; explicit read keys override its values.", ("", "realistic", "short_read_cohort")
+        "", "str", "Generating read preset; explicit read keys override its values.",
+        ("", "realistic", "short_read_cohort", "long_read_cohort")
     )
     error_rate: float = setting(0.02, "float", "Generating sequencing error rate.")
     depth_cv: float = setting(0.0, "float", "Between-sample depth coefficient of variation.")
@@ -268,6 +296,45 @@ class SimulationReadsSection:
     )
     site_loss_fine_window_bp: int = setting(
         generating.SITE_LOSS_FINE_WINDOW_BP, "int", "Fine-loss window width in bp; positive when fine loss is nonzero."
+    )
+    long_read_mean_bp: float = setting(
+        generating.LONG_READ_MEAN_BP, "float",
+        "Mean long-read length in bp; > 0 samples single long reads (lognormal lengths) with per-read errors; 0 = off."
+    )
+    long_read_length_sigma: float = setting(
+        generating.LONG_READ_LENGTH_SIGMA, "float", "Log-scale SD of the lognormal long-read length law."
+    )
+    read_quality_mean: float = setting(
+        generating.READ_QUALITY_MEAN, "float", "Mean per-read Phred accuracy (long reads; error 10^(-Q/10) per base)."
+    )
+    read_quality_sd: float = setting(generating.READ_QUALITY_SD, "float", "SD of per-read Phred accuracy across reads.")
+    substitution_share: float = setting(
+        generating.SUBSTITUTION_SHARE, "float", "Share of long-read errors that are substitutions (rest: indels)."
+    )
+    context_sites: float = setting(
+        generating.CONTEXT_SITES, "float", "Share of sites where one allele extends a homopolymer (long reads)."
+    )
+    context_factor: float = setting(
+        generating.CONTEXT_FACTOR, "float", "Indel-rate multiplier on the run-extending allele at a context site."
+    )
+    context_convert: float = setting(
+        generating.CONTEXT_CONVERT, "float", "Share of context indel errors read as the other allele (rest: no base)."
+    )
+    reference_bias: float = setting(
+        generating.REFERENCE_BIAS, "float",
+        "Loss hazard scale of a long read's base: 1 - exp(-bias x k^power), k = ALT alleles of its homologue nearby."
+    )
+    reference_bias_window_bp: int = setting(
+        generating.REFERENCE_BIAS_WINDOW_BP, "int", "Half-width in bp of the reference-bias ALT-count window."
+    )
+    reference_bias_power: float = setting(
+        generating.REFERENCE_BIAS_POWER, "float", "Exponent of the ALT count in the reference-bias loss hazard."
+    )
+    reference_pull: float = setting(
+        generating.REFERENCE_PULL, "float", "Mean probability that a long read's ALT base is reported as REF."
+    )
+    foreign_read_share: float = setting(
+        generating.FOREIGN_READ_SHARE, "float", "Share of long reads from another sequenced sample (contamination)."
     )
 
 
@@ -349,6 +416,10 @@ class SimulationArtefactsSection:
     miss_sample_cv: float = setting(
         generating.ARTEFACT_MISS_SAMPLE_CV, "float", "Sample miss-factor coefficient of variation."
     )
+    hom_alt_miss_factor: float = setting(
+        generating.ARTEFACT_HOM_ALT_MISS_FACTOR, "float",
+        "Miss probability of a homozygous-ALT cell relative to a heterozygote (callers rarely miss hom-ALT)."
+    )
     call_min_alt_fraction: float = setting(
         generating.ARTEFACT_CALL_MIN_ALT_FRACTION, "float", "Minimum ALT fraction calling a hom-reference cell."
     )
@@ -368,6 +439,63 @@ class SimulationArtefactsSection:
     regions: tuple = setting((), "regions", "Intervals {contig, start, end, factor}; half-open bp bounds, no overlaps.")
 
 
+@dataclass(frozen=True)
+class SimulationStructureSection:
+    preset: str = setting("", "str", "Named structure preset; explicit keys override it.", ("", "cichlid"))
+    enabled: bool = setting(
+        False, "bool", "Generate structural variants (inversions, deletions, duplications, misorder)."
+    )
+    inversion_rate: float = setting(
+        generating.STRUCTURE_INVERSION_RATE, "float", "Expected large inversions per contig (Poisson)."
+    )
+    inversion_span_lo: float = setting(
+        generating.STRUCTURE_INVERSION_SPAN_LO, "float", "Smallest large-inversion span, as a fraction of the contig."
+    )
+    inversion_span_hi: float = setting(
+        generating.STRUCTURE_INVERSION_SPAN_HI, "float", "Largest large-inversion span, as a fraction of the contig."
+    )
+    small_inversion_rate_per_mb: float = setting(
+        generating.STRUCTURE_SMALL_INVERSION_RATE_PER_MB, "float", "Small inversions per Mb."
+    )
+    small_inversion_mean_bp: float = setting(
+        generating.STRUCTURE_SMALL_INVERSION_MEAN_BP, "float", "Mean exponential small-inversion length in bp."
+    )
+    deletion_rate_per_mb: float = setting(
+        generating.STRUCTURE_DELETION_RATE_PER_MB, "float", "Deletions (reference sequence a haplotype lacks) per Mb."
+    )
+    deletion_mean_bp: float = setting(generating.STRUCTURE_DELETION_MEAN_BP, "float", "Mean deletion length in bp.")
+    duplication_rate_per_mb: float = setting(
+        generating.STRUCTURE_DUPLICATION_RATE_PER_MB, "float",
+        "Duplications (an extra copy absent from the reference) per Mb."
+    )
+    duplication_mean_bp: float = setting(
+        generating.STRUCTURE_DUPLICATION_MEAN_BP, "float", "Mean duplicated-segment length in bp."
+    )
+    dispersed_fraction: float = setting(
+        generating.STRUCTURE_DISPERSED_FRACTION, "float",
+        "Share of duplications whose copy lies elsewhere (else tandem)."
+    )
+    paralog_divergence: float = setting(
+        generating.STRUCTURE_PARALOG_DIVERGENCE, "float",
+        "Share of a duplicated segment's sites where the copy differs."
+    )
+    misorder_rate_per_mb: float = setting(
+        generating.STRUCTURE_MISORDER_RATE_PER_MB, "float",
+        "Reference segments in the wrong orientation, place or chromosome (every haplotype), per Mb."
+    )
+    misorder_mean_bp: float = setting(
+        generating.STRUCTURE_MISORDER_MEAN_BP, "float", "Mean misordered-segment length in bp."
+    )
+    carrier_frequency: float = setting(
+        generating.STRUCTURE_CARRIER_FREQUENCY, "float",
+        "File sources: probability that a source haplotype carries a polymorphic variant (coalescent: genealogy)."
+    )
+    variants: tuple = setting(
+        (), "variants",
+        "Explicit variants {kind, contig, start, end, target, carriers}; they replace the random ones on their contig."
+    )
+
+
 NAMED_SECTIONS = {"populations": SimulationPopulationSection, "stocks": SimulationStockSection}
 
 
@@ -381,6 +509,9 @@ class SimulationSection:
     stocks: tuple = setting((), "stocks", "Named stock pedigrees preceding the cross.")
     artefacts: SimulationArtefactsSection = section(
         SimulationArtefactsSection, "Call-set artefact model, off by default."
+    )
+    structure: SimulationStructureSection = section(
+        SimulationStructureSection, "Structural rearrangements of the simulated genomes, off by default."
     )
     cohorts: tuple[int, ...] = setting((20, 100, 200), "ints", "Individuals in successive cohorts.")
     depth: float = setting(5.0, "float", "Unimpaired site depth; mean is depth * (1 - site_loss_fraction / 2) * (1 - site_loss_fine_fraction / 2).")

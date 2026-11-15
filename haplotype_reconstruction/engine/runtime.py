@@ -186,6 +186,9 @@ class RunSettings:
     cache_directory: str | None = None
     code_roots: tuple[str, ...] = ()
     closure_modules: tuple[str, ...] = ()
+    # Minimum seconds between two snapshots of one long unit's partial progress (store.progress; 0: every boundary;
+    # None: store.progress.PROGRESS_SECONDS).
+    progress_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +205,16 @@ _CHECKED_DECLARATIONS: tuple[Any, ...] | None = None
 def current_settings() -> RunSettings | None:
     """Observe this process's configured runtime without starting one."""
     return _RUN
+
+
+def progress_seconds() -> float:
+    """This run's interval between snapshots of a long unit's progress (store.progress; its default outside a runtime
+    or when the run sets none)."""
+    if _RUN is not None and _RUN.progress_seconds is not None:
+        return _RUN.progress_seconds
+    from ..store.progress import PROGRESS_SECONDS
+
+    return PROGRESS_SECONDS
 
 
 def _hooks(settings: RunSettings) -> None:
@@ -253,6 +266,7 @@ def start(
     memory_diagnostics: str | Path | None = None,
     worker_hooks: Sequence[tuple[str, tuple[Any, ...]]] = (),
     cache_directory: str | Path | None = None,
+    progress_seconds: float | None = None,
 ) -> RunSettings:
     """Configure one invocation before it imports task roots or starts pools.
 
@@ -308,6 +322,7 @@ def start(
         cache_directory,
         package_roots,
         () if closure is None else closure.modules,
+        None if progress_seconds is None else float(progress_seconds),
     )
     _preload(settings, hooks=False)
     from ..core.kernels import declarations

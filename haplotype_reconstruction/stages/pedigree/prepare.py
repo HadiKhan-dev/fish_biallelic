@@ -39,14 +39,15 @@ KEY = "pedigree/prepared"
 
 
 class PreparedAdapter:
-    """Lossless schema-3 prepared record with a small layout header (selectors, bins, markers) and the contig's
-    configured material."""
+    """Lossless schema-4 prepared record with a small layout header (selectors, their fallback-rate lengths, bins,
+    markers) and the contig's configured material."""
 
-    schema = 3
+    schema = 4
 
     def encode(self, value: PreparedChromosome) -> Mapping[str, Any]:
         return {"schema": self.schema, **to_payload(value), "layout": [
-            dict(selector=c.selector_switch_probability, bins=c.n_bins, markers=c.informative_markers)
+            dict(selector=c.selector_switch_probability, fallback=c.selector_fallback_bp, bins=c.n_bins,
+                 markers=c.informative_markers)
             for c in value.components]}
 
     def decode(self, payload: Mapping[str, Any]) -> PreparedChromosome:
@@ -62,7 +63,7 @@ LAYOUT_ITEMS = ("schema", "contig", "component_count", "omitted_reason", "layout
 def layout_summary(header: Mapping[str, Any]) -> tuple[Layout, ChromosomeSummaryView]:
     """Prepared header to the material axis and the original chromosome report summary; no block arrays."""
     parts = header["layout"]
-    return (Layout(header["contig"], tuple(p["selector"] for p in parts)),
+    return (Layout(header["contig"], tuple(p["selector"] for p in parts), tuple(p.get("fallback") for p in parts)),
             ChromosomeSummaryView(header["contig"], header["component_count"], len(parts),
                                   sum(p["markers"] for p in parts), header["omitted_reason"],
                                   float(header["configured_morgans"])))
@@ -300,7 +301,7 @@ def _after_bounds(
     identity = screen.panel_derivation(
         screen_identity,
         bounds,
-        parameters.panel.pair_relevance_margin,
+        parameters.panel.max_pairs_per_child,
         reverse=parameters.reverse_conventions,
         numerical_policy=numerical_policy,
     )
@@ -351,10 +352,13 @@ def _after_prepared(
     maximum_cores: int,
     *,
     threads: int = 1,
+    scale_identity: str | None = None,
 ) -> Expansion | dict[RecordKey, str]:
+    """The screen barrier: the material choice (regimes.material_choice; with rate_estimate = ignore the map-scale
+    record ``scale_identity`` is not read), then the screen and the pair-bound tasks."""
     from ...science.pedigree import regimes
     from ...science.pedigree.run import precheck
-    from . import decision, screen
+    from . import decision, map_scale, screen
 
     informative = tuple(r for r in references if r.omitted_reason is None)
     sample_ids = tuple(manifest["sample_ids"])
@@ -371,11 +375,19 @@ def _after_prepared(
         summaries.append(summary)
         if r.omitted_reason is None:
             layouts.append(layout)
-    classification, axis = regimes.classify_layouts(tuple(layouts), parameters)
+    estimate = None
+    if parameters.map_scale.mode != "ignore":
+        if scale_identity is None:
+            raise InputError("the pedigree material rule requires the map-scale estimate's identity")
+        estimate = map_scale.load(store, scale_identity)
+    else:
+        scale_identity = ""
+    choice, classification, _morgans, axis = regimes.material_choice(tuple(layouts), parameters, estimate)
     if classification.name == "not_assessable":
         from .records import PedigreeDependencies
         dependencies = PedigreeDependencies(eligibility.identity(), "", "",
-            tuple((r.contig, r.identity) for r in references), (), regime=classification.name)
+            tuple((r.contig, r.identity) for r in references), (), regime=classification.name,
+            map_scale=scale_identity, veto=choice.veto_regime, reference=regimes.reference_regime(choice))
         # Bind the same evidence causes as bound_inputs, without requiring screen/panel/fits.
         from ..evidence import records as evidence_records
         dependencies = replace(dependencies, evidence=tuple((r.contig,
@@ -383,7 +395,7 @@ def _after_prepared(
             for r in references))
         reply = decision.finish_not_assessable(sample_ids, tuple(r.contig for r in references),
             tuple(summaries), classification, parameters, dependencies,
-            file=store.run, numerical_policy=numerical_policy, receipt=True)
+            file=store.run, numerical_policy=numerical_policy, receipt=True, material=choice, map_scale=estimate)
         assert isinstance(reply, dict)
         return reply
     placed = placements(tuple(layouts), axis, parameters)
@@ -453,10 +465,9 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     manifest = store.manifest("run") if manifest is None else manifest
     if manifest is None:
         raise InputError("pedigree requires the bound run manifest")
-    parameters = replace(
-        from_payload(PedigreeParameters, manifest["parameters"]["pedigree"]),
-        reverse_conventions=bool(manifest["ties"]["reverse"]),
-    )
+    from .records import run_parameters
+
+    parameters = run_parameters(manifest)
     numerical_policy = NumericalPolicy(**manifest["numerical_policy"])
     contigs = AnalysisContigs.from_manifest(manifest).included
     precheck(len(manifest["sample_ids"]), basis="configured")
@@ -476,13 +487,27 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
         )
         for c in contigs
     )
+    from . import map_scale
+
+    # The genome-wide map-scale estimate (record pedigree/map_scale) runs beside the contigs' preparations; the
+    # screen barrier reads it to choose the material regime (regimes.material_choice).
+    scale = Task(
+        TaskKey("pedigree", "map_scale"),
+        map_scale.run_stored,
+        args=(root, manifest, maps, parameters, numerical_policy),
+        resources=ResourceRequest(max_cores=maximum_cores),
+        inputs=tuple(RecordKey(c, "painting") for c in contigs),
+        outputs=(RecordKey("run", map_scale.KEY),),
+        thread_argument="threads",
+    )
     gather = Task(
         TaskKey("pedigree", "screen.barrier"),
         _after_prepared,
         args=(tuple(ResultRef(t.key) for t in tasks), root, manifest, parameters, numerical_policy, maximum_cores),
-        depends_on=tuple(t.key for t in tasks),
+        kwargs=dict(scale_identity=ResultRef(scale.key)),
+        depends_on=tuple(t.key for t in tasks) + (scale.key,),
         resources=ResourceRequest(max_cores=maximum_cores),
         outputs=(RecordKey("run", "pedigree/selective_screen"),),
         thread_argument="threads",
     )
-    return Expansion(tasks, gather)
+    return Expansion(tasks + (scale,), gather)

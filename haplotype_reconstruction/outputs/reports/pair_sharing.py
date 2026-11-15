@@ -73,7 +73,8 @@ def contig_pair_sharing(
     output: str | Path, results: Results, contig: str, *, genetic_maps: GeneticMapSet
 ) -> tuple[str, dict[str, Path]]:
     """Publish one contig's private parts: its rows and its per-pair lengths on the run's working map (from the
-    configured ``genetic_maps`` and, with ``infer_rate``, the relatedness decision the contig's painting waited for)."""
+    configured ``genetic_maps`` and, with rate_estimate = adopt, the relatedness decision the contig's painting waited
+    for)."""
     painting = painting_calls(results, contig)
     if painting is None or painting.sample_ids != tuple(results.manifest["sample_ids"]):
         raise InvariantError(f"{contig}: pair sharing needs the contig's published painting on the run's sample axis")

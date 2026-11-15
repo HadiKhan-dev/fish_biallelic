@@ -2535,3 +2535,52 @@ OVERLOADS["orientation._omit_order_probability"] = tuple(
      types.Array(types.float64, 1, "C", readonly=rows_readonly),
      types.Array(types.float64, 1, "C", readonly=rows_readonly), types.float64)
     for totals_readonly in (False, True) for rows_readonly in (False, True))
+
+
+# Family transmission (PD29) kernels receive owned contiguous work arrays through family_transmission's wrappers.
+_ft_i1 = types.Array(types.int64, 1, "C")
+_ft_i2 = types.Array(types.int64, 2, "C")
+_ft_i3 = types.Array(types.int64, 3, "C")
+_ft_b1 = types.Array(types.boolean, 1, "C")
+_ft_b2 = types.Array(types.boolean, 2, "C")
+_ft_f1 = types.Array(types.float64, 1, "C")
+_ft_f2 = types.Array(types.float64, 2, "C")
+_ft_f3 = types.Array(types.float64, 3, "C")
+_ft_f4 = types.Array(types.float64, 4, "C")
+_ft_f, _ft_n, _ft_q = types.float64, types.int64, types.boolean
+OVERLOADS.update(
+    {
+        "family_transmission._f": ((_ft_n, _ft_n, _ft_f),),
+        "family_transmission._emit": ((_ft_n, _ft_n, _ft_n, _ft_n, _ft_f),),
+        "family_transmission._switch": ((_ft_f, _ft_f),),
+        "family_transmission._child_fb": tuple(
+            (_ft_i2, _ft_i2, _ft_b1, _ft_i3, _ft_f1, _ft_f, _ft_f, want, _ft_f2, _ft_f1)
+            for want in (_ft_q, types.literal(True), types.literal(False))
+        ),
+        "family_transmission._half_fb": tuple(
+            (_ft_i2, _ft_i2, _ft_b1, _ft_i3, latent, _ft_f1, _ft_f, _ft_f, want, _ft_f3, _ft_f1)
+            for latent in (_ft_n, types.literal(0), types.literal(1))
+            for want in (_ft_q, types.literal(True), types.literal(False))
+        ),
+        "family_transmission._prior_inc": ((_ft_i3, _ft_b1, _ft_n, _ft_f1, _ft_f, _ft_f1),),
+        "family_transmission._direct_inc": tuple(
+            (_ft_i2, _ft_i2, _ft_b1, _ft_i3, latent, _ft_f, _ft_f1)
+            for latent in (_ft_n, types.literal(0), types.literal(1))
+        ),
+        "family_transmission.evaluate": (
+            (_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_b1, _ft_f1, _ft_f, _ft_f, _ft_f1, _ft_f2, _ft_f1),
+        ),
+        "family_transmission._mstep": tuple(
+            (_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_f3, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f, maxmode, _ft_f4)
+            for maxmode in (_ft_q, types.literal(True), types.literal(False))
+        ),
+        "family_transmission._emis4": ((_ft_i2, _ft_i2, _ft_b1, _ft_i3, _ft_n, _ft_f, _ft_f1),),
+        "family_transmission._half_flip": ((_ft_i2, _ft_i2, _ft_b1, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f, _ft_f1),),
+        "family_transmission.flip_gains": ((_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f),),
+        "family_transmission.fit": (
+            (_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_b1, _ft_f1, _ft_f, _ft_f, _ft_n, _ft_f2, _ft_b1, _ft_b1,
+             _ft_f1),
+        ),
+        "family_transmission.init_latent": ((_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f),),
+    }
+)

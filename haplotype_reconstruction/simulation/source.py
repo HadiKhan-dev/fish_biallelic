@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,6 +34,15 @@ from .pedigree import PedigreeTable, materialise_founders, pair_founders, simula
 from .reads import ReadInputs, read_inputs
 from .sites import draw_site_set, realise_profile, relative_morgans
 from .stocks import stock_founders, stock_record, stock_stream
+from .structure import (
+    ContigStructure,
+    StructureReads,
+    StructureTruth,
+    copy_alleles,
+    draw_structure,
+    haplotype_carriers,
+    paralog_sites,
+)
 from .truth import ContigTruth, TruthCrossovers, truth_crossovers, truth_flips, truth_founder_mosaics, truth_painting
 
 if TYPE_CHECKING:
@@ -252,6 +261,9 @@ class ContigSimulation:
     dropped_positions: np.ndarray = record_field(
         "obs", axes=("dropped",), units="bp", dtype="int64", default_factory=lambda: np.empty(0, np.int64)
     )
+    structure: ContigStructure | None = record_field("obs", dtype="ContigStructure | None", default=None)
+    # With structure: (offsets int64[G + 1], positions float64) of reference-axis switches, gametes as in crossovers.
+    switches: tuple | None = record_field("obs", dtype="tuple | None", default=None)
 
     def __post_init__(self):
         freeze_record_arrays(self)
@@ -296,6 +308,8 @@ def prepare_simulation(
     """
     if len(templates) != len(config.contigs) or len(chromosome_maps) != len(config.contigs):
         raise InputError("templates and generating maps must follow the configured contig axis")
+    if config.structure.enabled:
+        raise InputError("structural variants are generated contig by contig (prepare_contig), not by this planner")
     if len({len(t.population) for t in templates}) != 1:
         raise InputError("simulation contigs have different founder counts")
     sites = [t.positions for t in templates]
@@ -369,7 +383,14 @@ def contig_read_inputs(task: ContigSimulation) -> ReadInputs:
 
     hap0 = np.array([gather(individual[0]) for individual in task.offspring], dtype=np.int8)
     hap1 = np.array([gather(individual[1]) for individual in task.offspring], dtype=np.int8)
-    return read_inputs(hap0, hap1, task.positions, task.depth, task.read_model, rng)
+    inputs = read_inputs(hap0, hap1, task.positions, task.depth, task.read_model, rng)
+    if task.structure is None:
+        return inputs
+    paralog = paralog_sites(task.structure, task.positions)
+    present, copies = copy_alleles(
+        task.offspring, task.structure, task.positions, task.panel.alleles, task.panel.source_id, paralog
+    )
+    return replace(inputs, structure=StructureReads(present, copies, *paralog))
 
 
 def contig_result(
@@ -408,10 +429,30 @@ def contig_result(
         block=transformed.block,
         systematic_site=transformed.systematic_site,
         spurious=task.panel.spurious,
+        structure=None if task.structure is None else _structure_truth(task, inputs),
     )
     return cast("_ContigReadsFactory", ContigReads)(
         task.contig, task.sample_ids, task.positions, transformed.counts
     ), truth
+
+
+def _structure_truth(task: ContigSimulation, inputs: ReadInputs) -> StructureTruth:
+    """The contig's structure on the analysed axes (StructureTruth)."""
+    structure = task.structure
+    assert structure is not None and task.switches is not None and inputs.structure is not None
+    founders = haplotype_carriers(task.founders, structure).reshape(2 * len(task.founders), len(structure))
+    return StructureTruth(
+        kind=structure.kind,
+        start=structure.start,
+        end=structure.end,
+        target=structure.target,
+        founder_carries=founders,
+        sample_carries=haplotype_carriers(task.offspring, structure),
+        switch_offsets=task.switches[0],
+        switch_positions=task.switches[1],
+        paralog_offsets=inputs.structure.paralog_offsets,
+        paralog_sites=inputs.structure.paralog_sites,
+    )
 
 
 def prepare_stocks(config, seed, rows):
@@ -424,9 +465,9 @@ def prepare_stocks(config, seed, rows):
     return tuple(records), order
 
 
-def cross_founders(config, records, order, extent, chromosome_map, seed, contig):
+def cross_founders(config, records, order, extent, chromosome_map, seed, contig, structure=None):
     """Take whole individuals in pedigree order, then assign the cross-founder axis."""
-    taken = {r.name: iter(stock_founders(r, extent, chromosome_map, seed, contig)) for r in records}
+    taken = {r.name: iter(stock_founders(r, extent, chromosome_map, seed, contig, structure)) for r in records}
     result = []
     for i, name in enumerate(order):
         pair = next(taken[name])
@@ -543,7 +584,8 @@ def _contig_batches(active, function, batches):
     return results
 
 
-def streamed_cross(config, seed, maps, rows, founder_count, *, active=None, founders=None, positions=None):
+def streamed_cross(config, seed, maps, rows, founder_count, *, active=None, founders=None, positions=None,
+                   structure=None):
     """One actual contig, a full released cross seed axis, and shared pedigree metadata."""
     placeholder = [(founder_mosaic(1.0, 0, 2 * i), founder_mosaic(1.0, 0, 2 * i + 1)) for i in range(founder_count)]
     axis = [placeholder] * len(config.contigs)
@@ -558,6 +600,8 @@ def streamed_cross(config, seed, maps, rows, founder_count, *, active=None, foun
         budget=1,
         runner=partial(_contig_batches, active),
     )
+    if structure is not None:
+        common["structures"] = [structure if c == active else None for c in range(len(config.contigs))]
     if rows is None:
         generated, simulated = simulate_pedigree(axis, sites, config.cohorts, design=config.design, **common)
         selected = observed_indices(generated.cohorts, config.design, seed)
@@ -576,14 +620,16 @@ def prepare_contig(config, seed, index, maps, rows, records, order, template=Non
         else Extent(float(template.positions[0]), float(template.positions[-1]))
     )
     dropped = np.empty(0, np.int64)
+    panel = None
+    if config.source.kind != "coalescent":
+        panel = template.materialise(stream("simulation.founders", seed=seed, index=index))
+    structure = _contig_structure(config, seed, contig, extent, chromosome_map, records, panel)
     if records:
-        founders = cross_founders(config, records, order, extent, chromosome_map, seed, contig)
+        founders = cross_founders(config, records, order, extent, chromosome_map, seed, contig, structure)
     if config.source.kind == "coalescent":
         panel, dropped = coalescent_panel(config, records, founders, extent, chromosome_map, seed, contig)
-    else:
-        panel = template.materialise(stream("simulation.founders", seed=seed, index=index))
-        if not records:
-            founders = pair_founders([founder_mosaic(extent.start_bp, int(h), int(h)) for h in panel.source_id])
+    elif not records:
+        founders = pair_founders([founder_mosaic(extent.start_bp, int(h), int(h)) for h in panel.source_id])
     # The generated extent is [1, length_bp], independently of its retained sites.
     # A terminal sentinel keeps the released no-map traversal on the whole extent.
     # Scalar clock origin and actual marker coordinates remain separate.
@@ -591,7 +637,8 @@ def prepare_contig(config, seed, index, maps, rows, records, order, template=Non
     if config.source.kind == "coalescent":
         cross_positions = _CrossSites(np.unique(np.r_[panel.positions, int(extent.end_bp)]), extent.start_bp)
     generated, observed, selected, simulated = streamed_cross(
-        config, seed, maps, rows, len(founders), active=index, founders=founders, positions=cross_positions
+        config, seed, maps, rows, len(founders), active=index, founders=founders, positions=cross_positions,
+        structure=structure,
     )
     offspring = [simulated.haplotypes[row] for row in selected]
     if config.source.kind == "coalescent":
@@ -625,4 +672,52 @@ def prepare_contig(config, seed, index, maps, rows, records, order, template=Non
         seed,
         config.artefacts,
         dropped,
+        structure,
+        None if structure is None else _switch_truth(simulated, analysed),
     )
+
+
+def _switch_truth(simulated, analysed):
+    """Reference-axis switches of the analysed children's gametes, in truth_crossovers order."""
+    parts = [
+        np.asarray(simulated.switches[(row, slot)], np.float64)
+        for row, slot, _, _ in simulated.gametes
+        if row in analysed
+    ]
+    offsets = np.concatenate(([0], np.cumsum([len(x) for x in parts]))).astype(np.int64)
+    return offsets, (np.concatenate(parts) if parts else np.empty(0, np.float64))
+
+
+def _contig_structure(config, seed, contig, extent, chromosome_map, records, panel):
+    """The contig's structural variants (simulation/structure.py), or None when the model is off.
+
+    Carriers: with a coalescent source, the derived state of a mutation on the source genealogy at each variant's
+    anchor, replayed on the same trees as the sites (the source stream restarted; the traversal's draws do not depend
+    on the carried sets); with a file source, independent draws per source haplotype."""
+    model = config.structure
+    if not model.enabled:
+        return None
+    first, last = int(extent.start_bp), int(extent.end_bp)
+    if config.source.kind == "coalescent":
+        names, parent, split, size = config.source.population_tree()
+        populations = np.concatenate(
+            [np.full(2 * int(r.sizes[0]), names.index(r.population), np.int64) for r in records]
+        )
+        reference = names.index(config.source.reference_population) if config.source.reference_population else 0
+        leaves = np.r_[populations, np.int64(reference)]
+        length = float(relative_morgans(extent, chromosome_map, np.array([extent.end_bp]))[0])
+
+        def genealogy(anchors, uniforms):
+            order = np.argsort(anchors, kind="stable")
+            x = np.clip(relative_morgans(extent, chromosome_map, np.asarray(anchors, np.float64)[order]), 0, length)
+            rng = stock_stream("simulation.source", seed, contig)
+            derived = mutations(
+                leaves, parent, split, size, length, rng, np.array([0.0, length]),
+                np.ones((1, len(leaves)), bool), x, np.asarray(uniforms, np.float64)[order],
+            )
+            result = np.empty_like(derived)
+            result[:, order] = derived
+            return result
+
+        return draw_structure(model, seed, contig, first, last, len(populations), genealogy)
+    return draw_structure(model, seed, contig, first, last, len(panel.source_id))

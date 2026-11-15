@@ -31,6 +31,7 @@ import numpy as np
 
 from haplotype_reconstruction.contracts.roles import record_field
 from haplotype_reconstruction.core.concurrency import ThreadSource
+from haplotype_reconstruction.core.progress import Progress
 from haplotype_reconstruction.core.ties import (
     NOISE_MOTION,
     WIDE_CLASS_QUANTA,
@@ -319,6 +320,38 @@ class _Archive:
             reverse=self.reverse,
         )
         return [panels[int(index)] for index in classes.order if classes.classes[int(index)] == 0]
+
+
+# SearchState attributes a progress snapshot does not hold (SearchState.snapshot): the block's inputs, settings and
+# derived constants, callbacks and the thread source, the progress capability, the archive (saved by its own
+# fields below) and the evidence-only workspaces (fixed-K tables and fit memos, growth inputs, residual clustering
+# memos, cutting rules, cavity tables), which a construction from the same inputs rebuilds.
+_UNSAVED = frozenset(
+    {
+        "reverse",
+        "keep",
+        "threads",
+        "diagnostics",
+        "config",
+        "search",
+        "likelihood",
+        "observed",
+        "active",
+        "ceiling",
+        "quanta",
+        "content",
+        "workspace",
+        "growth",
+        "residual_inputs",
+        "cuts",
+        "cavity_workspace",
+        "beam_width",
+        "replacement_limit",
+        "archive",
+    }
+)
+# _Archive constants (settings, the content-key callback, the shared tie counter, the evidence mask).
+_ARCHIVE_UNSAVED = frozenset({"reverse", "width", "quantum", "content", "counter", "observed"})
 
 
 class SearchState:
@@ -681,13 +714,58 @@ class SearchState:
             self.limits.append("mean_field_nonconvergence")
         self.expansions += len(parents)
 
-    def run(self) -> None:
-        self.start()
-        if not self.scores:
-            self.stop_reason = "no_incumbent_search_limited"
-            return
+    # ---------------------------------------------------------------------------------- progress
+    def snapshot(self) -> dict:
+        """The search's state at an expansion boundary, for a progress snapshot (store.progress).
+
+        Everything the rest of the search reads or reports except _UNSAVED: the archive (fitted keys, beams and
+        classes, omissions, science keys), the score cache, scores, scored classes and representatives, the soft
+        birth memo (a miss records tie decisions, so a refill would count them twice), the expansion sets,
+        completeness and offsets, limits, omissions and every counter, and the tie counter; plus the workspace's
+        fit-schedule counts and the collector's clique statistics (diagnostics). Not saved: inputs, settings,
+        callbacks and the evidence-only workspaces, which a construction from the same inputs rebuilds; their fit,
+        clustering and cavity memos are exact (a resumed block refits what they held, with equal results and no
+        tie decisions; only the diagnostic fit-schedule counts then count the refits too)."""
+        return dict(
+            state={name: value for name, value in vars(self).items() if name not in _UNSAVED},
+            archive={name: value for name, value in vars(self.archive).items() if name not in _ARCHIVE_UNSAVED},
+            fit_counts=(dict(self.workspace.fit_schedule_counts), dict(self.workspace.endpoint_family_counts)),
+            cliques=None if self.diagnostics is None else list(self.diagnostics.clique_statistics),
+        )
+
+    def restore(self, saved: dict) -> None:
+        """Continue a snapshot on this search, freshly constructed from the same inputs (its start is not run)."""
+        for name, value in saved["state"].items():
+            setattr(self, name, value)
+        for name, value in saved["archive"].items():
+            setattr(self.archive, name, value)
+        self.archive.counter = self.counter
+        schedule, families = saved["fit_counts"]
+        self.workspace.fit_schedule_counts.clear()
+        self.workspace.fit_schedule_counts.update(schedule)
+        self.workspace.endpoint_family_counts.clear()
+        self.workspace.endpoint_family_counts.update(families)
+        if self.diagnostics is not None and saved["cliques"] is not None:
+            self.diagnostics.clique_statistics[:] = saved["cliques"]
+
+    def run(self, progress: Progress | None = None) -> None:
+        """The search: its start, then expansions until a stop. ``progress`` (core.progress): at every expansion
+        boundary the search offers its "discovery" frame (snapshot); a resumed search restores it and continues from
+        that boundary, past the start and past the boundary's own snapshot."""
+        saved = None if progress is None else progress.take("discovery")
+        if saved is not None:
+            self.restore(saved)
+        else:
+            self.start()
+            if not self.scores:
+                self.stop_reason = "no_incumbent_search_limited"
+                return
+        resumed = saved is not None
         search = self.search
         while True:
+            if progress is not None and not resumed:
+                progress.boundary("discovery", self.snapshot)
+            resumed = False
             before = self.selected()
             parents = self.parent_group(before.k, self.ordinary_expanded)
             phase = "ordinary"
@@ -744,8 +822,10 @@ def _search(
     diagnostics: BlockDiagnostics | None = None,
     threads: ThreadSource = 1,
     map_work=map,
+    progress: Progress | None = None,
 ) -> BlockSearch:
-    """The search of a block whose samples are in canonical order (see search_block)."""
+    """The search of a block whose samples are in canonical order (see search_block); ``progress``: the block's
+    partial-progress capability (SearchState.run)."""
     forward = SearchState(
         likelihood,
         observed,
@@ -756,7 +836,7 @@ def _search(
         threads=threads,
         map_work=map_work,
     )
-    forward.run()
+    forward.run(progress)
     omissions = [*forward.omissions, *forward.archive.omissions]
     limits = list(forward.limits)
     limits.extend(item["cause"] for item in omissions if item.get("kind") != "ranked_truncation")

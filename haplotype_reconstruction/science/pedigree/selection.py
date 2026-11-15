@@ -338,4 +338,5 @@ def omission_totals(inputs):
         _units_present(exposure.pair_present, weights),
         junctions.junctions.sum(axis=0), junctions.callable_bins.sum(axis=0),
         junctions.pair_log_odds.sum(axis=0),
-        _order_statistics(junctions.junctions, junctions.callable_bins, junctions.total_bins))
+        _order_statistics(junctions.junctions, junctions.callable_bins, junctions.total_bins),
+        pair_log_cosh=None if junctions.pair_log_cosh is None else junctions.pair_log_cosh.sum(axis=0))

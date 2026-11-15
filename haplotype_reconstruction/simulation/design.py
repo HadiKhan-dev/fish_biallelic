@@ -20,6 +20,8 @@ from .artefacts import ArtefactModel
 from .artefacts import ArtefactRegion as ArtefactRegion
 from .parameters import MUTATION_RATE_PER_BP, PROFILE_MASKED_FRACTION, PROFILE_MASKED_MEAN_BP, PROFILE_SIGMAS
 from .sites import Profile, SiteMode
+from .structure import StructuralVariant as StructuralVariant
+from .structure import StructureModel
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,17 @@ class ReadModel:
     of site_loss_fine_window_bp, multiplies the coarse factor, and is drawn after it.
     region_depth_cv supplies an independent mean-one lognormal factor per sample and
     physical window of region_depth_window_bp. Zero CV/dispersion consumes no extra random draws.
+
+    long_read_mean_bp > 0 selects the long-read sampler instead (simulation/reads.py): single reads of lognormal
+    length (mean long_read_mean_bp, log-SD long_read_length_sigma) cover every site they span, each read has its own
+    error rate (Phred normal, read_quality_mean / read_quality_sd), split into substitutions (substitution_share; a
+    third reach the other allele) and indels (half deletions, which leave no base). A share context_sites of sites
+    (shared by all samples) has one allele extending a homopolymer, whose indel rate is multiplied by context_factor
+    times a mean-one exponential site strength (context_convert of those errors read as the other allele). reference_bias removes a read's base with probability
+    1 - exp(-reference_bias k**reference_bias_power), k the read homologue's ALT alleles within
+    reference_bias_window_bp; reference_pull reads an ALT base as REF (mean probability, scaled by the read's error
+    rate). foreign_read_share of the reads come from another sequenced sample (a uniform other sample and homologue).
+    error_rate is not used by this sampler.
     """
 
     error_rate: float = 0.02
@@ -101,6 +114,25 @@ class ReadModel:
     site_loss_fine_window_bp: int = record_field(
         "obs", units="bp", dtype="int", default=generating.SITE_LOSS_FINE_WINDOW_BP
     )
+    long_read_mean_bp: float = record_field("obs", units="bp", dtype="float64", default=generating.LONG_READ_MEAN_BP)
+    long_read_length_sigma: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.LONG_READ_LENGTH_SIGMA
+    )
+    read_quality_mean: float = record_field("obs", units="Phred", dtype="float64", default=generating.READ_QUALITY_MEAN)
+    read_quality_sd: float = record_field("obs", units="Phred", dtype="float64", default=generating.READ_QUALITY_SD)
+    substitution_share: float = record_field("obs", units="1", dtype="float64", default=generating.SUBSTITUTION_SHARE)
+    context_sites: float = record_field("obs", units="1", dtype="float64", default=generating.CONTEXT_SITES)
+    context_factor: float = record_field("obs", units="1", dtype="float64", default=generating.CONTEXT_FACTOR)
+    context_convert: float = record_field("obs", units="1", dtype="float64", default=generating.CONTEXT_CONVERT)
+    reference_bias: float = record_field("obs", units="1", dtype="float64", default=generating.REFERENCE_BIAS)
+    reference_bias_window_bp: int = record_field(
+        "obs", units="bp", dtype="int", default=generating.REFERENCE_BIAS_WINDOW_BP
+    )
+    reference_bias_power: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.REFERENCE_BIAS_POWER
+    )
+    reference_pull: float = record_field("obs", units="1", dtype="float64", default=generating.REFERENCE_PULL)
+    foreign_read_share: float = record_field("obs", units="1", dtype="float64", default=generating.FOREIGN_READ_SHARE)
 
     def __post_init__(self):
         if not 0 < self.error_rate < 0.5:
@@ -146,6 +178,34 @@ class ReadModel:
             and self.fragment_sd_bp >= 0
         ):
             raise SettingsError("fragment length mean must be positive and its sd nonnegative")
+        if not math.isfinite(self.long_read_mean_bp) or self.long_read_mean_bp < 0:
+            raise SettingsError("long_read_mean_bp must be finite and nonnegative")
+        if self.long_read_mean_bp and self.read_length_bp:
+            raise SettingsError("long_read_mean_bp and read_length_bp select different samplers; set one")
+        if self.long_read_mean_bp and self.long_read_mean_bp < generating.LONG_READ_MIN_BP:
+            raise SettingsError(f"long_read_mean_bp must be at least {generating.LONG_READ_MIN_BP} bp")
+        for name in ("long_read_length_sigma", "read_quality_sd", "context_factor"):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
+                raise SettingsError(f"{name} must be finite and nonnegative")
+        if not generating.READ_QUALITY_MIN <= self.read_quality_mean <= generating.READ_QUALITY_MAX:
+            raise SettingsError(
+                f"read_quality_mean must be between {generating.READ_QUALITY_MIN} and {generating.READ_QUALITY_MAX}"
+            )
+        for name in ("substitution_share", "context_sites", "context_convert"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise SettingsError(f"{name} must be between zero and one")
+        if not math.isfinite(self.reference_bias) or self.reference_bias < 0:
+            raise SettingsError("reference_bias must be finite and nonnegative")
+        if not math.isfinite(self.reference_bias_power) or self.reference_bias_power <= 0:
+            raise SettingsError("reference_bias_power must be finite and positive")
+        if not 0 <= self.reference_pull <= 1:
+            raise SettingsError("reference_pull must be between zero and one")
+        if not 0 <= self.foreign_read_share < 1:
+            raise SettingsError("foreign_read_share must be in [0, 1)")
+        if int(self.reference_bias_window_bp) != self.reference_bias_window_bp or self.reference_bias_window_bp < 0:
+            raise SettingsError("reference_bias_window_bp must be a nonnegative integer")
+        if self.reference_bias and not self.reference_bias_window_bp:
+            raise SettingsError("positive reference_bias requires positive reference_bias_window_bp")
 
 
 @dataclass(frozen=True)
@@ -311,6 +371,7 @@ class SimulationConfig:
     length_bp: int | tuple[tuple[str, int], ...] = 0
     sites: SiteSpec | None = None
     artefacts: ArtefactModel = field(default_factory=ArtefactModel)
+    structure: StructureModel = field(default_factory=StructureModel)
 
     def __post_init__(self):
         if self.source is None:
@@ -331,6 +392,10 @@ class SimulationConfig:
             raise SettingsError("generating_rate_cm_per_mb must be finite and nonnegative")
         if self.genome_contigs and self.genome_contigs != self.contigs:
             raise SettingsError("simulation.genome.contigs and input.contigs must have the same order")
+        if self.reads.long_read_mean_bp and self.artefacts.enabled and self.artefacts.balance_dispersion:
+            raise SettingsError(generating.BALANCE_WITH_LONG_READS)
+        if any(v.contig not in self.contigs for v in self.structure.variants):
+            raise SettingsError("structural variants must name simulated contigs")
         if len({s.name for s in self.stocks}) != len(self.stocks):
             raise SettingsError("stock names must be unique")
         if self.source.kind == "coalescent":

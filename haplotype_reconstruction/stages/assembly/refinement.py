@@ -233,12 +233,14 @@ def _component_stage(
     """Run and atomically record one independently resumable component.
 
     With ``record_fits`` (and a record scope) every completed sweep and fit is published under the
-    component's identity-checked scope before the component record, so that a rerun of an interrupted
-    component resumes its fits exactly where they stopped (fit.SweepEngine).
+    component's identity-checked scope, in the component's own progress container (store.progress), before the
+    component record, so that a rerun of an interrupted component resumes its fits exactly where they stopped
+    (fit.SweepEngine). The progress container is removed once the component record is published.
     """
     from haplotype_reconstruction.science.assembly.refinement.component_workspace import component_evidence
 
-    from .records import encode_components, encode_refinement
+    from ..framework import close_progress, unit_progress
+    from .records import RecordCapability, encode_components, encode_refinement
     from .team import RefinementTeam
 
     name = f"{number:05d}"
@@ -253,7 +255,14 @@ def _component_stage(
             saved = records.load(name)
             assert saved is not None
             return _decode_component(saved)
-        fit_records = None if records is None or not record_fits else records.scoped(name + "/fit", nthreads=1)
+        progress = None
+        fit_records = None
+        if records is not None and record_fits:
+            progress = unit_progress(records.file, records.key(name), records.derivation(name))
+            # The keys and derivations of the component's scope, in its own container.
+            fit_records = RecordCapability(
+                progress.records(name=records.file.name), records.key(name + "/fit"), records.derivation(name + "/fit")
+            )
         team = RefinementTeam(cores, current_budget())
         # Work of one sample's component messages (core.kernels.sample_team): sites x K^2 diplotype cells.
         team.sample_work = int(sum(panel.sites for panel in panels)) * int(component.founders) ** 2
@@ -272,6 +281,8 @@ def _component_stage(
             )
         if records is not None:
             records.save(name, dict(component=encode_components([result[0]]), refinement=encode_refinement(result[1])))
+        if progress is not None:
+            close_progress(progress)
         return result
 
 

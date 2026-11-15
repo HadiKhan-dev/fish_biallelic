@@ -664,7 +664,12 @@ Source: [`SIBLING_GUARD_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 10 | `call` | withheld, kept or untested; withdrawals are irreversible (text). |
 | 11 | `evidence_call` | call under final retained-edge premises (text). |
 | 12 | `withdrawal_iteration` | first withdrawal pass, zero when retained (count). |
-| 13 | `withholding_basis` | pair, family or none; first-withdrawal basis is retained (text). |
+| 13 | `withholding_basis` | pair, family, transmission (PD29) or none; first-withdrawal basis is retained (text). |
+| 14 | `transmission_call` | PD29 family transmission vote on guard-retained edges: kept, withheld or untested (fewer than |
+| 15 | `transmission_witnesses` | witnesses retained for the PD29 test, after its cap (count). |
+| 16 | `transmission_segments` | scored 1-Morgan component segments (count). |
+| 17 | `transmission_score` | PD29 robust statistic, sum of capped segment log odds of PAR against the alternative; empty |
+| 18 | `transmission_alternative` | REL (one more full sib) or UNR (not in the family), the better alternative (text). |
 
 ## exclusion interval columns
 

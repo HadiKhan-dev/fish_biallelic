@@ -246,6 +246,9 @@ def _prepare_component(
         observed=observed,
         state_classes=np.ascontiguousarray(np.transpose(state_classes, (0, 2, 1))),
         information_exponent=np.empty((gl.shape[0], 0)),
+        selector_fallback_bp=np.ascontiguousarray(
+            chromosome_map.fallback_bp(bins.centers[:-1], bins.centers[1:]), dtype=np.float64
+        ),
     )
 
 

@@ -45,12 +45,14 @@ def stack(
     *,
     axis: MaterialAxis | None = None,
     summary: tuple[ChromosomeSummaryView, ...] = (),
+    regime_morgans: float | None = None,
 ) -> GenomeScores:
     """Own C-contiguous unit arrays; records remain borrowed and unchanged.
 
     ``axis``: the material axis of the prepared layouts (regimes.axis); when given, the records must reproduce its
     contigs, offsets and U exactly, and the unit arrays are filled while records stream. Without it the records are
-    read first (tests and replays)."""
+    read first (tests and replays). ``regime_morgans``: the Morgans the regime reads (regimes.material_choice), when
+    they are not U itself."""
     if sample_ids != eligibility.sample_ids:
         raise InputError("score stacking eligibility differs from the sample axis")
     material = parameters.material
@@ -135,7 +137,8 @@ def stack(
             raise InputError("retained pairs lie outside the eligible edges")
         one[:, columns] = unit["one_raw"]
     morgans = axis.morgans
-    regime = classify(morgans, len(rows), parameters).name
+    basis = morgans if regime_morgans is None else float(regime_morgans)
+    regime = classify(basis, len(rows), parameters).name
     return GenomeScores(
         sample_ids,
         tuple(f"unit:{int(u)}" for u in rows),
@@ -157,6 +160,7 @@ def stack(
         working_morgans=np.ascontiguousarray(working[rows]),
         material_morgans=float(morgans),
         regime=regime,
+        regime_morgans=float("nan") if regime_morgans is None else float(regime_morgans),
         real_contigs=tuple(contigs),
         pieces=tuple(pieces),
         piece_contig=np.asarray(piece_contig, dtype=np.int64),

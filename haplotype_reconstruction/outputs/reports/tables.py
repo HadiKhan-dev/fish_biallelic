@@ -192,6 +192,8 @@ def record_mapping(value):
         }
     if isinstance(value, (list, tuple)):
         return [record_mapping(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [record_mapping(item) for item in value.tolist()]
     if isinstance(value, np.generic):
         return value.item()
     return value

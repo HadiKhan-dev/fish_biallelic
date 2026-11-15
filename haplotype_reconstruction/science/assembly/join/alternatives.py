@@ -132,7 +132,25 @@ def _family_records(choices, status):
     )
 
 
-def run_bounded_replays(run, *, max_branches=MAX_BRANCHES):
+@dataclass
+class ReplayLoop:
+    """The state of run_bounded_replays between executions: the FIFO of prefixes still to run and those queued,
+    the visited prefixes, the completed branches, excluded seed choices, failed choices and failures, the executions
+    attempted, and the forced prefix of the execution in progress (None between executions). A join's progress
+    snapshot (store.progress) holds it, so that a resumed join continues the execution in progress."""
+
+    pending: list = dataclasses.field(default_factory=lambda: [()])
+    queued: set = dataclasses.field(default_factory=lambda: {()})
+    visited: set = dataclasses.field(default_factory=set)
+    branches: list = dataclasses.field(default_factory=list)
+    excluded: list = dataclasses.field(default_factory=list)
+    failed_choices: list = dataclasses.field(default_factory=list)
+    failures: list = dataclasses.field(default_factory=list)
+    attempted: int = 0
+    current: tuple | None = None
+
+
+def run_bounded_replays(run, *, max_branches=MAX_BRANCHES, loop: ReplayLoop | None = None):
     """Run ``run(ReplayChoices) -> outcome`` from original inputs for each explored prefix.
 
     ``run`` may reuse the first execution's immutable emission layout. It must construct
@@ -140,35 +158,41 @@ def run_bounded_replays(run, *, max_branches=MAX_BRANCHES):
     Return completed outcomes without selecting among different K by raw likelihood.
     ``complete`` concerns the encountered serialized choice tree only; excluded inner
     seed families and other source ambiguities remain explicitly outside this claim.
+    ``loop``: the state to continue (a resumed join's; its execution in progress runs again from a fresh choice
+    plan, whose transcript the resumed search restores), else a fresh one.
     """
     if not 1 <= max_branches <= MAX_BRANCHES:
         raise ValueError(f"join replay budget must be between 1 and {MAX_BRANCHES}")
 
-    pending = [()]
-    queued = {()}
-    visited = set()
-    branches, excluded, failed_choices, failures = [], [], [], []
-    attempted = 0
-    while pending and attempted < max_branches:
-        # Do not evaluate a convenient subset of a family already known not to fit.
-        if branches and len(branches) + len(pending) > max_branches:
-            break
-        forced = pending.pop(0)
-        queued.discard(forced)
-        if forced in visited:
-            continue
+    state = ReplayLoop() if loop is None else loop
+    pending, queued, visited = state.pending, state.queued, state.visited
+    branches, excluded, failed_choices, failures = state.branches, state.excluded, state.failed_choices, state.failures
+    while True:
+        if state.current is None:
+            if not (pending and state.attempted < max_branches):
+                break
+            # Do not evaluate a convenient subset of a family already known not to fit.
+            if branches and len(branches) + len(pending) > max_branches:
+                break
+            forced = pending.pop(0)
+            queued.discard(forced)
+            if forced in visited:
+                continue
+            state.current = forced
+            state.attempted += 1
+        forced = state.current
         plan = ReplayChoices(forced)
-
-        attempted += 1
         try:
             outcome = run(plan)
             plan.finish()
         except ReplayMismatch as error:
+            state.current = None
             failures.append(str(error))
             failed_choices.extend(forced[-1:])
             # A changed prefix invalidates this family comparison. Preserve all
             # unrun choices, rather than trying more mismatched replays.
             break
+        state.current = None
         choices = tuple(plan.observed)
         branches.append(ReplayBranch(outcome, choices, len(forced)))
         excluded.extend(plan.excluded)
@@ -182,6 +206,7 @@ def run_bounded_replays(run, *, max_branches=MAX_BRANCHES):
                 if prefix not in visited and prefix not in queued:
                     pending.append(prefix)
                     queued.add(prefix)
+    attempted = state.attempted
     remaining = [prefix[-1] for prefix in pending if prefix] + failed_choices
     return ReplayResult(
         tuple(branches),
@@ -271,6 +296,7 @@ class ReplayMerge:
         self._search = None
         self._pending: list[tuple[bytes, _Boundary]] = []
         self._matches: list[tuple[_Boundary, int, _Boundary]] = []
+        self._bound = False
 
     def boundary(self, search, loop):
         """The merged outcome when this boundary's state was an earlier execution's, else None (continue)."""
@@ -297,6 +323,31 @@ class ReplayMerge:
         plan.observed.extend(target.observed[there.observed :])
         plan.excluded.extend(target.excluded[there.excluded :])
         return _merged_outcome(search, target.outcome, there)
+
+    def state(self) -> dict:
+        """Everything but the live search (a join's progress snapshot): known boundaries, completed executions,
+        the current execution's pending boundaries and coincidences, the verify count, and whether an execution is
+        bound (rebind restores it to the resumed search)."""
+        return dict(
+            known=self._known,
+            executions=self._executions,
+            pending=self._pending,
+            matches=self._matches,
+            verified=self.verified,
+            bound=self._search is not None,
+        )
+
+    def restore(self, state: dict) -> None:
+        self._known, self._executions = dict(state["known"]), list(state["executions"])
+        self._pending, self._matches = list(state["pending"]), list(state["matches"])
+        self.verified = int(state["verified"])
+        self._bound = bool(state["bound"])
+
+    def rebind(self, search) -> None:
+        """Bind a resumed execution's search when the snapshot's execution was bound (its pending boundaries)."""
+        if self._bound:
+            self._search = search
+        self._bound = False
 
     def complete(self, search, outcome) -> None:
         """Record a finished (or merged) execution's boundaries; in verify mode check its coincidences first."""

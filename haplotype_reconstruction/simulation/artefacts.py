@@ -67,6 +67,7 @@ class ArtefactModel:
     stretch_miss: float = record_field("obs", dtype="float64", default=p.ARTEFACT_STRETCH_MISS)
     miss: float = record_field("obs", dtype="float64", default=p.ARTEFACT_MISS)
     miss_sample_cv: float = record_field("obs", dtype="float64", default=p.ARTEFACT_MISS_SAMPLE_CV)
+    hom_alt_miss_factor: float = record_field("obs", dtype="float64", default=p.ARTEFACT_HOM_ALT_MISS_FACTOR)
     call_min_alt_fraction: float = record_field("obs", dtype="float64", default=p.ARTEFACT_CALL_MIN_ALT_FRACTION)
     block_band: float = record_field("obs", dtype="float64", default=p.ARTEFACT_BLOCK_BAND)
     balance_dispersion: float = record_field("obs", dtype="float64", default=p.ARTEFACT_BALANCE_DISPERSION)
@@ -89,6 +90,8 @@ class ArtefactModel:
             raise SettingsError("artefact balance_dispersion must be in [0, 1)")
         if not math.isfinite(self.miss_sample_cv) or self.miss_sample_cv < 0:
             raise SettingsError("artefact miss_sample_cv must be finite and nonnegative")
+        if not 0 <= self.hom_alt_miss_factor <= 1:
+            raise SettingsError("artefact hom_alt_miss_factor must be between zero and one")
         if not math.isfinite(self.block_band) or self.block_band <= 0:
             raise SettingsError("artefact block_band must be finite and positive")
         if not math.isfinite(self.stretch_sites) or self.stretch_sites < 1:
@@ -315,6 +318,9 @@ def apply_artefacts(
             sample_factor = float(rng.lognormal(-sigma2 / 2, math.sqrt(sigma2)))
         stretch = draw_stretches(sites, model, rng)
         probability = miss_probabilities(shared.hard, stretch, shared.region_factor, model, sample_factor)
+        # A caller misses a homozygous-ALT genotype far less often than a heterozygote (all its reads agree): the
+        # same uniforms decide, with the probability scaled by hom_alt_miss_factor at dosage-2 cells.
+        probability = np.where(dosage[s] == 2, probability * model.hom_alt_miss_factor, probability)
         missed[s] = (dosage[s] >= 1) & (rng.random(sites) < probability)
         called_ref = (depth > 0) & (result[s, :, 1] >= model.call_min_alt_fraction * depth)
         block[s] = missed[s] | ((dosage[s] == 0) & ~called_ref)

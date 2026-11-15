@@ -12,6 +12,7 @@ from ...contracts.observations import PairArray, dense_observed, slice_observed
 from ...contracts.roles import record_field
 from ...core.concurrency import ThreadSource
 from ...core.errors import InvariantError
+from ...core.progress import Progress
 from ...core.ties import inverse_permutation, run_sample_order
 from .diagnostics import BlockDiagnostics
 from .panel import FixedKSolution, restricted
@@ -80,6 +81,7 @@ def search_block(
     diagnostics: BlockDiagnostics | None = None,
     threads: ThreadSource = 1,
     map_work=map,
+    progress: Progress | None = None,
 ) -> BlockSearch:
     """Search neutralised float64[N,L,3] evidence in the explicit canonical sample order.
 
@@ -109,6 +111,7 @@ def search_block(
         diagnostics=diagnostics,
         threads=threads,
         map_work=map_work,
+        progress=progress,
     )
     if order is None or result.selected is None:
         return result
@@ -129,12 +132,15 @@ def discover_block(
     diagnostics: BlockDiagnostics | None = None,
     threads: ThreadSource = 1,
     map_work=map,
+    progress: Progress | None = None,
 ) -> DiscoveredBlock | None:
     """Search one founder-view block and release alleles; None means uninformative.
 
     The input is unchanged. Returned arrays belong to this result. Configuration,
     thread team and convention are explicit; no resources or clocks are consulted.
-    ``map_work`` is ordered, with one native thread per concurrent cavity candidate.
+    ``map_work`` is ordered, with one native thread per concurrent cavity candidate. ``progress``: the block's
+    partial-progress capability (core.progress): its search snapshots its state at expansion boundaries
+    (search.SearchState.run) and a resumed block continues from the saved one.
     """
     if not evidence.informative:
         return None
@@ -155,6 +161,7 @@ def discover_block(
         diagnostics=diagnostics,
         threads=threads,
         map_work=map_work,
+        progress=progress,
     )
     return materialise(
         evidence.block,

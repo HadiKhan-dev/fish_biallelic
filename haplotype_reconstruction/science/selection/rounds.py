@@ -22,6 +22,8 @@ from ...contracts.observations import PairArray
 from ...contracts.panels import unknown_copy_mass
 from ...contracts.roles import freeze_record_arrays, record_field
 from ...contracts.selection import BlockSelection, MemoHits, SelectionMemo, SelectionSummary
+from ...core.progress import Progress
+from ...core.progress import frame as progress_frame
 from ...core.ties import BOUNDARY_GUARD, TieCounter, census, census_enabled, fixed_policy, improves, tie_classes
 from ..discovery.api import DiscoveryParameters, search_bytes
 from .bank import candidate_bank
@@ -163,6 +165,37 @@ def _consensus_panel(
     )
 
 
+def _searched_starts(starts, prepared, config, memo, context, ties, reverse, census_sink) -> list:
+    """The starts a block searches: with several, the fitted starts' selection objectives decide (the best tie
+    class, fewer founders inside it, a stated prior), one search per distinct fitted panel."""
+    if len(starts) <= 1:
+        return starts
+    tolerance = config.search.decision_tolerance
+    fits = [
+        fitted_start(start, prepared, config.search, memo, context, reverse=reverse, census_sink=census_sink)
+        for start in starts
+    ]
+    values = [selection_objective(fit, context) for fit in fits]
+    classes = tie_classes(
+        values,
+        tolerance,
+        descending=True,
+        motion=DECISION_MOTION,
+        reverse=fixed_policy("selection.start.set", tolerance, reverse=reverse).reverse,
+    )
+    best = [n for n in range(len(starts)) if classes.classes[n] == 0]
+    fewest = min(len(fits[n].panel) for n in best)
+    distinct: dict[tuple[bytes, bytes], np.ndarray] = {}
+    for n in best:
+        if len(fits[n].panel) == fewest:
+            distinct.setdefault((fits[n].panel.tobytes(), fits[n].frequencies.tobytes()), starts[n])
+    searched = [distinct[key] for key in sorted(distinct)]
+    ties.note(
+        "ls.start.set", inside_tie=len(searched) > 1, wide=classes.wide_classes, boundary=len(classes.boundary_gaps)
+    )
+    return searched
+
+
 def select_block(
     task: BlockTask,
     likelihoods: np.ndarray,
@@ -172,9 +205,16 @@ def select_block(
     reverse: bool,
     census_sink=None,
     threads: int | Callable[[], int] = 1,
+    progress: Progress | None = None,
 ) -> BlockSelection:
     """Select one block's panel (``likelihoods``/``observed``: its discovery-site columns). ``threads``: an int,
-    or the caller's live share re-read at the block's lane boundaries."""
+    or the caller's live share re-read at the block's lane boundaries.
+
+    ``progress``: the block's partial-progress capability (core.progress). Its "block" frame holds everything the
+    block computed before and between its searches (the candidate bank and starts, the searched starts, the tie
+    counter, the likelihood memo with its hit counts and the completed searches' outcomes); search_panel adds
+    its own round state. A resumed block continues from the saved frames and publishes the records the
+    uninterrupted block would have published."""
     config, discovery_config, redraw_rate = settings
     prepared = PreparedBlock(
         likelihoods,
@@ -186,68 +226,62 @@ def select_block(
         block_id=task.label or str(task.block),
     )
     incumbent = task.incumbent
-    ties = TieCounter()
     census_key = task.label or None
-    starts, bank, bank_summary = candidate_bank(
-        likelihoods,
-        observed,
-        task.latent,
-        task.proposals,
-        discovery_config,
-        config.bank,
-        incumbent_panel=None if incumbent is None else incumbent.fit.panel,
-        ties=ties,
-        census_key=census_key,
-        alternatives=task.alternatives,
-        reverse=reverse,
-        census_sink=census_sink,
-        threads=prepared.threads,
-    )
-    memo = LikelihoodMemo(task.memo)
     context = None if task.founders is None else ContextFounders(task.founders)
     tolerance = config.search.decision_tolerance
-    searched = starts
-    if len(starts) > 1:
-        # The fitted starts' selection objectives decide which starts are searched: the best tie
-        # class, fewer founders inside it (a stated prior); one search per distinct fitted panel.
-        fits = [
-            fitted_start(start, prepared, config.search, memo, context, reverse=reverse, census_sink=census_sink)
-            for start in starts
-        ]
-        values = [selection_objective(fit, context) for fit in fits]
-        classes = tie_classes(
-            values,
-            tolerance,
-            descending=True,
-            motion=DECISION_MOTION,
-            reverse=fixed_policy("selection.start.set", tolerance, reverse=reverse).reverse,
-        )
-        best = [n for n in range(len(starts)) if classes.classes[n] == 0]
-        fewest = min(len(fits[n].panel) for n in best)
-        distinct: dict[tuple[bytes, bytes], np.ndarray] = {}
-        for n in best:
-            if len(fits[n].panel) == fewest:
-                distinct.setdefault((fits[n].panel.tobytes(), fits[n].frequencies.tobytes()), starts[n])
-        searched = [distinct[key] for key in sorted(distinct)]
-        ties.note(
-            "ls.start.set", inside_tie=len(searched) > 1, wide=classes.wide_classes, boundary=len(classes.boundary_gaps)
-        )
-    outcomes = [
-        search_panel(
-            start,
-            bank,
-            prepared,
-            config.search,
-            incumbent=incumbent,
-            founders=task.founders,
-            memo=memo,
+    saved = None if progress is None else progress.take("block")
+    if saved is not None:
+        ties, starts, bank, bank_summary = saved["ties"], saved["starts"], saved["bank"], saved["bank_summary"]
+        memo, searched, outcomes = saved["memo"], saved["searched"], list(saved["outcomes"])
+    else:
+        ties, outcomes = TieCounter(), []
+        starts, bank, bank_summary = candidate_bank(
+            likelihoods,
+            observed,
+            task.latent,
+            task.proposals,
+            discovery_config,
+            config.bank,
+            incumbent_panel=None if incumbent is None else incumbent.fit.panel,
             ties=ties,
-            census_key=census_key if n == 0 or census_key is None else f"{census_key}/s{n}",
+            census_key=census_key,
+            alternatives=task.alternatives,
             reverse=reverse,
             census_sink=census_sink,
+            threads=prepared.threads,
         )
-        for n, start in enumerate(searched)
-    ]
+        memo = LikelihoodMemo(task.memo)
+        searched = _searched_starts(starts, prepared, config, memo, context, ties, reverse, census_sink)
+
+    def block_state():
+        return dict(
+            ties=ties,
+            starts=starts,
+            bank=bank,
+            bank_summary=bank_summary,
+            memo=memo,
+            searched=searched,
+            outcomes=tuple(outcomes),
+        )
+
+    with progress_frame(progress, "block", block_state):
+        for n in range(len(outcomes), len(searched)):
+            outcomes.append(
+                search_panel(
+                    searched[n],
+                    bank,
+                    prepared,
+                    config.search,
+                    incumbent=incumbent,
+                    founders=task.founders,
+                    memo=memo,
+                    ties=ties,
+                    census_key=census_key if n == 0 or census_key is None else f"{census_key}/s{n}",
+                    reverse=reverse,
+                    census_sink=census_sink,
+                    progress=progress,
+                )
+            )
     attempted, alternatives = _best_outcome(outcomes, tolerance, ties, reverse=reverse)
     retained = False
     incumbent_margin = None
@@ -393,6 +427,7 @@ def select_task(
     reverse: bool,
     census_sink=None,
     threads: int | Callable[[], int] = 1,
+    progress: Progress | None = None,
 ) -> BlockSelection:
     """Select a block from immutable contig arrays, making a private missing-neutral evidence copy.
 
@@ -404,5 +439,12 @@ def select_task(
     local_observed = np.asarray(observed[:, block.columns], dtype=bool, order="C")
     local_gl[~local_observed] = 1.0 / 3.0
     return select_block(
-        block, local_gl, local_observed, settings, reverse=reverse, census_sink=census_sink, threads=threads
+        block,
+        local_gl,
+        local_observed,
+        settings,
+        reverse=reverse,
+        census_sink=census_sink,
+        threads=threads,
+        progress=progress,
     )

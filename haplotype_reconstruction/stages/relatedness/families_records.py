@@ -23,7 +23,7 @@ from .evidence_pass import EvidenceInput, bound_upstream, upstream_identities
 
 __all__ = ["KEY", "SCHEMA", "CODE_ROOTS", "Adapter", "identity", "write", "load", "Reader", "expected", "result_reader"]
 KEY = "relatedness/families"
-SCHEMA = 2
+SCHEMA = 3
 CODE_ROOTS = (
     "stages.relatedness.families_task",
     "science.relatedness.rate",

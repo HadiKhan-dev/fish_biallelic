@@ -371,20 +371,20 @@ slots. `relatedness/summary.json` contains exactly these keys, in order.
 |---|---|
 | `estimate_cm_per_mb` | One genome-wide rate from the used families' pairs; null without an informative family |
 | `interval_cm_per_mb` | 95 % percentile-bootstrap interval `[low, high]` of the kind below |
-| `interval_kind` | `family_chromosome` (two-level bootstrap: families, then their chromosomes; five or more contigs), `family` (else five or more families) or `none` |
+| `interval_kind` | `family_unit` (two-level bootstrap: families, then their equal-material units; five or more 1-Morgan units of material), `family` (else five or more families) or `none` |
 | `meioses` | Meioses of the used families (two per member) |
 | `determined_sites_per_pair` | Meiosis-weighted mean of the used families' median selected sites per pair |
-| `families_used` | Informative families the estimate uses; `infer_rate` adopts only with at least five |
+| `families_used` | Informative families the estimate uses; `rate_estimate = "adopt"` adopts only with at least five |
 | `error_rate` | The fitted isolated genotype-error mixture |
 | `artefact_rate_per_mb`, `artefact_length_kb` | The fitted artefact-stretch nuisance |
 | `at_grid_edge` | Whether the estimate lies at an edge of the rate grid |
 | `gate_passed`, `gate_reason` | The adoption gate and why it passed or failed |
 | `supplied_rate_cm_per_mb` | `[genetic_map] rate_cm_per_mb` |
-| `infer_rate` | The `[genetic_map]` switch the decision read |
-| `decision` | `adopted` (contigs without a map file use the working rate) or `kept` (the supplied map is the working map) |
+| `rate_estimate` | The `[genetic_map]` mode the decision read (`veto`, `ignore` or `adopt`) |
+| `decision` | `adopted` (the working map's fallback rate, for contigs without a map file and beyond map files' knots, is the working rate; only with `adopt`) or `kept` (the supplied map is the working map) |
 | `decision_reason` | Why |
-| `working_rate_cm_per_mb` | The fallback rate of contigs without a map file used by every later stage |
-| `contigs_using_working_rate` | Contigs whose map changed (empty unless adopted) |
+| `working_rate_cm_per_mb` | The fallback rate used by every later stage |
+| `contigs_using_working_rate` | Contigs whose map changed (every contig's fallback stretches; empty unless adopted) |
 | `warning` | The warning printed once in the run log; null when none |
 | `families` | Array, one object per family of two or more members: `family`, `members`, `model` (`two_indicator` with a sequenced slot, `xor` with two latent slots), `pairs`, `determined_sites_per_pair`, `estimate_cm_per_mb`, `status` (`used`, `inconsistent`, `no_informative_sites`, `too_little_information`), `inconsistency_nats` (dropped families) |
 | `per_chromosome_cm_per_mb_diagnostic` | Object: the rate per contig at the shared nuisance; a diagnostic only, never a map |
@@ -431,8 +431,10 @@ fields of the linked records, in declaration order.
 | `family_solve` | The final reciprocal solve and resampling convergence diagnostics ([`FamilySolveRecord`](../reference/records.md#pedigreefamilysolverecord)) |
 | `exclusion` | The count evidence's model and coverage: `model`, `alpha`, `genotype_replacement_probability`, `conditional_on_supported_edge_directions`, `candidate_dyads`, `contigs`, `status` and the further fields of [`ExclusionSummary`](../reference/records.md#pedigreeexclusionsummary) that are present |
 | `eligibility` | The unrestricted candidate universe; it states that no sample metadata or parentage truth was used ([`EligibilityRecord`](../reference/records.md#pedigreeeligibilityrecord)) |
-| `sibling_guard` | Edges tested and withheld by the sibling-as-parent guard ([`GuardSummary`](../reference/records.md#pedigreeguardsummary)) |
+| `sibling_guard` | Edges tested and withheld by the sibling-as-parent guard and the family transmission vote ([`GuardSummary`](../reference/records.md#pedigreeguardsummary)) |
 | `painted_junctions_per_morgan` | Report-only working-map painting fragmentation: `median`, `minimum`, `maximum` over samples and `definition` |
+| `material` | The material decision under the run's maps ([map scale](../methods/pedigree.md#map-scale); [`MaterialChoice`](../reference/records.md#map_scalematerialchoice)): the route; U of the working map and of the estimated map (and at its interval ends); `working_regime` (the regime under the working map alone: the configured map unless `rate_estimate = "adopt"` replaced its fallback rate), `estimate_regime`, `applied_regime` (the regime whose rule produced the product) and `veto_regime`; `withheld_calls`, `withheld_edges` and `withheld_tier_a`: the Tier B calls, Tier B edges and Tier A calls the working map alone releases and the product does not, whichever rule withheld them (-1: not computed, when the product is not assessable but the working map alone is); `added_calls`, `added_edges`, `added_tier_a`: the reverse (non-zero only on the estimate route); `vetoed_calls`, `vetoed_edges`, `vetoed_tier_a`: the part withheld by the veto pass itself (status `tier_b_material_veto`); straddled cut-offs; and the statement, also printed in the run log (with `rate_estimate = "ignore"`: the working map's material and regime only) |
+| `map_scale` | The painting-based estimate of the fallback rate ([`MapScaleEstimate`](../reference/records.md#map_scalemapscaleestimate)): estimate, interval, expected crossovers, material units, consistency, gate, usable floor, route, family rows, the map-file ratio and the warning; null with `rate_estimate = "ignore"` (the run log still prints it) |
 
 Every run resamples material units: consecutive 1-Morgan units of the genome-ordered working map, which may straddle
 contigs. Support columns are leave-one-unit-out (`lobo`) fractions; `informative_unit_count` counts the units on which
@@ -445,7 +447,11 @@ marked not assessed in reach; Tier A then does not affect parent slot order. Low
 every row of their Tier B tables carries `low_material_resampling`, released or not, as rows of a standard run carry
 `unit_resampling`; independently released counts carry `low_material_exclusion`. These are conditional
 stability/evidence labels, not confidence percentages. Family phase and recombination use their Tier B edges
-normally.
+normally. A Tier B call withheld by the both-maps veto (the configured map's and the estimated map's regimes do not
+both release it) is unresolved with inference status `tier_b_material_veto` and release evidence `material_veto`;
+its parents before the veto stay in `parents_before_guard`. When the estimated map's lower regime is applied, calls
+its own rule leaves unresolved keep their ordinary status; `material.withheld_calls` counts both kinds against the
+working map alone.
 
 When `regime` is `not_assessable`, all samples are unresolved with bounds [0,2], no edges
 or count releases, and no complete best guesses beyond unresolved rows. Search and fit
@@ -455,9 +461,9 @@ stage and resumes without score, panel or fit records.
 The working map controls the component-local partition, including a configured fallback rate
 that is not declared measured. An incorrect rate changes block count and can change regime.
 The 1/1.5-Morgan thresholds and selector clipping make this change discontinuous. Blocks on a
-chromosome are dependent; bootstrap shares are not calibrated probabilities. Panel exclusion
-is guaranteed for full data and leave-one-chromosome-out fits only, with incomplete-panel
-flags retained for block resampling.
+chromosome are dependent; bootstrap shares are not calibrated probabilities. The M2 panel
+holds every retained parent pair of a child below the per-child cap, in every fit; capped
+children are flagged.
 
 Measured reliability bands, conditional on full-run upstream reconstruction, span 41 simulated
 runs and 1,794 overlapping layouts. At four blocks, 7,367 simulated parent edges and 42
@@ -561,7 +567,7 @@ and identity columns are listed in their own sections.
 | `pedigree/block_summary.csv` | `contig`, `block`, `component`, `first_bin`, `last_bin`, `nominal_index`, `working_morgans`, `bins`, `informative_markers` (and `regime` in nonstandard regimes) |
 | `pedigree/chromosome_summary.csv` | `contig`, `component_count`, `scored_component_count`, `informative_markers`, `omitted_reason`, `configured_morgans` |
 | `pedigree/relative_contrasts.csv` | `sample`, `candidate_parent`, `views`, `proxy_model`, `m1_minus_second_degree_proxy_nats`, `m1_minus_full_sib_proxy_nats`, `usable_chromosomes`, `negative_chromosomes_second_degree`, `negative_chromosomes_full_sib`, `min_chromosome_contrast_second_degree` |
-| `pedigree/sibling_guard.csv` | `parent`, `child`, `witnesses`, `set_aside`, `against`, `supporting`, `pair_score`, `family_score`, `score`, `call`, `evidence_call`, `withdrawal_iteration`, `withholding_basis` |
+| `pedigree/sibling_guard.csv` | `parent`, `child`, `witnesses`, `set_aside`, `against`, `supporting`, `pair_score`, `family_score`, `score`, `call`, `evidence_call`, `withdrawal_iteration`, `withholding_basis`, `transmission_call`, `transmission_witnesses`, `transmission_segments`, `transmission_score`, `transmission_alternative` |
 | `recombination/coverage.csv` | `contig`, `parent`, `child`, `parent_slot`, `left_bp`, `right_bp`, `component` |
 | `recombination/crossovers.csv` | `contig`, `parent`, `child`, `parent_slot`, `left_bp`, `right_bp`, `left_origin_probability`, `right_origin_probability`, `joint_endpoint_probability_lower_bound`, `component`, `reported_left_bp`, `reported_right_bp`, `in_reversed_segment` |
 | `recombination/junctions.csv` | `contig`, `locus`, `left_bp`, `right_bp`, `calls_left_bp`, `calls_right_bp`, `calls`, `parents_with_calls`, `odd_meioses`, `decidable_meioses`, `switch_fraction`, `flip_adjusted_switch_fraction`, `hotspot_ceiling`, `mixed_parents`, `all_or_none_parents`, `parents`, `children`, `mixing_log_lr`, `paired_locus`, `paired_odd_meioses`, `pairing_log_lr`, `pairing_tests`, `junction_log_lr`, `flagged`, `interpretation`, `nearest_supplied_breakpoint`, `breakpoint_distance_bp` |
@@ -650,8 +656,10 @@ because the summary step adds them.
 | `total_alleles` | phase | Sample-site allele cells, 2 × samples × sites |
 | `called_alleles` | phase | Released allele calls that are not missing |
 | `called_fraction` | phase | `called_alleles` / `total_alleles` |
+| `structurally_absent_cells` | phase, simulated structure | Sample-site cells inside a deletion the sample carries on a homologue; scored as uncalled |
 | `called_genotypes` … `released_phase_sets` | phase | The nine phase counts defined [below](#phase-sites-and-switch-events-are-separate-metrics), summed over samples |
 | `phased_share` | phase | `phased_true_heterozygotes` / `correct_true_heterozygotes`; empty when the denominator is zero |
+| `called_intervals_at_rearrangement_switch` | map, simulated structure | Called intervals on true edges with no true crossover but a reference-axis switch made by a rearrangement (an inversion's or misordered segment's breakpoint) |
 | `true_crossovers_in_inferred_exposure` | map | True crossovers of called edges that are true edges, inside those edges' informative spans |
 | `expected_crossovers_on_correct_edges` | map | Sum of expected crossovers over called edges that are true edges |
 | `correct_edge_exposure_meiosis_bp` | map | Summed exposure of those edges, bp × meioses |
@@ -863,8 +871,8 @@ view with carrier/ambiguity withholding and segment-local row names.
 `haplotype_reconstruction.results.pair_sharing.pair_sharing(results, genetic_maps)` computes the
 pair-sharing product (PR20) from the published paintings for one contig or the included contigs; the
 caller supplies the run's configured maps, whose identities must equal the bound ones, and lengths are measured on
-the run's working map (with an adopted `infer_rate` estimate, [rl20](../methods/relatedness.md#rl20), contigs
-without a map file use it).
+the run's working map (with an adopted `rate_estimate = "adopt"` estimate, [rl20](../methods/relatedness.md#rl20),
+it is the fallback rate of contigs without a map file and beyond map files' knots).
 
 
 Collection-file schemas are generated alongside the parent columns:

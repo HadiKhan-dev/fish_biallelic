@@ -47,11 +47,11 @@ def _add_run_options(command):
     command.add_argument("--contig-lanes", type=int, help="Concurrent contig lanes ([execution] contig_lanes).")
     command.add_argument("--scratch", help="Mapped scratch and kernel cache base ([execution] scratch).")
     command.add_argument(
-        "--infer-rate",
-        action="store_true",
-        default=None,
-        help="Use the recombination rate estimated from relatives for contigs without a map file when it "
-        "differs from the supplied rate ([genetic_map] infer_rate).",
+        "--rate-estimate",
+        choices=("veto", "ignore", "adopt"),
+        help="What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) "
+        "lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, "
+        "adopt uses the estimates where confident.",
     )
     command.add_argument("--tie-reverse", action="store_true", help="Reverse arbitrary tie conventions (developer).")
     command.add_argument(
@@ -192,7 +192,7 @@ def run_options(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     put("execution", "max_contigs", args.max_contigs)
     put("execution", "contig_lanes", args.contig_lanes)
     put("execution", "scratch", args.scratch)
-    put("genetic_map", "infer_rate", args.infer_rate)
+    put("genetic_map", "rate_estimate", args.rate_estimate)
     return options
 
 

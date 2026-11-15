@@ -30,7 +30,7 @@ from ..evidence import records as evidence_records
 from ..framework import load_product
 from ..painting import records as painting_records
 from ..relatedness import families_records
-from . import exclusion, prepare, relationship, scores, screen
+from . import exclusion, map_scale, prepare, relationship, scores, screen
 from .codec import PedigreeAdapter
 
 __all__ = [
@@ -59,7 +59,7 @@ REQUEST = "pedigree/exclusion_request"
 
 # Prepared data depends on one contig; all other pedigree records depend on the analysed genome.
 SHARED_KEYS = (PREPARED,)
-ANALYSIS_KEYS = (PRODUCT, SCREEN, PANEL, screen.BOUNDS, FLOORED_SCORES, EXCLUSION, RELATIONSHIP, REQUEST)
+ANALYSIS_KEYS = (PRODUCT, SCREEN, PANEL, screen.BOUNDS, FLOORED_SCORES, EXCLUSION, RELATIONSHIP, REQUEST, map_scale.KEY)
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,9 @@ class PedigreeDependencies:
     evidence: tuple[tuple[str, str], ...] = ()
     relationship: tuple[tuple[str, str], ...] = ()
     regime: str = "standard"
+    map_scale: str = ""  # identity of pedigree/map_scale (regimes.material_choice reads it)
+    veto: str = ""  # the regime whose released calls a call must also be in (both-maps route), or ""
+    reference: str = ""  # the working regime, run only to count the product against it (regimes.reference_regime)
 
 
 def expected(
@@ -127,6 +130,8 @@ def expected(
             if key in upstream:
                 raise InputError(f"duplicate pedigree dependency {key}")
             upstream[key] = identity
+    if inputs.map_scale:
+        upstream[map_scale.KEY] = inputs.map_scale
     if not all(upstream.values()):
         raise InputError("pedigree derivation identities must be nonempty")
     closure = code or code_dependency_identity(
@@ -149,6 +154,8 @@ def expected(
             informative_contigs=informative_contigs,
             product_schema=PedigreeAdapter.schema,
             regime=inputs.regime,
+            veto=inputs.veto,
+            reference=inputs.reference,
             partition="genome-axis-material-units-v1",
         ),
         numerical_policy or NumericalPolicy.current(),
@@ -171,6 +178,10 @@ class BoundInputs:
     dependencies: PedigreeDependencies
     classification: Any = None
     axis: Any = None
+    material: Any = None  # MaterialChoice
+    map_scale: Any = None  # MapScaleEstimate
+    regime_morgans: float | None = None  # the Morgans the applied regime reads (None: U)
+    veto_morgans: float | None = None  # the Morgans the veto regime reads (None: U)
 
     @property
     def informative_contigs(self) -> tuple[str, ...]:
@@ -193,6 +204,15 @@ def _header(
     return found.payload
 
 
+def run_parameters(manifest: Mapping[str, Any]) -> PedigreeParameters:
+    """The bound run's pedigree parameters: the manifest's, with the run's tie convention (``reverse_conventions``
+    from the manifest's ties; the parameters payload keeps the configured value). Every producer and cold reader of a
+    pedigree identity (records, the map-scale record, the run-log reports) reads its parameters here, so that they
+    agree under reversed ties."""
+    return replace(from_payload(PedigreeParameters, manifest["parameters"]["pedigree"]),
+                   reverse_conventions=bool(manifest["ties"]["reverse"]))
+
+
 def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundInputs:
     """Rebuild pedigree preparation–pedigree scoring causes from the bound manifest, validating every publication.
 
@@ -201,10 +221,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     never an input to the expected identity. Output-only relatedness settings are
     excluded by the families owner's reader.
     """
-    parameters = replace(
-        from_payload(PedigreeParameters, manifest["parameters"]["pedigree"]),
-        reverse_conventions=bool(manifest["ties"]["reverse"]),
-    )
+    parameters = run_parameters(manifest)
     policy = NumericalPolicy(**manifest["numerical_policy"])
     sample_ids = tuple(manifest["sample_ids"])
     contigs = AnalysisContigs.from_manifest(manifest).included
@@ -250,12 +267,21 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         prepared_summary.append(prepared_row)
         if header["omitted_reason"] is None:
             layouts.append(layout)
-    classification, axis = regimes.classify_layouts(tuple(layouts), parameters)
+    # With rate_estimate = ignore nothing in the pedigree reads the map-scale record (it is reported on its own).
+    scale_identity, estimate = "", None
+    if parameters.map_scale.mode != "ignore":
+        scale_identity = map_scale.expected(store, manifest, parameters, policy)
+        estimate = map_scale.load(store, scale_identity)
+    choice, classification, applied_morgans, axis = regimes.material_choice(tuple(layouts), parameters, estimate)
+    regime_morgans, veto_morgans = material_morgans(choice, axis, applied_morgans)
     if classification.name == "not_assessable":
         dependencies = PedigreeDependencies(eligibility.identity(), "", "", tuple(prepared_ids), (),
-                                           evidence=tuple(evidence_ids), regime=classification.name)
+                                           evidence=tuple(evidence_ids), regime=classification.name,
+                                           map_scale=scale_identity, veto=choice.veto_regime,
+                                           reference=regimes.reference_regime(choice))
         return BoundInputs(parameters, policy, sample_ids, contigs, eligibility, None,
-                           tuple(prepared_summary), dependencies, classification, axis)
+                           tuple(prepared_summary), dependencies, classification, axis, choice, estimate,
+                           regime_morgans, veto_morgans)
     screen_identity = screen.screen_derivation(parameters, eligibility.identity(), informative, numerical_policy=policy)
     _header(store.run, SCREEN, screen_identity)
     bound_ids = tuple(
@@ -267,7 +293,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     panel_identity = screen.panel_derivation(
         screen_identity,
         bound_ids,
-        parameters.panel.pair_relevance_margin,
+        parameters.panel.max_pairs_per_child,
         reverse=parameters.reverse_conventions,
         numerical_policy=policy,
     )
@@ -317,9 +343,21 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         score_ids,
         evidence=tuple(evidence_ids),
         regime=classification.name,
+        map_scale=scale_identity,
+        veto=choice.veto_regime,
+        reference=regimes.reference_regime(choice),
     )
     return BoundInputs(parameters, policy, sample_ids, contigs, eligibility, panel, tuple(summary), dependencies,
-                       classification, axis)
+                       classification, axis, choice, estimate, regime_morgans, veto_morgans)
+
+
+def material_morgans(choice: Any, axis: Any, applied_morgans: float) -> tuple[float | None, float | None]:
+    """The Morgans the applied and the veto regimes read (None: the working U itself)."""
+    applied = None if applied_morgans == axis.morgans else float(applied_morgans)
+    veto = None
+    if choice.veto_regime:
+        veto = float(choice.estimate_morgans) if applied is None else None
+    return applied, veto
 
 
 def request_dependencies(

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 from ..contracts.roles import require_schema
 from ..engine.graph import ALL_CORES, Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey
 from ..store.container import CheckpointFile, RecordInfo
+from ..store.progress import UnitProgress
 from ..store.protocol import publish, resume
 
 __all__ = [
@@ -27,6 +28,8 @@ __all__ = [
     "RecordAdapter",
     "publish_product",
     "load_product",
+    "unit_progress",
+    "close_progress",
 ]
 
 if TYPE_CHECKING:
@@ -77,3 +80,21 @@ def load_product(file: CheckpointFile, key: str, identity: str, adapter: RecordA
         return None
     require_schema(record.payload, adapter.schema)
     return adapter.decode(record.payload)
+
+
+def unit_progress(file: CheckpointFile, key: str, identity: str) -> UnitProgress:
+    """The partial progress of the unit published as ``key`` (store.progress), at this run's snapshot interval.
+
+    Created by the unit's claim holder; the unit removes it (``clear``) right after publishing its record."""
+    from ..engine.runtime import progress_seconds
+
+    return UnitProgress(file.path, key, identity, interval=progress_seconds())
+
+
+def close_progress(progress: UnitProgress) -> None:
+    """After the unit's record is published: remove its progress, noting in the run log when it resumed from it."""
+    if progress.restored:
+        from ..engine.records import record_diagnostic
+
+        record_diagnostic(f"[progress] {progress.key}: resumed inside the unit from its saved progress")
+    progress.clear()

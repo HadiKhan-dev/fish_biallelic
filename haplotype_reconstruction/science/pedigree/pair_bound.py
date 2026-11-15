@@ -1,9 +1,8 @@
 """Valid upper bounds on the M2 likelihood of every pair of a child's genome-retained parents.
 
-The M2 panel (``panel.bounded_panel``) first uses this bound to screen retained-parent pairs for relevance to the
-child's best known configuration, then applies the configured per-child pair cap. Only relevance rejection proves
-a pair cannot compete within the margin; the cap can discard competitive pairs and flags incomplete panels.
-The exact M2 forward (``forward.component_m2``) runs on the resulting panel.
+The M2 panel (``panel.bounded_panel``) holds every pair of a child's retained parents; this bound only ranks a
+child's pairs when they exceed the per-child cap (the largest full-data bounds are kept, the child is flagged, and
+the cap can discard competitive pairs). The exact M2 forward (``forward.component_m2``) runs on the resulting panel.
 
 The bound relaxes the M2 forward of one component (``forward.score_path`` mode 2; both views) by STATE AGGREGATION.
 Each parent's states at each bin are grouped: every state with transmitted-state mass pi >= ``high_mass`` is its own

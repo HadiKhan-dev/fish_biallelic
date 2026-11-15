@@ -1,16 +1,20 @@
 """Orientation evidence from the joint transmission likelihood of painted homologue schedules.
 
 For each material unit compare the ordered dyads' joint log likelihoods
-(``transmission.log_likelihood``), allowing painting failure with the unit's own failure probability
-(``unit_failure``: the relationship model's two-state failure process over the unit's working Morgans, DESIGN_417
-D8). Two impossible directions are uninformative. Log odds add over units, weighted by resampling multiplicity;
-with the optional window cap (DirectionParameters.window_morgans > 0) each window's summed log odds is capped
-first. A paired junction-density contrast only orders the acyclic graph search and is reported.
+(``transmission.log_likelihood``). A unit's contrast is decisive through the transmitting meiosis or through
+painting noise: its robust log odds mix the contrast with the unit's uninformative probability
+1 - (1 - eps) rho, eps the relationship model's failure probability of the unit (``unit_failure``, DESIGN_417 D8)
+and rho the run's own reliability. A linked pair's units are either all informative or all fair coins, the latter
+with the run's own coin share eta. Both are estimated once from the run's own linked pairs (``direction_model``),
+without labels. Two impossible directions are uninformative. A fit sums the unit log odds and their log cosh,
+weighted by resampling multiplicity, and mixes the two orientations' likelihoods with the coin component
+(``effective_log_odds``); with the optional window cap (DirectionParameters.window_morgans > 0) each window's
+summed log odds is capped first. A paired junction-density contrast only orders the acyclic graph search and is
+reported.
 
 Scope of D8 (AGENTS 2.2): it protects against short painting failures (the relationship model's regions of about
-5 cM at 0.1 per Morgan). It does not cap chromosome-wide failures: a chromosome of 1.5 working Morgans or more
-(two units) can orient an edge alone, where 4.16.1's standard regime capped each chromosome below the release
-cut-off. The window cap, off by default, bounds the direction evidence of any window of W working Morgans.
+5 cM at 0.1 per Morgan). It does not cap chromosome-wide failures. The window cap, off by default, bounds the
+direction evidence of any window of W working Morgans.
 
 Method: docs/methods/pedigree.md#finite-continuous-direction
 """
@@ -24,9 +28,23 @@ import numpy as np
 from ...contracts.pedigree import JunctionEvidence, Orientation
 from ...core.kernels import kernel
 from .kernels.signatures import OVERLOADS
-from .parameters import ORDER_MINIMUM_UNIT_WEIGHT, ORDER_VARIANCE_OFFSET
+from .parameters import (
+    DIRECTION_COIN_SHARE_GRID,
+    DIRECTION_RELIABILITY_GRID,
+    ORDER_MINIMUM_UNIT_WEIGHT,
+    ORDER_VARIANCE_OFFSET,
+)
 
-__all__ = ["unit_failure", "direction_windows", "junction_evidence", "fit", "parent_role_probability"]
+__all__ = [
+    "unit_failure",
+    "direction_windows",
+    "direction_model",
+    "structural_prior",
+    "effective_log_odds",
+    "junction_evidence",
+    "fit",
+    "parent_role_probability",
+]
 
 
 @kernel(overloads=OVERLOADS["orientation._order_probability"], cache=True, nogil=True)
@@ -169,6 +187,91 @@ def direction_windows(morgans: np.ndarray, window: float) -> np.ndarray | None:
     return np.ascontiguousarray(np.floor(starts / window).astype(np.int64))
 
 
+def _log_cosh_half(values: np.ndarray) -> np.ndarray:
+    """log cosh(values / 2), stable for large |values|."""
+    half = 0.5 * np.abs(values)
+    return half + np.log1p(np.exp(-2.0 * half)) - math.log(2.0)
+
+
+def structural_prior(log_odds: np.ndarray, pair_failure: float) -> np.ndarray:
+    """P(forward orientation | the pair's structural orientation log odds), bounded by the pair-level failure:
+    (1 - e) sigmoid(S) + e/2; 1/2 where S is undefined (NaN)."""
+    log_odds = np.asarray(log_odds, dtype=np.float64)
+    with np.errstate(over="ignore", invalid="ignore"):
+        value = (1.0 - pair_failure) / (1.0 + np.exp(-log_odds)) + 0.5 * pair_failure
+    return np.where(np.isnan(log_odds), 0.5, value)
+
+
+def direction_model(
+    contrasts: np.ndarray, compared: np.ndarray, failure: np.ndarray, forward: np.ndarray
+) -> tuple[float, float, int, int]:
+    """The run's own direction model from its reference pairs: (reliability rho, coin share eta, pairs, units).
+
+    ``contrasts`` [H, P]: the raw unit contrasts d of the reference pairs (forward minus reverse joint transmission
+    log likelihood); ``compared`` [H, P]: units with evidence; ``failure`` [H]: each unit's painting-failure
+    probability (``unit_failure``); ``forward`` [P]: prior probability of each pair's forward orientation
+    (``structural_prior`` of the direction-free solve).
+
+    Model: an informative pair's unit favours its true orientation with probability
+    f = pi sigmoid(|d|) + (1 - pi) / 2, pi = (1 - failure) rho; a coin pair's units are fair coins. Marginal
+    likelihood of the unit signs given their magnitudes,
+    sum_i log[(1 - eta)(w_i Pf_i + (1 - w_i) Pr_i) + eta 2^-n_i], with uniform priors on rho and eta; the estimates
+    are the posterior means on fixed midpoint grids (deterministic; no optimiser). Without reference pairs the
+    posterior is the prior: (1/2, 1/2). Label-free: no sample name, cohort, relatedness family or released edge
+    enters.
+    """
+    compared = np.asarray(compared, dtype=np.bool_)
+    keep = compared.any(axis=0) if compared.size else np.zeros(compared.shape[1], dtype=np.bool_)
+    pairs, units = int(np.count_nonzero(keep)), int(np.count_nonzero(compared[:, keep]))
+    if not pairs:
+        return 0.5, 0.5, 0, 0
+    compared = compared[:, keep]
+    contrast = np.where(compared, np.asarray(contrasts, dtype=np.float64)[:, keep], 0.0)
+    prior = np.clip(np.asarray(forward, dtype=np.float64)[keep], np.finfo(float).tiny, 1.0)
+    with np.errstate(over="ignore"):
+        sigmoid = 1.0 / (1.0 + np.exp(-contrast))
+    rho_grid = (np.arange(DIRECTION_RELIABILITY_GRID) + 0.5) / DIRECTION_RELIABILITY_GRID
+    eta_grid = (np.arange(DIRECTION_COIN_SHARE_GRID) + 0.5) / DIRECTION_COIN_SHARE_GRID
+    coin = -np.count_nonzero(compared, axis=0) * math.log(2.0)
+    keep_eta, with_eta = np.log1p(-eta_grid), np.log(eta_grid)
+    surface = np.empty((len(rho_grid), len(eta_grid)))
+    informative = (1.0 - np.asarray(failure, dtype=np.float64))[:, None]
+    with np.errstate(divide="ignore"):
+        log_forward, log_reverse = np.log(prior), np.log1p(-prior)
+    for index, rho in enumerate(rho_grid):
+        pi = informative * rho
+        right = np.where(compared, np.log(pi * sigmoid + 0.5 * (1.0 - pi)), 0.0).sum(axis=0)
+        wrong = np.where(compared, np.log(pi * (1.0 - sigmoid) + 0.5 * (1.0 - pi)), 0.0).sum(axis=0)
+        pair = np.logaddexp(log_forward + right, log_reverse + wrong)
+        surface[index] = np.logaddexp(keep_eta[None, :] + pair[:, None], with_eta[None, :] + coin[:, None]).sum(axis=0)
+    posterior = np.exp(surface - surface.max())
+    posterior /= posterior.sum()
+    return (float(posterior.sum(axis=1) @ rho_grid), float(posterior.sum(axis=0) @ eta_grid), pairs, units)
+
+
+def effective_log_odds(log_odds: np.ndarray, log_cosh: np.ndarray, coin_share: float, pair_failure: float) -> np.ndarray:
+    """A pair's orientation log odds with the coin component: ``log_odds`` L = sum w v and ``log_cosh``
+    G = sum w log cosh(v / 2) of a fit (elementwise over pairs).
+
+    The two orientations' log likelihoods against a coin are A = L/2 - G and B = -L/2 - G. With the pair law
+    P(D | forward) = (1 - e - eta) Pf + (e/2)(Pf + Pr) + eta C (e the pair-level failure, eta the coin share),
+    family.adjust's factor ln 2 + ln((1 - e) sigmoid(L_eff) + e/2) equals log[P(D | forward) / P_ref(D)],
+    P_ref the two orientations' mean, exactly when
+    L_eff = log[(1 - e - eta) e^A + k] - log[(1 - e - eta) e^B + k], k = eta (e (e^A + e^B)/2 + 1 - e).
+    eta = 0 returns L. Coin data drive A and B down linearly in the units, so L_eff -> 0: a symmetric relative's
+    random walk does not accumulate."""
+    if coin_share <= 0.0:
+        return log_odds
+    eta = min(float(coin_share), 1.0 - pair_failure - np.finfo(float).eps)
+    failure = max(float(pair_failure), np.finfo(float).tiny)
+    forward = 0.5 * log_odds - log_cosh
+    reverse = -0.5 * log_odds - log_cosh
+    mixed = np.logaddexp(forward, reverse) - math.log(2.0)
+    constant = math.log(eta) + np.logaddexp(math.log(failure) + mixed, math.log1p(-failure))
+    head = math.log(1.0 - failure - eta)
+    return np.logaddexp(head + forward, constant) - np.logaddexp(head + reverse, constant)
+
+
 def junction_evidence(
     junctions: np.ndarray,
     callable_bins: np.ndarray,
@@ -179,14 +282,21 @@ def junction_evidence(
     *,
     window: np.ndarray | None = None,
     window_cap: float = float("inf"),
+    reliability: float = 1.0,
+    coin_share: float = 0.0,
+    pair_failure: float = 0.0,
+    reference_pairs: int = 0,
+    reference_units: int = 0,
 ) -> JunctionEvidence:
     """Weight-independent junction evidence of the material units (``dyads`` [D, 2] and ``log_likelihood``
     [H, D]: the joint transmission log likelihoods of the scores; ``error_probability`` [H] each unit's
-    painting-failure probability, ``unit_failure``)."""
+    painting-failure probability, ``unit_failure``; ``reliability`` and ``coin_share`` the run's direction
+    model, ``direction_model``). A unit's uninformative probability is 1 - (1 - error_probability) reliability."""
     junctions = np.ascontiguousarray(junctions, dtype=np.float64)
     callable_bins = np.ascontiguousarray(callable_bins, dtype=np.float64)
     total_bins = np.ascontiguousarray(total_bins, dtype=np.float64)
     child, parent, forward, reverse = _unordered_dyads(dyads, junctions.shape[1])
+    failure = np.broadcast_to(np.asarray(error_probability, dtype=np.float64), total_bins.shape)
     values, compared = _pair_log_odds(
         np.ascontiguousarray(log_likelihood, dtype=np.float64).reshape(len(total_bins), -1),
         forward,
@@ -195,10 +305,38 @@ def junction_evidence(
         parent,
         callable_bins,
         total_bins,
-        np.ascontiguousarray(np.broadcast_to(np.asarray(error_probability, dtype=np.float64), total_bins.shape)).copy(),
+        np.ascontiguousarray(1.0 - (1.0 - failure) * float(reliability)).copy(),
     )
     return JunctionEvidence(junctions, callable_bins, total_bins, child, parent, values, compared,
-                            window, float(window_cap))
+                            window, float(window_cap), float(reliability), float(coin_share), float(pair_failure),
+                            int(reference_pairs), int(reference_units),
+                            pair_log_cosh=_pair_log_cosh(values, compared) if coin_share > 0.0 else None)
+
+
+def _pair_log_cosh(values: np.ndarray, compared: np.ndarray) -> np.ndarray:
+    """float64 [H, U]: log cosh(v / 2) of the compared unit log odds, zero elsewhere."""
+    return np.ascontiguousarray(np.where(compared, _log_cosh_half(values), 0.0))
+
+
+def reference_contrasts(dyads: np.ndarray, log_likelihood: np.ndarray, samples: int, units: int,
+                        pairs: np.ndarray) -> np.ndarray:
+    """float64 [H, P]: raw unit contrasts (forward minus reverse joint transmission log likelihood) of the unordered
+    dyads ``pairs`` (indices into the evidence's pair axis); a unit impossible both ways gives 0."""
+    _, _, forward, reverse = _unordered_dyads(dyads, samples)
+    values = np.asarray(log_likelihood, dtype=np.float64).reshape(units, -1)
+    with np.errstate(invalid="ignore"):
+        contrast = values[:, forward[pairs]] - values[:, reverse[pairs]]
+    return np.where(np.isnan(contrast), 0.0, contrast)
+
+
+def _with_coin_share(evidence: JunctionEvidence, log_odds: np.ndarray, log_cosh: np.ndarray) -> np.ndarray:
+    """log_odds[child, parent] of a fit after the coin mixture; ``log_cosh`` [U] the fit's summed log cosh."""
+    totals = effective_log_odds(log_odds[evidence.pair_child, evidence.pair_parent], log_cosh,
+                                evidence.coin_share, evidence.pair_failure)
+    result = np.array(log_odds, dtype=np.float64, copy=True)
+    result[evidence.pair_child, evidence.pair_parent] = totals
+    result[evidence.pair_parent, evidence.pair_child] = -totals
+    return result
 
 
 def _windowed_log_odds(evidence: JunctionEvidence, weights: np.ndarray) -> np.ndarray:
@@ -226,17 +364,29 @@ def fit(evidence: JunctionEvidence, weights: np.ndarray) -> Orientation:
     full = float(np.sum(weights * (2.0 * evidence.total_bins)))
     fractions = np.divide(exposure, full, out=np.zeros_like(exposure), where=full > 0)
     adjusted = np.divide(counts, fractions, out=np.full_like(counts, np.nan), where=fractions > 0)
+    samples = evidence.junctions.shape[1]
+    multiplicity = np.ascontiguousarray(weights, dtype=np.float64)
+    log_odds = _weighted_log_odds(
+        evidence.pair_log_odds,
+        evidence.compared,
+        evidence.pair_child,
+        evidence.pair_parent,
+        evidence.total_bins,
+        multiplicity,
+        samples,
+    ) if evidence.window is None else _windowed_log_odds(evidence, weights)
+    if evidence.coin_share > 0.0:
+        # The same unit-ordered weighted sum over log cosh(v / 2); the window cap never applies to it.
+        cosh = evidence.pair_log_cosh
+        if cosh is None:
+            cosh = _pair_log_cosh(evidence.pair_log_odds, evidence.compared)
+        log_cosh = _weighted_log_odds(
+            cosh, evidence.compared, evidence.pair_child, evidence.pair_parent, evidence.total_bins, multiplicity, samples
+        )[evidence.pair_child, evidence.pair_parent]
+        log_odds = _with_coin_share(evidence, log_odds, log_cosh)
     return Orientation(
         order_probability=_order_probability(evidence.junctions, evidence.callable_bins, evidence.total_bins, weights),
-        log_odds=_weighted_log_odds(
-            evidence.pair_log_odds,
-            evidence.compared,
-            evidence.pair_child,
-            evidence.pair_parent,
-            evidence.total_bins,
-            np.ascontiguousarray(weights, dtype=np.float64),
-            evidence.junctions.shape[1],
-        ) if evidence.window is None else _windowed_log_odds(evidence, weights),
+        log_odds=log_odds,
         adjusted_burden=adjusted,
         callability=fractions,
     )
@@ -320,5 +470,11 @@ def fit_omitting(evidence, totals, omitted):
         weights = np.ones(len(evidence.total_bins))
         weights[omitted] = 0.0
         log_odds = _windowed_log_odds(evidence, weights)
+    if evidence.coin_share > 0.0:
+        cosh = evidence.pair_log_cosh
+        if cosh is None:
+            cosh = _pair_log_cosh(evidence.pair_log_odds, evidence.compared)
+        total = totals.pair_log_cosh if totals.pair_log_cosh is not None else cosh.sum(axis=0)
+        log_odds = _with_coin_share(evidence, log_odds, total - cosh[omitted])
     return Orientation(_omit_order_probability(totals.order_statistics, evidence.junctions[omitted],
         evidence.callable_bins[omitted], float(evidence.total_bins[omitted])), log_odds, adjusted, fractions)

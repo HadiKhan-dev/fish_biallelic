@@ -54,25 +54,25 @@ The name identifies a decision. The kind selects its scale rule; a fixed width i
 | `'discovery.panel.dedup'` | `fixed_policy('discovery.panel.dedup', q, reverse=reverse)` | [panel.py:474](../../haplotype_reconstruction/science/discovery/panel.py) |
 | `'discovery.panel.order'` | `fixed_policy('discovery.panel.order', q, reverse=reverse)` | [panel.py:457](../../haplotype_reconstruction/science/discovery/panel.py) |
 | `'discovery.release.cell'` | `fixed_policy('discovery.release.cell', (quanta if quanta is not None else BlockQuanta.floors()).cell, reverse=_CELL_BAND_REVERSE)` | [release.py:60](../../haplotype_reconstruction/science/discovery/release.py) |
-| `'discovery.selection'` | `fixed_policy('discovery.selection', quantum, reverse=reverse)` | [search.py:206](../../haplotype_reconstruction/science/discovery/search.py) |
-| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:297](../../haplotype_reconstruction/science/discovery/search.py) |
-| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:317](../../haplotype_reconstruction/science/discovery/search.py) |
-| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quanta.nll, reverse=self.reverse)` | [search.py:574](../../haplotype_reconstruction/science/discovery/search.py) |
+| `'discovery.selection'` | `fixed_policy('discovery.selection', quantum, reverse=reverse)` | [search.py:207](../../haplotype_reconstruction/science/discovery/search.py) |
+| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:298](../../haplotype_reconstruction/science/discovery/search.py) |
+| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:318](../../haplotype_reconstruction/science/discovery/search.py) |
+| `'discovery.archive'` | `fixed_policy('discovery.archive', self.quanta.nll, reverse=self.reverse)` | [search.py:607](../../haplotype_reconstruction/science/discovery/search.py) |
 | `'painting.relabel_rank'` | `ties.policy('painting.relabel_rank', kind='nll', reverse=convention_reverse)` | [label_continuity.py:878](../../haplotype_reconstruction/science/painting/label_continuity.py) |
-| `'pedigree.junction.trace'` | `policy('pedigree.junction.trace', kind='probability', reverse=reverse)` | [junctions.py:324](../../haplotype_reconstruction/science/pedigree/junctions.py) |
-| `'pedigree.screen.rank'` | `tie_rules.policy('pedigree.screen.rank', kind='probability', reverse=reverse)` | [panel.py:176](../../haplotype_reconstruction/science/pedigree/panel.py) |
+| `'pedigree.junction.trace'` | `policy('pedigree.junction.trace', kind='probability', reverse=reverse)` | [junctions.py:326](../../haplotype_reconstruction/science/pedigree/junctions.py) |
+| `'pedigree.screen.rank'` | `tie_rules.policy('pedigree.screen.rank', kind='probability', reverse=reverse)` | [panel.py:154](../../haplotype_reconstruction/science/pedigree/panel.py) |
 | `'pedigree.bridge.hall'` | `policy('pedigree.bridge.hall', kind='probability', reverse=reverse)` | [projection.py:470](../../haplotype_reconstruction/science/pedigree/projection.py) |
 | `'pedigree.bridge.search'` | `policy('pedigree.bridge.search', kind='probability', reverse=reverse)` | [projection.py:472](../../haplotype_reconstruction/science/pedigree/projection.py) |
 | `'pedigree.bridge.pivot'` | `policy('pedigree.bridge.pivot', kind='probability', reverse=reverse)` | [projection.py:473](../../haplotype_reconstruction/science/pedigree/projection.py) |
 | `'selection.bank.cavity'` | `fixed_policy('selection.bank.cavity', quanta.nll, reverse=reverse)` | [bank.py:231](../../haplotype_reconstruction/science/selection/bank.py) |
 | `kind` | `fixed_policy(kind, quantum, reverse=reverse)` | [bank.py:180](../../haplotype_reconstruction/science/selection/bank.py) |
-| `'selection.start.outcome'` | `fixed_policy('selection.start.outcome', tolerance, reverse=reverse)` | [rounds.py:84](../../haplotype_reconstruction/science/selection/rounds.py) |
-| `'selection.start.set'` | `fixed_policy('selection.start.set', tolerance, reverse=reverse)` | [rounds.py:223](../../haplotype_reconstruction/science/selection/rounds.py) |
-| `'selection.search.rank'` | `fixed_policy('selection.search.rank', tolerance, reverse=reverse)` | [search.py:523](../../haplotype_reconstruction/science/selection/search.py) |
-| `'selection.merge.consensus'` | `fixed_policy('selection.merge.consensus', CONSENSUS_TIE, reverse=reverse)` | [search.py:86](../../haplotype_reconstruction/science/selection/search.py) |
-| `'selection.search.merge_representative'` | `fixed_policy('selection.search.merge_representative', tolerance, reverse=reverse)` | [search.py:257](../../haplotype_reconstruction/science/selection/search.py) |
-| `'selection.search.winner'` | `fixed_policy('selection.search.winner', tolerance, reverse=reverse)` | [search.py:886](../../haplotype_reconstruction/science/selection/search.py) |
-| `'selection.search.rank'` | `fixed_policy('selection.search.rank', tolerance, reverse=reverse)` | [search.py:832](../../haplotype_reconstruction/science/selection/search.py) |
+| `'selection.start.outcome'` | `fixed_policy('selection.start.outcome', tolerance, reverse=reverse)` | [rounds.py:86](../../haplotype_reconstruction/science/selection/rounds.py) |
+| `'selection.start.set'` | `fixed_policy('selection.start.set', tolerance, reverse=reverse)` | [rounds.py:184](../../haplotype_reconstruction/science/selection/rounds.py) |
+| `'selection.search.rank'` | `fixed_policy('selection.search.rank', tolerance, reverse=reverse)` | [search.py:525](../../haplotype_reconstruction/science/selection/search.py) |
+| `'selection.merge.consensus'` | `fixed_policy('selection.merge.consensus', CONSENSUS_TIE, reverse=reverse)` | [search.py:88](../../haplotype_reconstruction/science/selection/search.py) |
+| `'selection.search.merge_representative'` | `fixed_policy('selection.search.merge_representative', tolerance, reverse=reverse)` | [search.py:259](../../haplotype_reconstruction/science/selection/search.py) |
+| `'selection.search.winner'` | `fixed_policy('selection.search.winner', tolerance, reverse=reverse)` | [search.py:928](../../haplotype_reconstruction/science/selection/search.py) |
+| `'selection.search.rank'` | `fixed_policy('selection.search.rank', tolerance, reverse=reverse)` | [search.py:874](../../haplotype_reconstruction/science/selection/search.py) |
 
 ## Random streams
 
@@ -83,6 +83,7 @@ The stream name preserves generator construction and draw order, not just a seed
 | `assembly.count.bootstrap` |
 | `pedigree.bootstrap` |
 | `pedigree.relationship.reference` |
+| `pedigree.family_transmission.starts` |
 | `simulation.structure` |
 | `simulation.master` |
 | `simulation.child` |
