@@ -106,9 +106,9 @@ def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False
 
     The painting's packed cache is optional. Without it (or with recompute) the same complete bins are recomputed
     with the painting's own kernel and design effect. Resident: all samples and sites at once. Windowed: one sample
-    at a time, in runs of whole bins spanning at most SITE_WINDOW sites (a bin
+    at a time, in runs of complete reference windows spanning at most SITE_WINDOW sites (a reference window
     longer than that is read whole), so only one sample's window of evidence is ever copied. Every bin's emission
-    and design effect depend only on that sample's sites in that bin, so both routes give the same values.
+    and design effect depend only on that sample's sites in its reference window, so both routes give the same values.
     """
     painted = inputs.painting
     samples = len(inputs.observations.sample_ids)
@@ -130,7 +130,9 @@ def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False
         robustness_epsilon=painted.robustness_epsilon,
         log_floor=painted.emission_log_floor,
     )
-    emissions /= design_effect(gl, observed, painted.bins.starts, painted.transitions.site_correlation)[:, None, :]
+    emissions /= design_effect(
+        gl, observed, painted.bins.starts, painted.transitions.site_correlation, painted.bins_per_reference_window
+    )[:, None, :]
     return emissions.reshape(samples, states, states, -1)
 
 
@@ -141,12 +143,16 @@ def _windowed_emissions(inputs: PhaseComponentInputs, selected: np.ndarray, prob
     starts, stops = painted.bins.starts, painted.bins.stops
     background = painted.states.background_frequency
     emissions = np.empty((samples, painted.states.n_states**2, len(starts)), dtype=np.float64)
+    group = painted.bins_per_reference_window
     for n in range(samples):
         first = 0
         while first < len(starts):
-            last = first + 1
-            while last < len(starts) and stops[last] - starts[first] <= SITE_WINDOW:
-                last += 1
+            last = min(first + group, len(starts))
+            while last < len(starts):
+                candidate = min(last + group, len(starts))
+                if stops[candidate - 1] - starts[first] > SITE_WINDOW:
+                    break
+                last = candidate
             left, right = int(starts[first]), int(stops[last - 1])
             gl, observed = gather_sites(
                 inputs.observations.likelihoods, inputs.observations.observed, selected[left:right], slice(n, n + 1)
@@ -161,7 +167,9 @@ def _windowed_emissions(inputs: PhaseComponentInputs, selected: np.ndarray, prob
                 robustness_epsilon=painted.robustness_epsilon,
                 log_floor=painted.emission_log_floor,
             )
-            raw /= design_effect(gl, observed, starts[first:last] - left, painted.transitions.site_correlation)[
+            raw /= design_effect(
+                gl, observed, starts[first:last] - left, painted.transitions.site_correlation, group
+            )[
                 :, None, :
             ]
             emissions[n : n + 1, :, first:last] = raw
@@ -207,7 +215,7 @@ def _solve_models(inputs, parameters, emissions, rates, map_work=None, concurren
 def _forced_breaks(inputs, models, parents, bin_edges):
     """Union junctions, parental-pairing ambiguity and painting ties; only isolated ties may bridge (FP10-FP12)."""
     model, mirror = models
-    final = [JunctionInputs(m.X, m.V, m.E, m.par, m.config) for m in models]
+    final = [JunctionInputs(m.X, m.V, m.E, m.par, m.config, inputs.painting.bins_per_reference_window) for m in models]
     junctions = [junction_candidates(state) for state in final]
     withheld = withheld_joins(final[0], junctions[0])
     for sample, bins in withheld_joins(final[1], junctions[1]).items():

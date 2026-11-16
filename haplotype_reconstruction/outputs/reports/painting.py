@@ -375,7 +375,7 @@ def contig_painting(output: str | Path, results: Results, contig: str):
 
 
 def painting_frames(painting, positions, observed, searches=(), feedback=(), input_ids=None):
-    """Format the eight painting tables; all inputs are recorded views."""
+    """Format painting tables, including the run calibration estimates; inputs are recorded views."""
     import pandas as pd
 
     support, windows, search_rows = founder_support_tables(painting, positions, observed, searches)
@@ -449,6 +449,8 @@ CONTINUITY_COLUMNS = (
     WinnersBtoA: winners bto a (1).
     Identity: identity (1).
 """
+
+
 MODEL_COLUMNS = (
     "Component",
     "FirstVariant1Based",
@@ -461,6 +463,9 @@ MODEL_COLUMNS = (
     "ErrorExit",
     "ErrorRunBinsKeepingLabel",
     "SiteCorrelation",
+    "RobustnessEpsilon",
+    "EmissionDivisor",
+    "PathDivisor",
     "EligibleSamples",
     "ContinuityBudgetReached",
 )
@@ -476,6 +481,10 @@ MODEL_COLUMNS = (
     ErrorEntry: entry probability of the copying-model error chain (1).
     ErrorExit: exit probability of the copying-model error chain (1).
     ErrorRunBinsKeepingLabel: 1 / ErrorExit; empty when ErrorExit is zero (bins).
+    EmissionDivisor: calibrated confidence divisor per full reference window: the strength of the release
+        posteriors and of the emissions later stages read (1).
+    PathDivisor: calibrated path divisor per full reference window: the strength the labels were decoded at (1).
+    RobustnessEpsilon: estimated run genotype-outlier mixture mass (probability).
     SiteCorrelation: fitted within-site emission correlation (1).
     EligibleSamples: eligible samples (1).
     ContinuityBudgetReached: label continuity's search ended at its per-iteration check budget:
@@ -508,6 +517,9 @@ def painting_model_rows(painting) -> list[tuple]:
                 float(transitions.error_exit),
                 (1.0 / transitions.error_exit) if transitions.error_exit > 0 else None,
                 float(transitions.site_correlation),
+                float(painting.robustness_epsilon),
+                float(painting.emission_divisor),
+                float(painting.path_divisor),
                 int(component.eligible.sum()),
                 bool(getattr(continuity[index], "check_budget_reached", False)) if index < len(continuity) else False,
             )
@@ -725,3 +737,49 @@ SAMPLE_SWITCH_COLUMNS = (
     CohortMedianSwitches: cohort median switches (1).
     SwitchesOverCohortMedian: painted switches divided by the cohort median; NaN if median is not positive (1).
 """
+
+
+CALIBRATION_ROBUSTNESS_COLUMNS = ("contig", "robustness_epsilon", "log_likelihood", "selected")
+"""Columns in published order.
+
+    contig: contig name or RUN for the pooled objective (text).
+    robustness_epsilon: candidate genotype-outlier mass (probability).
+    log_likelihood: weight-one final recorded component likelihood sum (nats).
+    selected: selected run-level candidate (bool).
+"""
+
+CALIBRATION_DIVISOR_COLUMNS = (
+    "contig", "divisor", "fold", "log_predictive_density", "path_score", "cells", "selected", "selected_path"
+)
+"""Columns in published order.
+
+    contig: contig name or RUN for the pooled objective (text).
+    divisor: candidate full-reference-window divisor (1).
+    fold: zero-based held-out fold, or -1 for the pooled objective (1).
+    log_predictive_density: held-out posterior predictive density sum: the confidence objective (nats).
+    path_score: held-out log score of the decoded label pair: the path objective (nats).
+    cells: observed held-out sample-site cells (1).
+    selected: selected run-level confidence divisor (bool).
+    selected_path: selected run-level path divisor (bool).
+"""
+
+
+def write_calibration(output, results):
+    """Publish pooled and per-contig calibration objectives, estimates and measured task seconds."""
+    import pandas as pd
+    from .tables import write_frame, write_json
+    value = results.painting_calibration()
+    if value is None:
+        return []
+    directory = Path(output) / "painting"
+    epsilon, divisor, path = value["robustness_epsilon"], value["confidence_divisor"], value["path_divisor"]
+    robust = [(c["contig"], e, score, e == epsilon)
+              for c in value["robustness_contigs"] for e, score in c["rows"]]
+    robust.extend(("RUN", e, score, e == epsilon) for e, score in value["robustness_pooled"])
+    divisors = [(c["contig"], d, f, score, path_score, cells, d == divisor, d == path)
+                for c in value["divisor_contigs"] for d, f, score, cells, path_score in c["rows"]]
+    divisors.extend(("RUN", d, -1, score, path_score, cells, d == divisor, d == path)
+                    for d, score, cells, path_score in value["divisor_pooled"])
+    return [write_json(directory / "calibration.json", value),
+            write_frame(directory / "calibration_robustness.csv", pd.DataFrame(robust, columns=CALIBRATION_ROBUSTNESS_COLUMNS)),
+            write_frame(directory / "calibration_divisor.csv", pd.DataFrame(divisors, columns=CALIBRATION_DIVISOR_COLUMNS))]

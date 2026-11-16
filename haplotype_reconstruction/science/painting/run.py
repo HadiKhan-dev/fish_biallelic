@@ -88,7 +88,7 @@ class ComponentDecoding:
         freeze_record_arrays(self)
 
 
-def _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder, skip=()):
+def _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder, robustness_epsilon, site_correlation, skip=()):
     """Yield emissions, eligibility and observed masks for the requested contiguous sample batches."""
     alt_probability = states.alt_probability()
     n_samples = likelihoods.shape[0]
@@ -108,11 +108,17 @@ def _raw_batches(states, bins, likelihoods, observed, sites, config, size, emiss
                 bins.starts,
                 bins.stops,
                 config,
+                robustness_epsilon=robustness_epsilon, site_correlation=site_correlation,
             )
             eligible = np.any(informative, axis=1)
             yield raw, eligible, start, stop, informative, batch_observed
 
     return batches
+
+
+def robustness_choice(likelihoods: tuple[tuple[float, float], ...]) -> float:
+    """Contig maximum of the final recorded component likelihood sum; exact ties prefer smaller epsilon."""
+    return min(likelihoods, key=lambda item: (-item[1], item[0]))[0]
 
 
 def error_capable(states: PaintingStates) -> np.ndarray:
@@ -128,6 +134,8 @@ def component_model(
     config: PaintingParameters,
     genetic_map: ChromosomeGeneticMap,
     *,
+    robustness_epsilon: float,
+    site_correlation: float,
     batch_samples: int = 1,
     cache_emissions: bool = True,
     emission_builder: EmissionBuilder = emissions.tempered_emissions,
@@ -142,12 +150,12 @@ def component_model(
     before label continuity, so it never coexists with the decoding cache."""
     n_samples = likelihoods.shape[0]
     states = build_states(panel.positions, panel.inference, panel.kept)
-    bins = build_bins(states.positions, config.snps_per_bin)
+    bins = build_bins(states.positions, config.snps_per_bin, config.reference_snps_per_bin)
     if bins.n_bins == 0:
         return None
     sites = evidence_sites[states.site_indices]
     size = max(1, min(n_samples, int(batch_samples)))
-    batches = _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder)
+    batches = _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder, robustness_epsilon, site_correlation)
     n_states = states.n_states
     n_packed = n_states * (n_states + 1) // 2
     if cache_emissions:
@@ -171,7 +179,7 @@ def component_model(
         source,
         error_capable(states),
         edge_morgans(bins.centers, genetic_map),
-        config,
+        config, site_correlation=site_correlation,
     )
 
 
@@ -242,7 +250,7 @@ def release_component(
 def decoding_grid(panel, config):
     """Construct the component's state and bin axes before decoding."""
     states = build_states(panel.positions, panel.inference, panel.kept)
-    bins = build_bins(states.positions, config.snps_per_bin)
+    bins = build_bins(states.positions, config.snps_per_bin, config.reference_snps_per_bin)
     if states.n_states > MAXIMUM_MASK_STATES:
         raise InvariantError(f"painting interval masks require S <= {MAXIMUM_MASK_STATES}; got {states.n_states}")
     return states, bins
@@ -268,8 +276,12 @@ def decoding_model(states, bins, evidence_sites, genetic_map, model):
 
 
 def decode_batch(raw, batch_eligible, batch_observed, informative, states, bins, model, capable,
-                 local_keys, public_ids, config, *, reverse):
-    """Compute one batch's candidate paths, release masses and direct support."""
+                 local_keys, public_ids, config, *, reverse, confidence=None):
+    """Compute one batch's candidate paths, release masses and direct support.
+
+    ``raw`` and ``model``: emissions and copying model at the path strength (they decode). ``confidence``: None when
+    the run's two strengths are equal, else (confidence model, emissions at the confidence strength): the release
+    masses are then the confidence chain's posteriors of the decoded labels."""
     # Combine switch intervals from both traceback conventions, canonical track order and faithful-copy
     # release masses of the chain's Viterbi labels.
     batch_paths, batch_masks, batch_switches, other_paths = fidelity.decode_candidates(
@@ -285,9 +297,14 @@ def decode_batch(raw, batch_eligible, batch_observed, informative, states, bins,
         reverse=reverse,
         tie=config.viterbi_tie,
     )
-    batch_qf, batch_qaf = fidelity.release_posteriors(
-        raw, model, capable, batch_paths, other_paths, public_ids, local_keys
-    )
+    if confidence is None:
+        batch_qf, batch_qaf = fidelity.release_posteriors(
+            raw, model, capable, batch_paths, other_paths, public_ids, local_keys
+        )
+    else:
+        batch_qf, batch_qaf = fidelity.release_posteriors(
+            confidence[1], confidence[0], capable, batch_paths, other_paths, public_ids, local_keys
+        )
     del raw
     batch_support = hmm.direct_support(
         batch_paths, states.named_alleles, informative, bins.starts, bins.stops, states.n_classes

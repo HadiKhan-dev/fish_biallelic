@@ -163,10 +163,12 @@ def component_input(contig: int, centers, local_keys, eligible, classes, status,
                                    dtype=np.float64, order="C"), int(n_states))
 
 
-def packed_emissions(component, painting_parameters, evidence, rows: np.ndarray) -> np.ndarray:
-    """The painting's packed binned log emissions [len(rows), S (S + 1) / 2, B] of ``rows``, recomputed from the
-    contig evidence as painting computes them (binned emissions over the component's selected sites, divided by the
-    design effect) when the painting kept no emission cache."""
+def packed_emissions(
+    component, painting_parameters, robustness_epsilon, evidence, rows: np.ndarray, site_correlation: float
+) -> np.ndarray:
+    """Packed binned log emissions [len(rows), S (S + 1) / 2, B] of ``rows`` at ``site_correlation``, recomputed from
+    the contig evidence as painting computes them (binned emissions over the component's selected sites, divided by
+    the design effect), when the painting's own cache is absent or at another strength (prepare.path_correlation)."""
     states, bins = component.states, component.bins
     S = int(states.n_states)
     indices = np.searchsorted(evidence.positions, states.positions)
@@ -181,9 +183,12 @@ def packed_emissions(component, painting_parameters, evidence, rows: np.ndarray)
         gl, observed = painting_hmm.gather_sites(evidence.likelihoods, evidence.observed, sites,
                                                  slice(int(row), int(row) + 1))
         em = painting_hmm.binned_emissions(gl, observed, alt, states.background_frequency, bins.starts, bins.stops,
-                                           robustness_epsilon=painting_parameters.robustness_epsilon,
+                                           robustness_epsilon=robustness_epsilon,
                                            log_floor=painting_parameters.emission_log_floor)
-        em /= painting_hmm.design_effect(gl, observed, bins.starts, component.transitions.site_correlation)[:, None, :]
+        em /= painting_hmm.design_effect(
+            gl, observed, bins.starts, site_correlation,
+            painting_parameters.reference_snps_per_bin // painting_parameters.snps_per_bin,
+        )[:, None, :]
         full = em.reshape(1, S, S, -1)[0]
         out[k, pair[upper]] = full[upper]
     return out

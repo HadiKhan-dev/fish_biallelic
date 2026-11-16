@@ -201,6 +201,22 @@ def unit_segments(contig: np.ndarray, coordinate: np.ndarray, offsets: np.ndarra
     return dense.astype(np.int64), segment, np.asarray(segment_unit, np.int64), len(occupied), float(start)
 
 
+def _sum_at(shape: tuple[int, ...], index: tuple[np.ndarray, ...], values: np.ndarray) -> np.ndarray:
+    """An array of ``shape`` with out[index[0][i], index[1][i], ...] += values[i] for every i (what np.add.at
+    computes), summed by a stable sort on the target cell and np.add.reduceat: faster than np.add.at (measured 1.0-1.8
+    times at the fit's shapes); sums may differ from np.add.at's in the last bits (another summation order)."""
+    head = shape[: len(index)]
+    out = np.zeros(shape)
+    if not len(values):
+        return out
+    flat = np.ravel_multi_index(index, head)
+    order = np.argsort(flat, kind="stable")
+    keys = flat[order]
+    starts = np.flatnonzero(np.concatenate(([True], keys[1:] != keys[:-1])))
+    out.reshape((-1,) + shape[len(index):])[keys[starts]] = np.add.reduceat(values[order], starts, axis=0)
+    return out
+
+
 def fit(frames: Frames, coordinate_maps: Mapping[int, ChromosomeGeneticMap] | None, p: MapScaleParameters,
         material: MaterialParameters, *, positions_scale: float = 1.0) -> MapScaleFit | None:
     """Fit er on ``frames`` (positions already in the chain's coordinate: bp, or file-map pseudo-bp) and apply the
@@ -238,10 +254,11 @@ def fit(frames: Frames, coordinate_maps: Mapping[int, ChromosomeGeneticMap] | No
     cpos = {c: k for k, c in enumerate(contigs)}
     seq_family = np.asarray([fpos[f] for f in frames.family], np.int64)
     seq_contig = np.asarray([cpos[c] for c in frames.contig], np.int64)
-    cells = np.zeros((len(contigs), len(families)) + seg_ll.shape[1:])
-    np.add.at(cells, (seq_contig[seq_of_segment], seq_family[seq_of_segment]), seg_ll)
-    unit_cells = np.zeros((units, len(families)) + seg_ll.shape[1:])
-    np.add.at(unit_cells, (segment_unit, seq_family[seq_of_segment]), seg_ll)
+    cells = _sum_at((len(contigs), len(families)) + seg_ll.shape[1:],
+                    (seq_contig[seq_of_segment], seq_family[seq_of_segment]), seg_ll)
+    unit_cells = _sum_at(
+        (units, len(families)) + seg_ll.shape[1:], (segment_unit, seq_family[seq_of_segment]), seg_ll
+    )
     kept, dropped, rows, z_crit, consistent, near = consistency(cells, grid, p)
     sub = unit_cells[:, kept]
     estimate, _n, at_edge = argmax_refined(sub.sum(axis=(0, 1)), grid)

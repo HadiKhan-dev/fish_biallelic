@@ -18,6 +18,8 @@ class JunctionInputs:
     par: np.ndarray = record_field("call", units="1", dtype="int64", stored=False)
     config: PhaseParameters = record_field("state", units="1", dtype="PhaseParameters", stored=False)
 
+    bins_per_reference_window: int = record_field("state", units="bins", dtype="int64", stored=False)
+
     @property
     def N(self) -> int:
         return self.X.shape[0]
@@ -99,13 +101,13 @@ def _flanks_pinned(
 ) -> bool:
     """Both flanks of edge j: p's pair (x, y), with x on homologue h at the flank's first bin, beats every pair
     that puts the alternative label z = alternatives[flank][x] on homologue h, whatever the partner (per bin, the
-    best partner label), over up to ``junction_pin_bins`` bins while p's labels stay put, by at least
+    best partner label), over up to ``junction_pin_reference_bins`` reference windows while p's labels stay put, by at least
     ``junction_pin_nats``. The partner is free because a pair alternative can fit the same unphased reads (two
     rows exchanged together): holding it fixed would mistake that ambiguity for evidence. A flank with no
     alternative to x (x not in the map, or mapped to itself) passes when ``unaffected_passes`` and fails
     otherwise."""
     X, E, B = model.X, model.E, model.B
-    window = model.config.junction_pin_bins
+    window = model.config.junction_pin_reference_bins * model.bins_per_reference_window
     flanks = ((j - 1, max(-1, j - 1 - window), -1), (j, min(B, j + window), 1))
     for (start, stop, step), alternative in zip(flanks, alternatives, strict=False):
         x, y = int(X[p, h, start]), int(X[p, 1 - h, start])

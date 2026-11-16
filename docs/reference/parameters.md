@@ -666,14 +666,16 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `emission_site_correlation` | `0.1` | 1 | Working within-bin correlation r (dimensionless); divides log emissions by 1+(n-1)r to temper correlated evidence, tuned on simulations and sparse-read controls. |
+| `divisor_grid` | `(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0)` | 1 | Full-reference evidence divisors; choose the pooled held-out posterior predictive maximum. |
+| `calibration_folds` | `3` | folds | Hide every kth selected-site reference window in one of k deterministic folds. |
 | `initial_switch_rate` | `2.0` | Morgan^-1 | Initial copying-change rate per track (per Morgan); starts component estimation at two ancestry changes per Morgan. |
 | `initial_error_entry` | `0.001` | probability | Initial faithful-to-panel-error entry probability per edge (probability); starts component chain estimation. |
 | `initial_error_exit` | `0.25` | probability | Initial panel-error exit probability per edge (probability); starts the mean label-preserving error-run length at four bins. |
 | `estimation_iterations` | `8` | count | Fixed EM updates of the copying rate and error chain (iterations); defines a deterministic truncated estimator. |
 | `estimate_grid` | `2.0 ** (-6)` | nats | Rounding step for estimated parameters (natural-log units); limits sensitivity to genotype-likelihood noise below the grid scale. |
-| `robustness_epsilon` | `0.01` | probability | Uniform genotype-error mixture mass per observed site (probability); bounds the influence of discordant genotype evidence. |
-| `snps_per_bin` | `100` | sites | Target selected sites per emission bin (sites); sets near-equal consecutive bins for the copying chain. |
+| `robustness_grid` | `(0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03)` | probability | Candidate genotype-outlier mixture masses (probabilities); selected across the run by the sum of the components' last EM-trajectory log likelihoods, ties to smaller mass. |
+| `snps_per_bin` | `25` | sites | Target selected sites per emission bin (sites); sets near-equal consecutive bins for the copying chain. |
+| `reference_snps_per_bin` | `100` | sites | Selected-site reference window for evidence tempering and pedigree observation bins. |
 | `emission_log_floor` | `-50.0` | nats | Lower bound of a site log emission (nats); limits a discordant observation before bin aggregation. |
 | `minimum_release_posterior` | `0.9` | probability | Minimum faithful-copy pair posterior (probability); applies the predeclared ten-percent posterior-error budget. |
 | `label_continuity_minimum_switch_gain` | `2.0` | count | Minimum reduction in painted switches for a suffix relabelling (switches); also sets the score-screen admission level in switch units. |
@@ -1002,7 +1004,7 @@ Source: [haplotype_reconstruction/science/phase/parameters.py](../../haplotype_r
 | `tie_quantum` | `1e-09` | nats | FP04; absolute Viterbi tie band 1e-9 nats, preferring the incumbent then the explicit index convention. |
 | `junction_min_samples` | `2` | samples | FP10; require 2 distinct switching samples to nominate a founder-identity junction. |
 | `junction_pin_nats` | `10.0` | nats | FP10; require 10 nats of parental own-read evidence per flank to pin a homologue. |
-| `junction_pin_bins` | `10` | bins | FP10; inspect up to 10 bins per flank, stopping at parental label changes. |
+| `junction_pin_reference_bins` | `10` | reference windows | FP10; inspect up to 10 painting reference windows per flank, stopping at parental label changes. |
 | `site_deviation` | `0.001` | probability | FP16; genotype-departure mixture probability 0.001, a working value chosen on validation simulations. |
 | `genotype_posterior` | `0.9` | probability | FP17-FP19; probability cutoff 0.9 for genotype calls and informative heterozygosity. |
 | `phase_posterior` | `0.99` | probability | FP17-FP18/FP21; probability cutoff 0.99 for ordered heterozygote and meiosis-chain release. |

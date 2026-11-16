@@ -195,6 +195,28 @@ def _run_checks(
     )
 
 
+# The stages whose record identities this process takes from the run folder's remembered sources (interface.reuse),
+# by checkpoint directory: the workers of the runtime started for that folder pin the same stages.
+_REUSED: dict[str, tuple[str, ...]] = {}
+
+
+def _apply_record_reuse(paths: RunPaths, settings: Settings, command: str) -> None:
+    """Apply the run folder's record-reuse state before any record identity is derived (interface.reuse)."""
+    from . import reuse
+
+    asked = reuse.requested(settings.execution.reuse_records)
+    if not Path(paths.checkpoints).is_dir():
+        if asked:
+            raise SettingsError(f"{paths.checkpoints}: reuse_records needs an existing run folder")
+        # a new run folder reuses nothing, whatever an earlier command of this process pinned
+        from ..store.identity import pin_stage_sources
+
+        pin_stage_sources({})
+        _REUSED[str(paths.checkpoints)] = ()
+        return
+    _REUSED[str(paths.checkpoints)] = tuple(reuse.install(paths.checkpoints, asked, command))
+
+
 def check_run(
     settings: Settings, *, command: str = "run", tie_reverse: bool = False, contigs: tuple[str, ...] | None = None
 ) -> PreparedRun:
@@ -211,6 +233,8 @@ def check_run(
     paths = run_paths(settings)
     cores = resolve_cores(settings)
     configure_worker(cores)
+    # after the numerical policy: the record-reuse state reads the store, which imports NumPy
+    _apply_record_reuse(paths, settings, command)
     from ..store.releases import check_directory_release
 
     check_directory_release(paths.output)
@@ -681,7 +705,12 @@ def _complete_workflow(
                 temporary.write_text("complete\n")
         return
     scopes = tuple(dict.fromkeys(key.scope for key in nodes if key.scope != "run"))
-    name = cut.step + ("." + scopes[0] if cut.step in {"evidence", "reconstruct", "phase"} and len(scopes) == 1 else "")
+    step = cut.step
+    if step == "reconstruct" and not any(key.stage == "painting" for key in nodes):
+        # Before the run calibration a reconstruction stops at the contig's final assembly, and its marker says
+        # so: reconstruct.CONTIG.done always means painted and refitted (the pedigree's prerequisite).
+        step = "assembly"
+    name = step + ("." + scopes[0] if cut.step in {"evidence", "reconstruct", "phase"} and len(scopes) == 1 else "")
 
     # the containers' envelope checks run concurrently (file reads and decodes after the graph).
     if not complete_cut(
@@ -774,6 +803,7 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
     dependencies = {
         "quality": tuple(key("evidence", c) for c in resolved.analysis.included),
         "painting": tuple(key("painting", c) for c in resolved.analysis.included),
+        "calibration": (key("calibration"),),
         "relatedness": (key("relatedness"),),
         "pedigree": (key("pedigree"),),
         "refit": tuple(key("refit", c) for c in resolved.analysis.included),
@@ -818,7 +848,7 @@ def _attach_reports(graph: RunGraph, cut: Cut) -> Cut:
 
     from ..engine.graph import TaskKey
 
-    if cut.step not in {"run", "evidence", "relatedness", "reconstruct", "pedigree", "phase", "recombination"}:
+    if cut.step not in {"run", "evidence", "relatedness", "reconstruct", "calibrate", "pedigree", "phase", "recombination"}:
         return cut
     selected = set(cut.nodes)
     for node in graph.nodes:
@@ -962,6 +992,8 @@ def execute(
             serial=settings.serial if command == "run" else False,
             max_contigs=(settings.execution.max_contigs or None) if command == "run" else None,
             painted=painted,
+            calibrated=bool(Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints,
+                                    exclude_contigs=()).stage_request("calibration")),
         )
         cut = _attach_reports(graph, cut)
         completed = _prerequisites(prepared, resolved, cut)
@@ -981,6 +1013,11 @@ def execute(
         sizes = _phase_costs(prepared, resolved)
         scheduling = execution_options(graph, cut, contig_costs=sizes, phase_costs=sizes)
         preload = task_preloads(tasks)
+        if command == "reconstruct":
+            # both passes of a reconstruction (to the final assembly, then painting and refit) share one kernel cache
+            from ..stages.graph import step_preloads
+
+            preload = tuple(dict.fromkeys((*preload, *step_preloads("reconstruct"))))
     else:
         preload = ()
     # Init reads its source's header and binds the manifest; it runs kernels only when it simulates the source.
@@ -1003,6 +1040,7 @@ def execute(
         developer=dict(
             tie_reverse=tie_reverse, tie_keep=list(tie_keep), tie_census=None if tie_census is None else str(tie_census)
         ),
+        records_reused=list(_REUSED.get(str(prepared.paths.checkpoints), ())),
     )
     # Worker-pool graphs compile missing kernels beside unrelated work. Each scientific root waits for its own
     # numerical modules before it can expand into workers; init's simulation and in-process graphs warm eagerly.
@@ -1059,6 +1097,18 @@ def execute(
             assert kernels is not None  # a deferring graph is a warm one
             record_compiled(kernels, values)
         _complete_workflow(prepared, cut, tasks, values, recorder)
+        # The command read or wrote the records of its stages and of everything upstream of them consistently with
+        # the installed code: remember these sources for them (the reused stages keep theirs). A report only reads:
+        # it writes nothing into the checkpoint folder, which may be archived (interface.reuse.READ_ONLY).
+        from . import reuse
+
+        if command not in reuse.READ_ONLY:
+            modelled = {node.key for node in graph.nodes}
+            reuse.record(
+                prepared.paths.checkpoints,
+                {key.stage for key in graph.closure(tuple(key for key in cut.nodes if key in modelled))},
+                _REUSED.get(str(prepared.paths.checkpoints), ()),
+            )
         if cut.clean_stop:
             recorder.clean_stop()
     selected = tuple(c for c in settings.input.contigs if any(key.scope == c for key in cut.nodes))
@@ -1080,6 +1130,7 @@ def _recorded_run(
     configure_worker(cores)
     paths = RunPaths.from_directory(directory)
     settings = replace(settings, run=replace(settings.run, output=paths.output, checkpoints=paths.checkpoints))
+    _apply_record_reuse(paths, settings, "read")
     store = _existing_store(paths)
     from ..stages.configure import configure, genetic_maps, resolve
 
@@ -1305,7 +1356,7 @@ def _check_recombination_bindings(
     """Check all downstream bindings before any recombination task or report is written."""
     from ..contracts.roles import require_schema
     from ..core.errors import InvariantError
-    from ..results.protocol import check_receipt
+    from ..stages.inputs.protocol import check_receipt
     from ..stages.analysis import location
     from ..stages.recombination import records
     from ..store.protocol import read_items
@@ -1433,6 +1484,7 @@ def _start_runtime(prepared: PreparedRun, *, preload: tuple[str, ...] = ()) -> N
 
         closure = tuple(dict.fromkeys(("haplotype_reconstruction.engine.workers", *roots)))
         cache = cache_directory(cache_key(closure), base=prepared.settings.execution.scratch / "kernels")
+    reused = _REUSED.get(str(prepared.paths.checkpoints), ())
     start_run(
         prepared.cores,
         preload=roots,
@@ -1441,4 +1493,10 @@ def _start_runtime(prepared: PreparedRun, *, preload: tuple[str, ...] = ()) -> N
         memory_limit=memory_limit(prepared.settings),
         memory_diagnostics=prepared.paths.logs,
         cache_directory=cache,
+        # every worker derives record identities too: it pins the same stages as this process
+        worker_hooks=(
+            (("haplotype_reconstruction.interface.reuse:worker_install", (str(prepared.paths.checkpoints), reused)),)
+            if reused
+            else ()
+        ),
     )

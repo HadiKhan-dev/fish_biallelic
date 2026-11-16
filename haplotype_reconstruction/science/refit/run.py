@@ -47,7 +47,7 @@ def refit_chromosome(
             likelihoods,
             observed,
             kernel_sites,
-            robustness_epsilon=painting.parameters.robustness_epsilon,
+            robustness_epsilon=painting.robustness_epsilon,
             minimum_gain_nats=config.minimum_gain_nats,
             coordinate_sweeps=config.coordinate_sweeps,
             fill_min_supporters=config.fill_min_supporters,

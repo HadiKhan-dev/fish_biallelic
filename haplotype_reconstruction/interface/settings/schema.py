@@ -107,6 +107,15 @@ class ExecutionSection:
         "Discover, assemble and paint one contig at a time, each recorded before the next (short allocations).",
         affects_results=False,
     )
+    reuse_records: tuple[str, ...] = setting(
+        (),
+        "strings",
+        "Explicit override: stages whose existing records in this run folder are accepted whatever code wrote "
+        "them, for use after a source edit judged not to change results. It stays in force for the run folder "
+        "until set to none; empty keeps the run folder's state. The run is then reproducible only as far as that "
+        "judgement holds. See the record-reuse section of docs/user/running.md.",
+        affects_results=False,
+    )
     max_contigs: int = setting(
         0,
         "int",

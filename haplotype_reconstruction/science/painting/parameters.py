@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ...core.ties import noise_quantum
+from ...core.errors import SettingsError
 
 # Copying-rate bounds (per Morgan), entry/exit probability bounds and fixed search step counts.
 # A reached estimate bound is reported, not rejected: entry at 1e-6 indicates no support
@@ -47,14 +48,14 @@ class PaintingParameters:
     ancestry-change rate rho and the panel-error chain's entry and exit probabilities a and b. The settings below
     are their starting values and the estimation's fixed schedule, not the values used.
 
-    emission_site_correlation: r; each sample's bin log emission is divided by 1 + (n - 1) r, n the sample's
-        informative sites in the bin (painting.emissions.design_effect): a tuned, equicorrelation-inspired
-        magnitude adjustment. The bin emission multiplies its per-site terms as if they were independent given the
-        copying pair, which overstates the evidence of a bin (panel errors run along rows, reads and
-        genotype-likelihood errors are correlated between nearby sites). Under an equal-variance, common-correlation
-        working assumption a bin of 100 informative sites counts as about 9 variance-equivalent sites and one of 8 as
-        about 4.7; the weight tends to 1 as n -> 1. r is a tuned constant chosen on the simulations and sparse-read
-        controls (docs/methods/painting.md), not an estimated correlation.
+    divisor_grid: candidate full-reference-window evidence divisors. Two strengths are chosen from it per run, from
+        held-out reference windows pooled over the run (painting/calibration.py): the PATH divisor maximises the
+        held-out score of the decoded label pairs and tempers the fit, the decoding and the pedigree's reading of
+        the painting; the CONFIDENCE divisor maximises the held-out posterior predictive density and tempers the
+        release posteriors and family phase. The correlation of a divisor is
+        (divisor - 1) / (reference_snps_per_bin - 1).
+    calibration_folds: number of held-out folds; fold f hides the f-th of calibration_folds contiguous near-equal
+        parts of every reference window's selected sites, so every window is predicted from the rest of its own data.
     initial_switch_rate: starting value of rho, ancestry changes per Morgan per track (about two meioses since the
         founders, an F2 homologue).
     initial_error_entry: starting value of a, the per-edge probability that a faithful track of an anchored class
@@ -65,10 +66,13 @@ class PaintingParameters:
         deterministic estimator, not a convergence test; see docs/methods/painting.md for its sensitivity).
     estimate_grid: the estimates are rounded to this step in natural-log space (2^-6: about 1.6%), so
         genotype-likelihood noise far below it changes them only at a grid boundary.
-    robustness_epsilon: uniform genotype-error mixture of the emission,
-        P = (1 - eps) P(GL | pair) + eps / 3 per observed site.
-    snps_per_bin: target selected sites per bin (bins split the selected sites
-        into max(1, L // snps_per_bin) near-equal consecutive runs).
+    robustness_grid: candidate uniform genotype-outlier mixture masses, P = (1 - eps) P(GL | pair)
+        + eps / 3 per observed site. Fit every component at each value; select the run-wide largest
+        sum of last-trajectory log likelihoods, with ties to the smaller value.
+    snps_per_bin: target selected sites per fine bin; split each near-equal reference window
+        into reference_snps_per_bin // snps_per_bin near-equal consecutive runs.
+    reference_snps_per_bin: selected-site reference window; snps_per_bin must divide it.
+        Consecutive groups of reference_snps_per_bin // snps_per_bin bins share one divisor.
     emission_log_floor: lower bound of each site's log emission (nats).
     minimum_release_posterior: tau of the release rule; a track pair is released when the posterior probability
         that both tracks copy its unordered class pair faithfully (no panel error) is >= tau, or (stage 2) that of
@@ -81,19 +85,26 @@ class PaintingParameters:
         An undecided class withholds its repair and flags LabelContinuity.check_budget_reached.
     """
 
-    emission_site_correlation: float = field(
-        default=0.1,
+    divisor_grid: tuple[float, ...] = field(
+        default=(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0),
         metadata={
-            "provenance": (
-                "Working within-bin correlation r (dimensionless); divides log emissions by "
-                "1+(n-1)r to temper correlated evidence, tuned on simulations and sparse-read "
-                "controls."
-            ),
             "role": "state",
-            "axes": (),
+            "axes": ("grid",),
             "units": "1",
             "dtype": "float64",
             "stored": True,
+            "provenance": "Full-reference evidence divisors; choose the pooled held-out posterior predictive maximum.",
+        },
+    )
+    calibration_folds: int = field(
+        default=3,
+        metadata={
+            "role": "state",
+            "axes": (),
+            "units": "folds",
+            "dtype": "int64",
+            "stored": True,
+            "provenance": "Hide every kth selected-site reference window in one of k deterministic folds.",
         },
     )
     initial_switch_rate: float = field(
@@ -166,22 +177,22 @@ class PaintingParameters:
             "stored": True,
         },
     )
-    robustness_epsilon: float = field(
-        default=0.01,
+    robustness_grid: tuple[float, ...] = field(
+        default=(1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2),
         metadata={
             "provenance": (
-                "Uniform genotype-error mixture mass per observed site (probability); bounds the "
-                "influence of discordant genotype evidence."
+                "Candidate genotype-outlier mixture masses (probabilities); selected across the run by the "
+                "sum of the components' last EM-trajectory log likelihoods, ties to smaller mass."
             ),
             "role": "state",
-            "axes": (),
+            "axes": ("grid",),
             "units": "probability",
             "dtype": "float64",
             "stored": True,
         },
     )
     snps_per_bin: int = field(
-        default=100,
+        default=25,
         metadata={
             "provenance": (
                 "Target selected sites per emission bin (sites); sets near-equal consecutive bins "
@@ -194,12 +205,22 @@ class PaintingParameters:
             "stored": True,
         },
     )
+    reference_snps_per_bin: int = field(
+        default=100,
+        metadata={
+            "provenance": "Selected-site reference window for evidence tempering and pedigree observation bins.",
+            "role": "state",
+            "axes": (),
+            "units": "sites",
+            "dtype": "int64",
+            "stored": True,
+        },
+    )
     emission_log_floor: float = field(
         default=-50.0,
         metadata={
             "provenance": (
-                "Lower bound of a site log emission (nats); limits a discordant observation "
-                "before bin aggregation."
+                "Lower bound of a site log emission (nats); limits a discordant observation before bin aggregation."
             ),
             "role": "state",
             "axes": (),
@@ -280,6 +301,26 @@ class PaintingParameters:
             "stored": True,
         },
     )
+
+    def __post_init__(self) -> None:
+        if not self.divisor_grid or any(not np.isfinite(x) or x < 1 for x in self.divisor_grid):
+            raise SettingsError("divisor_grid must contain finite divisors >= 1")
+        if (
+            not np.isfinite(self.calibration_folds)
+            or int(self.calibration_folds) != self.calibration_folds
+            or self.calibration_folds < 2
+        ):
+            raise SettingsError("calibration_folds must be an integer >= 2")
+        if self.reference_snps_per_bin <= 1:
+            raise SettingsError("reference_snps_per_bin must exceed 1")
+        if not self.robustness_grid or any(not np.isfinite(x) or not 0 <= x <= 1 for x in self.robustness_grid):
+            raise SettingsError("robustness_grid must contain finite probabilities in [0, 1]")
+        if self.estimation_iterations < 1:
+            raise SettingsError("robustness estimation requires at least one EM update")
+        if self.snps_per_bin <= 0 or self.reference_snps_per_bin <= 0:
+            raise SettingsError("painting bin sizes must be positive")
+        if self.reference_snps_per_bin % self.snps_per_bin:
+            raise SettingsError("snps_per_bin must divide reference_snps_per_bin")
 
 
 __all__ = [

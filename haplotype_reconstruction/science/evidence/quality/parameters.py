@@ -169,8 +169,9 @@ class SampleQualityParameters:
     # alpha_min: twice the working foreign-allele amplitude a_min. The null admits any error distribution of the
     # library up to a_min = alpha_min / 2; a flag needs a component above it. Motivation (not a derived safety
     # boundary): the founder-construction and painting emissions mix each observed site's genotype evidence with a
-    # uniform genotype error of mass r = 0.01 (assembly LinkerParameters.robustness, PaintingParameters.robustness_epsilon,
-    # the founder refit), which limits the influence of discordant observations. At a site where foreign DNA at read
+    # uniform genotype error, which limits discordant observations (assembly LinkerParameters.robustness is 0.01;
+    # painting and founder refit use the fitted Painting.robustness_epsilon). This calibration retains its fixed
+    # reference mass r = 0.01. At a site where foreign DNA at read
     # fraction alpha is homozygous for an allele the sample lacks, a cell of depth d shows K ~ Bin(d, alpha) foreign
     # reads; two or more contradict a homozygote decisively (heterozygote likelihood ratio above 3 (1 - r) / r at
     # clean error rates 1e-4..1e-3 and depths of about 4 to 16) with probability ~ C(d, 2) alpha^2, which is of the

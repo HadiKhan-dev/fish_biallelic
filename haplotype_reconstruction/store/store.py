@@ -23,6 +23,8 @@ from .identity import jsonable
 from .releases import CURRENT_RELEASE, unsupported_release
 
 CONTIG_DIRECTORY = "contigs"
+# The record-reuse ledger and the remembered package sources of a run folder (interface.reuse).
+CODE_DIRECTORY = "code"
 MARKER_DIRECTORY = "markers"
 RUN_FILE = "run.ckpt"
 CONTIG_SUFFIX = ".ckpt"
@@ -42,7 +44,8 @@ class CheckpointStore:
 
     ``nthreads`` is the default encode/decode CPU budget of its containers (a count, or a live CPU budget re-read
     at each encode/decode); ``clevel`` their default ZSTD level.
-    A directory holding other subdirectories than contigs/ and markers/ belongs to another layout and is refused.
+    A directory holding other subdirectories than contigs/, markers/ and code/ belongs to another layout and is
+    refused.
     """
 
     def __init__(self, root, *, nthreads=1, clevel=None):
@@ -52,7 +55,7 @@ class CheckpointStore:
         self.clevel = codec.CLEVEL if clevel is None else int(clevel)
         os.makedirs(self.root, exist_ok=True)
         for entry in os.scandir(self.root):
-            if entry.is_dir() and entry.name not in (CONTIG_DIRECTORY, MARKER_DIRECTORY):
+            if entry.is_dir() and entry.name not in (CONTIG_DIRECTORY, MARKER_DIRECTORY, CODE_DIRECTORY):
                 raise unsupported_release(f"{self.root} (checkpoint layout {entry.name}/)")
 
     def __repr__(self):
@@ -296,6 +299,7 @@ __all__ = [
     "LAYOUT_KEY",
     "CONTIG_DIRECTORY",
     "MARKER_DIRECTORY",
+    "CODE_DIRECTORY",
     "RUN_FILE",
     "CONTIG_SUFFIX",
 ]

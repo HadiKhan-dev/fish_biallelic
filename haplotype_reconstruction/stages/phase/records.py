@@ -136,8 +136,9 @@ def canonical_component_inputs(
         painted.member_ids,
         painted.member_sets,
         painted.packed_emissions,
-        painting.parameters.robustness_epsilon,
+        painting.robustness_epsilon,
         painting.parameters.emission_log_floor,
+        painting.parameters.reference_snps_per_bin // painting.parameters.snps_per_bin,
         sample_ids=sample_ids,
     )
     fitted = PhaseRefit(source, panel.inference, *chromosome_prior_counts([c.inference for c in refit.components]))

@@ -33,8 +33,22 @@ rule relatedness:
     threads: 8
     shell: "haplotypes relatedness {CONFIG:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
 
-rule reconstruct:
+# Before the run calibration `reconstruct` stops at the contig's final assembly (marker assembly.CONTIG.done).
+rule assemble:
     input: f"{M}/evidence.{{c}}.done"
+    output: f"{M}/assembly.{{c}}.done"
+    threads: 8
+    shell: "haplotypes reconstruct {CONFIG:q} --contig {wildcards.c:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
+
+rule calibrate:
+    input: expand(f"{M}/assembly.{{c}}.done", c=CONTIGS)
+    output: f"{M}/calibrate.done"
+    threads: 8
+    shell: "haplotypes calibrate {CONFIG:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"
+
+# After the calibration the same command paints and refits the contig (marker reconstruct.CONTIG.done).
+rule reconstruct:
+    input: f"{M}/calibrate.done"
     output: f"{M}/reconstruct.{{c}}.done"
     threads: 8
     shell: "haplotypes reconstruct {CONFIG:q} --contig {wildcards.c:q} --checkpoints {CHECKPOINTS:q} --cores {threads}"

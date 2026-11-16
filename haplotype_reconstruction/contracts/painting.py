@@ -189,8 +189,9 @@ class PaintingTransitions:
         exp(log_same) + 2 (S - 1) exp(log_one) + (S - 1)^2 exp(log_two) = 1.
     switch_rate: rho, ancestry changes per Morgan per track.
     error_entry, error_exit: a and b of the panel-error chain (painting.fidelity; 0 when it has no error state).
-    site_correlation: r of the design effect 1 + (n - 1) r that divided each sample's bin log emission
-        (PaintingConfig.emission_site_correlation; 0 = untempered); consumers of the emissions (pedigree's source
+    site_correlation: r of the design effect 1 + (n - 1) r that divided each sample's bin log emission,
+        with n informative sites in its reference window (PaintingTransitions.site_correlation;
+        0 = untempered); consumers of the emissions (pedigree's source
         chain) apply the same.
     """
 
@@ -415,6 +416,9 @@ class Painting:
         "call", axes=("C",), units="1", dtype="LabelContinuity"
     )
     parameters: PaintingParameters = record_field("state", axes=(), units="1", dtype="PaintingParameters")
+    robustness_epsilon: float = record_field("state", axes=(), units="probability", dtype="float64")
+    emission_divisor: float = record_field("state", axes=(), units="1", dtype="float64")
+    path_divisor: float = record_field("state", axes=(), units="1", dtype="float64")
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -451,6 +455,9 @@ class PaintingSummary:
     relabel_moves: int = record_field("report", axes=(), units="1", dtype="int")
     switches_before: int = record_field("report", axes=(), units="1", dtype="int")
     switches_after: int = record_field("report", axes=(), units="1", dtype="int")
+    robustness_epsilon: float = record_field("report", axes=(), units="probability", dtype="float64")
+    emission_divisor: float = record_field("state", axes=(), units="1", dtype="float64")
+    path_divisor: float = record_field("state", axes=(), units="1", dtype="float64")
     switch_intervals: int = record_field("report", axes=(), units="1", dtype="int", default=0)
     interval_track_bins: int = record_field("report", axes=(), units="1", dtype="int", default=0)
 
@@ -571,6 +578,9 @@ def painting_to_payload(painting: Painting) -> dict[str, Any]:
         "contig": painting.contig,
         "sample_ids": list(painting.sample_ids),
         "parameters": to_payload(painting.parameters),
+        "robustness_epsilon": painting.robustness_epsilon,
+        "emission_divisor": painting.emission_divisor,
+        "path_divisor": painting.path_divisor,
         "label_continuity": [to_payload(item) for item in painting.label_continuity],
         "components": [to_payload(item) for item in painting.components],
         "rows": rows,
@@ -590,7 +600,7 @@ def painting_from_payload(
     Arrays borrow immutable payload buffers for the lifetime of the decoded record.
     """
     require_schema(payload, 1)
-    required = {"schema", "contig", "sample_ids", "parameters", "components", "label_continuity"}
+    required = {"schema", "contig", "sample_ids", "parameters", "components", "label_continuity", "robustness_epsilon", "emission_divisor", "path_divisor"}
     extra = payload.keys() - required - {"rows", "packed_emissions"}
     missing = required - payload.keys()
     if missing or extra:
@@ -617,6 +627,9 @@ def painting_from_payload(
         contig=payload["contig"],
         sample_ids=tuple(payload["sample_ids"]),
         parameters=from_payload(PaintingParameters, payload["parameters"]),
+        robustness_epsilon=float(payload["robustness_epsilon"]),
+        emission_divisor=float(payload["emission_divisor"]),
+        path_divisor=float(payload["path_divisor"]),
         label_continuity=tuple(from_payload(LabelContinuity, item) for item in payload["label_continuity"]),
         components=tuple(
             from_payload(ComponentPainting, item, derived={"panel": panel, "packed_emissions": cache})

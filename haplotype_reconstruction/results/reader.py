@@ -29,7 +29,7 @@ from ..store.store import CheckpointStore
 from .order import recorded_input_order
 from .panels import FOUNDER_STAGES, StagePanel
 from .paths import RunPaths, active_exclusions
-from .protocol import ProductInputs, ProductReader
+from ..stages.inputs.protocol import ProductInputs, ProductReader
 
 if TYPE_CHECKING:
     from ..contracts.assembly import FounderRelease
@@ -176,6 +176,14 @@ class Results(ProductInputs):
         from ..stages.painting import records
 
         return self._read(records, "painting", contig)
+
+    def painting_calibration(self) -> dict | None:
+        """Read the run-level painting calibration (estimated outlier rate, the two evidence divisors and their
+        per-contig and pooled objective tables) when recorded."""
+        from ..stages.painting import calibration_records
+
+        request = self.request(calibration_records, "calibration", None)
+        return None if request is None else self.read(request, None)
 
     def pedigree(self) -> Pedigree | None:
         """Read the genome-wide pedigree calls, edges and report views when recorded."""

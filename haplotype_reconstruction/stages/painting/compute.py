@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any, Protocol
 
 import numpy as np
@@ -57,6 +58,9 @@ def decode_component(
     genetic_map: ChromosomeGeneticMap,
     *,
     model: fidelity.ChainModel | None,
+    robustness_epsilon: float,
+    site_correlation: float,
+    confidence_model: fidelity.ChainModel | None = None,
     emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     batch_samples: int = 1,
     reverse: bool,
@@ -71,7 +75,11 @@ def decode_component(
     left out (a cache, never a result), so later stages rebuild those emissions.
 
     ``evidence_sites`` int64[L] maps the panel's sites to the evidence site axis (``panel.site_indices()``).
-    ``model``: the component's copying model (component_model; required for nonempty bins). The packed tempered label
+    ``model``: the component's copying model at the path strength ``site_correlation`` (component_model; required for
+    nonempty bins): it decodes. ``confidence_model``: None when the run's two strengths are equal; else the copying
+    model fitted at the confidence strength (its ``site_correlation``): the release posteriors, the published
+    ``PaintingTransitions.site_correlation`` and the packed emission cache (what later stages read) are then at the
+    confidence strength. The packed tempered label
     emissions are kept when they fit ``emission_cache_bytes``. ``reverse``: the run's tie-convention reversal
     (TieSettings.reverse), required so that no caller falls back to the forward convention by omission.
     """
@@ -90,7 +98,7 @@ def decode_component(
                 no_edges,
                 no_edges.copy(),
                 no_edges.copy(),
-                site_correlation=float(config.emission_site_correlation),
+                site_correlation=float(site_correlation),
             ),
             local_keys=np.zeros((0, n_states), dtype=np.int32),
             eligible=np.zeros(n_samples, dtype=np.bool_),
@@ -110,6 +118,9 @@ def decode_component(
     capable, transitions, local_keys, public_ids, sites = decoding_model(
         states, bins, evidence_sites, genetic_map, model
     )
+    group = config.reference_snps_per_bin // config.snps_per_bin
+    if confidence_model is not None:
+        transitions = replace(transitions, site_correlation=float(confidence_model.site_correlation))
 
     n_packed = n_states * (n_states + 1) // 2
     packed_bytes = 8 * n_samples * n_packed * n_bins
@@ -147,14 +158,21 @@ def decode_component(
     if done.any():
         packed = None
     for raw, batch_eligible, start, stop, informative, batch_observed in _raw_batches(
-        states, bins, likelihoods, observed, sites, config, size, emission_builder, skip=restored
+        states, bins, likelihoods, observed, sites, config, size, emission_builder, robustness_epsilon, site_correlation, skip=restored
     )():
+        confident = None
+        if confidence_model is not None:
+            confident = raw * emissions.confidence_scale(
+                informative, bins.starts, site_correlation, confidence_model.site_correlation, group
+            )[:, None, :]
         if packed is not None:
-            emissions.pack_emissions(raw, packed, start, n_states)
+            emissions.pack_emissions(raw if confident is None else confident, packed, start, n_states)
         batch_paths, batch_masks, batch_switches, batch_qf, batch_qaf, batch_support = decode_batch(
             raw, batch_eligible, batch_observed, informative, states, bins, model, capable,
             local_keys, public_ids, config, reverse=reverse,
+            confidence=None if confident is None else (confidence_model, confident),
         )
+        del confident
         qf[start:stop], qaf[start:stop] = batch_qf, batch_qaf
         del raw
         paths[start:stop] = batch_paths
@@ -221,7 +239,7 @@ def _component_sources(
     if not (hasattr(likelihoods, "resident_columns") and hasattr(observed, "resident_columns")):
         return unchanged
     states = build_states(panel.positions, panel.inference, panel.kept)
-    bins = build_bins(states.positions, config.snps_per_bin)
+    bins = build_bins(states.positions, config.snps_per_bin, config.reference_snps_per_bin)
     if bins.n_bins == 0:
         return unchanged
     packed = 8 * likelihoods.shape[0] * (states.n_states * (states.n_states + 1) // 2) * bins.n_bins
@@ -246,20 +264,32 @@ def paint_chromosome(
     emission_builder: EmissionBuilder = emissions.tempered_emissions,
     model_sink: Callable[[int, fidelity.ChainModel | None], None] | None = None,
     progress: PaintingProgress | None = None,
+    label_continuity: tuple[LabelContinuity, ...] | None = None,
+    robustness_epsilon: float,
+    site_correlation: float,
+    confidence_correlation: float | None = None,
 ) -> Painting:
     """Label continuity, then the painting of every component of one chromosome.
 
     ``panels``: the final assembly's ComponentPanels in genomic order;
     ``evidence``: the contig's evidence (all samples); ``genetic_map``: the
     contig's ChromosomeGeneticMap; ``reverse``: the run's tie-convention reversal (TieSettings.reverse), required.
-    Numba kernels use the caller's thread team.
+    Numba kernels use the caller's thread team. ``site_correlation`` is the run's path strength (model fit, label
+    continuity and decoding); ``confidence_correlation`` (None = the same) is the run's confidence strength: a second
+    fit of the copying model at that strength gives the release posteriors, and later stages read emissions at it.
+    A supplied label_continuity fixes the fine painting's
+    row outcome: apply it before fitting this resolution's own chain and do not search again.
     """
     likelihoods = evidence.likelihoods
     observed = evidence.observed
+    epsilon = robustness_epsilon
     cache_remaining = max(0, int(emission_cache_bytes))
     components: list[ComponentPainting] = []
     continuity: list[LabelContinuity] = []
     for component_index, panel in enumerate(panels):
+        if label_continuity is not None:
+            outcome = label_continuity[component_index]
+            panel = relabel_rows(panel, outcome.row_maps) if outcome.accepted else panel
         (component_likelihoods, component_observed, sites), budget = _component_sources(
             panel, likelihoods, observed, panel.site_indices(), config, cache_remaining
         )
@@ -276,6 +306,7 @@ def paint_chromosome(
                 sites,
                 config,
                 genetic_map,
+                robustness_epsilon=epsilon, site_correlation=site_correlation,
                 batch_samples=batch_samples,
                 cache_emissions=_packed_bytes(panel, component_likelihoods.shape[0], config) <= budget,
                 emission_builder=emission_builder,
@@ -285,7 +316,9 @@ def paint_chromosome(
         if model_sink is not None:
             model_sink(component_index, model)
         saved = None if progress is None else progress.load(f"c{component_index}/continuity")
-        if saved is not None:
+        if label_continuity is not None:
+            painted = panel
+        elif saved is not None:
             outcome = from_payload(LabelContinuity, saved["outcome"])
             painted = relabel_rows(panel, outcome.row_maps) if outcome.accepted else panel
         else:
@@ -297,6 +330,7 @@ def paint_chromosome(
                 config,
                 genetic_map,
                 model=model,
+                robustness_epsilon=epsilon, site_correlation=site_correlation,
                 batch_samples=batch_samples,
                 reverse=reverse,
                 census_sink=census_sink,
@@ -305,6 +339,31 @@ def paint_chromosome(
             )
             if progress is not None:
                 progress.save(f"c{component_index}/continuity", dict(outcome=to_payload(outcome)))
+        confidence_model = None
+        if confidence_correlation is not None and float(confidence_correlation) != float(site_correlation):
+            saved = None if progress is None else progress.load(f"c{component_index}/confidence_model")
+            if saved is not None:
+                confidence_model = (
+                    None if saved["model"] is None else from_payload(fidelity.ChainModel, saved["model"])
+                )
+            else:
+                confidence_model = component_model(
+                    painted,
+                    component_likelihoods,
+                    component_observed,
+                    sites,
+                    config,
+                    genetic_map,
+                    robustness_epsilon=epsilon, site_correlation=float(confidence_correlation),
+                    batch_samples=batch_samples,
+                    cache_emissions=_packed_bytes(painted, component_likelihoods.shape[0], config) <= budget,
+                    emission_builder=emission_builder,
+                )
+                if progress is not None:
+                    progress.save(
+                        f"c{component_index}/confidence_model",
+                        dict(model=None if confidence_model is None else to_payload(confidence_model)),
+                    )
         decoding = decode_component(
             painted,
             component_likelihoods,
@@ -313,6 +372,8 @@ def paint_chromosome(
             config,
             genetic_map,
             model=model,
+            confidence_model=confidence_model,
+            robustness_epsilon=epsilon, site_correlation=site_correlation,
             emission_cache_bytes=budget,
             batch_samples=batch_samples,
             reverse=reverse,
@@ -333,4 +394,9 @@ def paint_chromosome(
         components=tuple(components),
         label_continuity=tuple(continuity),
         parameters=config,
+        robustness_epsilon=epsilon,
+        emission_divisor=1.0
+        + (site_correlation if confidence_correlation is None else confidence_correlation)
+        * (config.reference_snps_per_bin - 1),
+        path_divisor=1.0 + site_correlation * (config.reference_snps_per_bin - 1),
     )

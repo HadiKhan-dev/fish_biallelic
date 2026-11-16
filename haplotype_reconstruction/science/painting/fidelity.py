@@ -17,7 +17,7 @@ ancestry changes (an excursion) to escape a locally wrong row. Painted switches 
 changes only.
 
 Emissions are the robust bin emissions, each sample's bin divided by its design effect 1 + (n - 1) r
-(painting.emissions.design_effect, PaintingParameters.emission_site_correlation), the composite-likelihood adjustment of the
+(painting.emissions.design_effect, PaintingTransitions.site_correlation), the composite-likelihood adjustment of the
 per-site product.
 
 The first bin's prior is the chain's stationary law (labels uniform; an anchored label's fidelity error with
@@ -291,6 +291,7 @@ _OVERLOADS = {
             types.float64,
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
             types.boolean,
+            types.boolean,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -304,6 +305,7 @@ _OVERLOADS = {
             types.float64,
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
             types.boolean,
+            types.boolean,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -316,6 +318,7 @@ _OVERLOADS = {
             types.float64,
             types.float64,
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
             types.boolean,
         ),
     ),
@@ -734,7 +737,7 @@ def _transposed_parts(
 
 
 @kernel(overloads=_OVERLOADS["_chain_kernel"], cache=True, parallel=True, nogil=True)
-def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a, b, eligible, want_masses):
+def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a, b, eligible, want_masses, emission_masses):
     """Exact scaled forward-backward of the chain, per eligible sample: expected label changes per edge (both
     tracks); expected error-run starts and ends and kept faithful and kept error transitions of anchored labels that
     stay, and label moves into an anchored label's error and faithful states (summed over edges); the first bin's
@@ -753,7 +756,7 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
     first_error = np.zeros(n_samples)
     first_faithful = np.zeros(n_samples)
     log_likelihood = np.zeros(n_samples)
-    faithful_mass = np.zeros((n_samples if want_masses else 0, n_labels * n_labels, n_bins))
+    faithful_mass = np.zeros((n_samples if want_masses or emission_masses else 0, n_labels * n_labels, n_bins))
     for sample in prange(n_samples):
         if not eligible[sample]:
             continue
@@ -819,7 +822,7 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
                                 first_error[sample] += mass
                             else:
                                 first_faithful[sample] += mass
-            if want_masses:
+            if want_masses or emission_masses:
                 total = 0.0
                 for p in range(n_pairs):
                     weight[p] = forward[bin_index, p] * backward[p]
@@ -828,7 +831,11 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
                     mass = weight[p] / total
                     first, second = p // n, p % n
                     pair = labels[first] * n_labels + labels[second]
-                    if fids[first] == 0 and fids[second] == 0:
+                    if emission_masses:
+                        i = n_labels - 1 if fids[first] else labels[first]
+                        j = n_labels - 1 if fids[second] else labels[second]
+                        faithful_mass[sample, i * n_labels + j, bin_index] += mass
+                    elif fids[first] == 0 and fids[second] == 0:
                         faithful_mass[sample, pair, bin_index] += mass
             if bin_index == 0:
                 continue
@@ -999,11 +1006,13 @@ def chain_statistics(
     eligible: np.ndarray,
     *,
     want_masses: bool = False,
+    emission_masses: bool = False,
 ):
     """(label changes float64[N, B - 1], error-run starts [N], ends [N], kept faithful [N], kept error [N], moves into
     an anchored error state [N] and faithful state [N], first-bin anchored tracks in error [N] and faithful [N],
     log-likelihood [N], faithful label-pair masses [N, S*S, B]) of the structured
-    emissions (see _chain_kernel; the masses are empty unless ``want_masses``)."""
+    emissions (see _chain_kernel). With emission_masses=True the last output instead carries normalized
+    emission-label masses, mapping each error track separately to BACKGROUND. Existing modes are unchanged."""
     capable = np.ascontiguousarray(capable, dtype=np.int64)
     return _chain_kernel(
         np.ascontiguousarray(emissions),
@@ -1017,6 +1026,7 @@ def chain_statistics(
         float(b),
         np.ascontiguousarray(eligible, dtype=np.bool_),
         bool(want_masses),
+        bool(emission_masses),
     )
 
 
@@ -1212,7 +1222,7 @@ def model_for(
     )
 
 
-def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config) -> ChainModel:
+def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config, *, site_correlation: float) -> ChainModel:
     """EM estimate of (rho, a, b) over all eligible samples of a component. ``raw_batches()`` yields (tempered label
     emissions float64[n, S*S, B], eligible bool[n]) batch by batch, for every sample; it is called once per update.
 
@@ -1234,7 +1244,7 @@ def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config
     exit_ = float(config.initial_error_exit)
     if not np.any(capable):  # no anchored class, no error state: a and b unused, reported as no runs
         entry, exit_ = ENTRY_BOUNDS[0], EXIT_BOUNDS[1]
-    site_correlation = float(config.emission_site_correlation)
+    site_correlation = float(site_correlation)
     trajectory = []
     for _ in range(int(config.estimation_iterations)):
         theta = switch_probabilities(morgans, rate, n_labels)

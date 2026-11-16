@@ -146,10 +146,22 @@ def build_graph(
                 Node(context2, (l1, ev), maps),
                 Node(l2, (discovery, l1, context2), maps),
                 Node(assembly, (l2, ev), maps),
-                Node(painting, (assembly, ev), maps),
+                Node(painting, (assembly, ev, _key("calibration")), maps),
                 Node(refit, (painting, ev)),
             )
         )
+    # The run-level painting calibration is pooled over the analysed contigs (the reconstruction axis), like the
+    # pedigree: an excluded contig contributes evidence to relatedness only.
+    calibrated = tuple(c for c in order if c in analysis.included)
+    assemblies = tuple(_key("assembly", c) for c in calibrated)
+    for c in calibrated:
+        nodes.append(Node(_key("calibration_robustness", c), assemblies))
+    nodes.append(Node(_key("calibration_outlier"), tuple(_key("calibration_robustness", c) for c in calibrated)))
+    for c in calibrated:
+        nodes.append(Node(_key("calibration_divisor", c), (_key("calibration_outlier"), _key("assembly", c))))
+    nodes.append(
+        Node(_key("calibration"), (_key("calibration_outlier"),) + tuple(_key("calibration_divisor", c) for c in calibrated))
+    )
     pedigree = _key("pedigree")
     nodes.append(
         Node(
@@ -199,6 +211,7 @@ def workflow_cut(
     serial: bool = False,
     max_contigs: int | None = None,
     painted: Sequence[str] = (),
+    calibrated: bool = False,
 ) -> Cut:
     """Select model nodes; ``painted`` must come from expected record identities.
 
@@ -240,9 +253,12 @@ def workflow_cut(
         selected = set(graph.closure(targets))
         # A restricted run never schedules scattered work outside its selection;
         # global gathers retain these as identity-checked prerequisites.
+        # The painting calibration needs the final assembly of every analysed contig: a run that reaches painting
+        # keeps that closure even when its own selection is narrower.
+        barrier = set(graph.closure([_key("calibration")])) if _key("calibration") in selected else set()
         selected = {
             k for k in selected
-            if k.scope == "run" or k.scope in scatter or (k.stage == "evidence" and k.scope in requested)
+            if k.scope == "run" or k.scope in scatter or (k.stage == "evidence" and k.scope in requested) or k in barrier
         }
         for node in graph.nodes:
             if node.key.stage in {"relatedness", "refit"} and set(node.dependencies) <= selected:
@@ -255,6 +271,8 @@ def workflow_cut(
         if step in {"evidence", "reconstruct", "phase"} and contig is None:
             raise SettingsError(f"{step} requires one contig")
         selected = {k for k in keys if k.stage in stages and (k.scope == "run" or k.scope in scatter)}
+    if step == "reconstruct" and not calibrated:
+        selected = {k for k in selected if k.stage not in {"painting", "refit"}}
     prerequisites = {p for n in graph.nodes if n.key in selected for p in n.dependencies} - selected
     return Cut(
         step,
@@ -263,6 +281,13 @@ def workflow_cut(
         scatter if serial else (),
         max_contigs is not None or stop_after is not None,
     )
+
+
+# Contig-scoped stages whose tasks are not pinned to their contig's lane. A lane admits one contig at a time and
+# there are about cores // 16 lanes; these stages need no contig locality. The run calibration's per-contig fits
+# (calibration_robustness, calibration_divisor) run while nothing else does (the calibration is a barrier): pinned,
+# only 4 contigs on a 76-core node fitted at once and the outlier-rate step kept 24 of 76 CPUs busy.
+UNPINNED_STAGES = frozenset({"report", "recombination", "export", "calibration_robustness", "calibration_divisor"})
 
 
 def bind_tasks(
@@ -288,7 +313,7 @@ def bind_tasks(
         # A contig's inference chain shares its pinned worker. Recombination, export and reports consume
         # published records and retain no chain state, so any free worker may run them.
         affinity = task.affinity
-        if affinity is None and key.scope != "run" and key.stage not in {"report", "recombination", "export"}:
+        if affinity is None and key.scope != "run" and key.stage not in UNPINNED_STAGES:
             affinity = key.scope
         tasks.append(replace(task, depends_on=dependencies, affinity=affinity))
     return tuple(tasks)
@@ -389,7 +414,7 @@ def execution_options(
         )
         for key in cut.nodes
     }
-    chain_stages = {name for name, stage in STAGES.items() if "reconstruct" in stage.steps}
+    chain_stages = {name for name, stage in STAGES.items() if "reconstruct" in stage.steps} - {"painting", "refit"}
     chains = tuple(
         ChainPlan(c, costs[c], tuple(key for key in cut.nodes if key.scope == c and key.stage in chain_stages))
         for c in graph.contigs
@@ -468,6 +493,25 @@ def stage_modules(task):
     return result
 
 
+def step_preloads(step: str) -> tuple[str, ...]:
+    """The stage implementations of every stage of a workflow step, whether or not a cut selects their tasks.
+
+    A step's compiled kernels are cached under a key of the code the step can run (engine.kernels.cache_key). Before
+    the run calibration a reconstruction stops at the final assembly: keyed by its selected tasks alone, the same
+    command after the calibration (painting and refit added) had another key and compiled every kernel of the step a
+    second time (about 2,200 CPU-seconds on a small example). Keyed by the whole step, the first pass compiles once."""
+    modules: list[str] = []
+    for name, spec in STAGES.items():
+        if step in spec.steps:
+            modules.append("haplotype_reconstruction." + spec.tasks)
+            modules.extend("haplotype_reconstruction." + owner for owner in spec.owners)
+            if name == "assembly":
+                from ..science.assembly.kernel_inventory import MODULES
+
+                modules.extend(module.__name__ for module in MODULES)
+    return tuple(dict.fromkeys(modules))
+
+
 def task_preloads(tasks: Sequence[Task]) -> tuple[str, ...]:
     """Name the stage implementations behind application wrappers before workers warm their kernels."""
 
@@ -489,7 +533,7 @@ def stage_kernel_modules(task: Task) -> tuple[str, ...]:
         return ()
     # Tie kernels are the common numerical foundation; source identity still traverses the full task closure.
     numerical_roots = tuple("haplotype_reconstruction." + root for root in roots)
-    modules = code_dependency_identity((*numerical_roots, "core.ties")).modules
+    modules = code_dependency_identity((*numerical_roots, "core.ties"), pinned=False).modules
     science = spec.kernels
     if task.key.stage == "selection" and task.key.round in {"initial", "l1", "l2"}:
         science = ("selection", "assembly.evidence", "shared.emissions")

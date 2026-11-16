@@ -16,7 +16,7 @@ import contextvars
 import functools
 import hashlib
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +37,11 @@ __all__ = [
     "code_dependency_identity",
     "code_identity",
     "source_digest",
+    "package_sources",
+    "root_stage",
+    "pin_generation",
+    "pin_stage_sources",
+    "pinned_stages",
 ]
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -89,7 +94,71 @@ _CALL_SOURCES: contextvars.ContextVar[tuple[Path, dict[Path, bytes]] | None] = c
 )
 
 
+# Source snapshots pinned for named stages by a run's explicit record-reuse override (pin_stage_sources), by path
+# under the installed package: the code closures of those stages' roots are hashed from the snapshot instead of the
+# installed sources, so records that the snapshot's code published keep their identities when the stage's code has
+# been edited since. Empty unless a run installs it. Which stage a root set belongs to: root_stage.
+_PINNED: dict[str, dict[Path, bytes]] = {}
+_PIN_GENERATION = 0  # raised whenever the pins change (pin_generation)
+_PINNED_CALL: contextvars.ContextVar[dict[Path, bytes] | None] = contextvars.ContextVar(
+    "identity_pinned", default=None
+)
+
+
+def package_sources(package_root: Path = PACKAGE_ROOT) -> dict[str, bytes]:
+    """Every source file of the package by its path relative to the package (what pin_stage_sources takes)."""
+    root = Path(package_root)
+    return {path.relative_to(root).as_posix(): data for path, data in sorted(_read_sources(root).items())}
+
+
+def root_stage(modules: Iterable[str]) -> str | None:
+    """The stage a set of code roots belongs to: the package under ``stages`` of its first root there, otherwise the
+    package under ``science`` of its first root there ("discovery", "pedigree", "inputs", ...); None for roots in
+    neither. Roots may be fully qualified or relative to the package."""
+    science = None
+    for name in modules:
+        parts = name.split(".")
+        if parts[0] == PACKAGE_ROOT.name:
+            parts = parts[1:]
+        if len(parts) > 1 and parts[0] == "stages":
+            return parts[1]
+        if len(parts) > 1 and parts[0] == "science" and science is None:
+            science = parts[1]
+    return science
+
+
+def pin_stage_sources(pins: Mapping[str, Mapping[str, bytes]]) -> None:
+    """Hash the code closures of the named stages' roots from the given snapshots (package_sources of the code whose
+    records are to be reused) in this process, replacing any earlier pins. An empty mapping removes them."""
+    global _PIN_GENERATION
+    new = {
+        stage: {PACKAGE_ROOT / relative: bytes(data) for relative, data in sources.items()}
+        for stage, sources in pins.items()
+    }
+    if new == _PINNED:
+        return
+    _PINNED.clear()
+    _PINNED.update(new)
+    _pinned_identity.cache_clear()
+    _PIN_GENERATION += 1
+
+
+def pin_generation() -> int:
+    """A number that changes whenever this process's pins change: per-process caches of values derived from record
+    identities (stages.painting.records.bound_upstream, the pedigree's derived readers) include it in their keys, so
+    a later command of the same process with another record-reuse state derives them again."""
+    return _PIN_GENERATION
+
+
+def pinned_stages() -> tuple[str, ...]:
+    """The stages whose code identities this process takes from pinned snapshots."""
+    return tuple(sorted(_PINNED))
+
+
 def _snapshot(root: Path) -> dict[Path, bytes] | None:
+    pinned = _PINNED_CALL.get()
+    if pinned is not None and root == PACKAGE_ROOT:
+        return pinned
     if _SOURCES_FIXED and root == PACKAGE_ROOT:
         return _installed_sources()
     current = _CALL_SOURCES.get()
@@ -143,25 +212,36 @@ def _resolve_relative(name: str, package: str) -> str:
     return ".".join(parts[: len(parts) - level + 1] + ([name[level:]] if name[level:] else []))
 
 
+def _is_type_checking(test: ast.expr) -> bool:
+    """``TYPE_CHECKING`` or ``typing.TYPE_CHECKING`` (false whenever the code runs)."""
+    return (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+        isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+    )
+
+
 @functools.cache
 def _import_records(text: str, restricted: bool, filename: str) -> tuple[tuple, ...]:
     """The import statements and literal import_module calls of one source text, in traversal order.
 
     A pure function of the text (parsing dominated every closure: about 1 s per stage root set, recomputed for
     every result reader). Keyed by content, so an edited source is parsed again. ``restricted`` skips function
-    bodies (the root initializer's lazy exports).
+    bodies (the root initializer's lazy exports). The bodies of ``if TYPE_CHECKING:`` blocks are never followed.
     """
     tree = ast.parse(text, filename=filename)
-    if restricted:
-        nodes: list[ast.AST] = []
-        todo: list[ast.AST] = [tree]
-        while todo:
-            node = todo.pop()
-            nodes.append(node)
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                todo.extend(ast.iter_child_nodes(node))
-    else:
-        nodes = list(ast.walk(tree))
+    nodes: list[ast.AST] = []
+    todo: list[ast.AST] = [tree]
+    while todo:
+        node = todo.pop()
+        nodes.append(node)
+        if restricted and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.If) and _is_type_checking(node.test):
+            # Imports for type checkers only: the body never executes, so it cannot change what a stage computes.
+            # Followed, every stage task's annotation import of the run configuration put every stage's parameter
+            # module into every stage's code identity.
+            todo.extend(node.orelse)
+            continue
+        todo.extend(ast.iter_child_nodes(node))
     records: list[tuple] = []
     for node in nodes:
         if isinstance(node, ast.Import):
@@ -185,7 +265,8 @@ def dependency_closure(modules: Iterable[str], *, package_root: Path = PACKAGE_R
 
     Roots may be fully qualified or relative to the package. Explicit package roots
     include their source modules. Static imports in all
-    branches count. Literal import_module calls count; dynamically selected modules
+    branches count, except those of ``if TYPE_CHECKING:`` blocks, which never execute.
+    Literal import_module calls count; dynamically selected modules
     must be supplied as roots by the stage. Unknown roots raise ValueError.
 
     The root initializer is always hashed. When reached only as an ancestor, its
@@ -283,8 +364,14 @@ def fix_installed_sources() -> None:
     _SOURCES_FIXED = True
 
 
-def code_dependency_identity(modules: Iterable[str], *, package_root: Path = PACKAGE_ROOT) -> CodeIdentity:
+def code_dependency_identity(
+    modules: Iterable[str], *, package_root: Path = PACKAGE_ROOT, pinned: bool = True
+) -> CodeIdentity:
     """Hash a complete static dependency closure, retaining its module list for review.
+
+    ``pinned``: whether a run's record-reuse pins apply (pin_stage_sources). They are for record derivations only: a
+    caller that needs the identity of the code this process executes (the compiled-kernel cache key, the kernel
+    closure checks) passes ``pinned=False``.
 
     In a process with fixed installed sources (a run's coordinator, forkserver and workers), a closure of the
     installed package is hashed once: every derivation of every stage task reads its code identity, and parsing and
@@ -292,9 +379,23 @@ def code_dependency_identity(modules: Iterable[str], *, package_root: Path = PAC
     no runtime, whose sources may be edited between calls) and for any other package root, such as a fixture tree,
     the closure is hashed on every call."""
     root = Path(package_root)
+    modules = tuple(modules)
+    if pinned and root == PACKAGE_ROOT and _PINNED:
+        stage = root_stage(modules)
+        if stage in _PINNED:
+            return _pinned_identity(cast(str, stage), frozenset(modules))
     if root == PACKAGE_ROOT and _SOURCES_FIXED:
         return _installed_identity(frozenset(modules))
     return _hashed_closure(modules, root)
+
+
+@functools.cache
+def _pinned_identity(stage: str, modules: frozenset[str]) -> CodeIdentity:
+    token = _PINNED_CALL.set(_PINNED[stage])
+    try:
+        return _hashed_snapshot(tuple(modules), PACKAGE_ROOT)
+    finally:
+        _PINNED_CALL.reset(token)
 
 
 @functools.cache

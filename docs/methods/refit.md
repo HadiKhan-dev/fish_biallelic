@@ -11,7 +11,7 @@ Expand released painting labels onto sites and form untempered robust genotype e
 
 Implementation: [science/refit/refit.py](../../haplotype_reconstruction/science/refit/refit.py), [science/painting/release.py](../../haplotype_reconstruction/science/painting/release.py).
 
-Parameters by name: `robustness_epsilon`, `REFIT_TIE_QUANTUM`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `robustness_grid`, `REFIT_TIE_QUANTUM`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

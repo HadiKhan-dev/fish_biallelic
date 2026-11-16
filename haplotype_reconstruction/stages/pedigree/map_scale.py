@@ -22,6 +22,7 @@ from ...contracts.genetic_map import GeneticMapSet
 from ...contracts.map_scale import MapScaleEstimate
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.roles import require_schema
+from ...core.concurrency import threaded_each
 from ...core.errors import InputError
 from ...engine.cpu import thread_team
 from ...science.pedigree import map_scale as science
@@ -74,15 +75,20 @@ def expected(store: CheckpointStore, manifest: Mapping[str, Any], parameters: Pe
     from ..painting import records as painting_records
     from ..relatedness import families_records
 
-    upstream: dict[str, str] = {}
-    for c in AnalysisContigs.from_manifest(manifest).included:
-        painted = painting_records.result_reader(store, manifest, product="painting", contig=c, panels=False)
+    def bind(c: str) -> tuple[str, str, str]:
+        painted = painting_records.result_reader(store, manifest, product="reference", contig=c, panels=False)
         observed = evidence_records.result_reader(store, manifest, product="evidence", contig=c)
         if painted is None or observed is None:
             raise InputError(f"the map-scale estimate requires painting and evidence for {c}")
-        upstream[f"painting:{c}"] = painted.identity
-        upstream[f"evidence:{c}"] = observed.identity
-        upstream[f"map:{c}"] = map_identity(store, manifest, c)
+        return painted.identity, observed.identity, map_identity(store, manifest, c)
+
+    contigs = AnalysisContigs.from_manifest(manifest).included
+    upstream: dict[str, str] = {}
+    # each contig's upstream chain is independent of the others (records.bound_inputs binds the same way)
+    for c, (painted, observed, working_map) in zip(contigs, threaded_each(bind, contigs), strict=True):
+        upstream[f"painting:{c}"] = painted
+        upstream[f"evidence:{c}"] = observed
+        upstream[f"map:{c}"] = working_map
     family = families_records.result_reader(store, manifest, product="families")
     if family is None:
         raise InputError("the map-scale estimate requires relatedness/families")
@@ -106,21 +112,27 @@ def _component_inputs(store, manifest, contig_index, contig, rows, threads) -> t
     from .prepare import _read_request
 
     file = store.contig(contig)
-    reader = painting_records.result_reader(store, manifest, product="painting", contig=contig, panels=False)
+    reader = painting_records.result_reader(store, manifest, product="reference", contig=contig, panels=False)
     painting = _read_request(file, reader)
     if tuple(painting.sample_ids) != tuple(manifest["sample_ids"]):
         raise InputError("painting sample axis differs from the run's")
     evidence = None
     out, recomputed = [], 0
+    # the pedigree reads the painting at its path strength (science.pedigree.prepare.path_correlation)
+    from ...science.pedigree.prepare import path_correlation
+
+    site_correlation = path_correlation(painting)
     for comp in painting.components:
         if comp.bins.n_bins < 2:
             continue
-        packed = comp.packed_emissions
+        packed = comp.packed_emissions if comp.transitions.site_correlation == site_correlation else None
         if packed is None:
             if evidence is None:
                 observed = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
                 evidence = evidence_records.load_dense(file, expected_identity=observed.identity)
-            packed = frames_science.packed_emissions(comp, painting.parameters, evidence, rows)
+            packed = frames_science.packed_emissions(
+                comp, painting.parameters, painting.robustness_epsilon, evidence, rows, site_correlation
+            )
             recomputed += 1
             local = np.arange(len(rows))
         else:

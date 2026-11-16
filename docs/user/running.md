@@ -122,6 +122,10 @@ haplotypes run cross.toml --cores 8 --serial --max-contigs 1
 serial execution. The available clean stop points are relatedness, discovery and
 painting. They are cuts of the same graph, not alternative models. Contig-subset
 commands cannot satisfy a genome-wide prerequisite by omitting its other contigs.
+The painting's outlier rate and evidence strengths are estimated once per run from
+every analysed contig's final assembly, so a run restricted with `--contigs` or
+`--max-contigs` that reaches painting first assembles every analysed contig and
+calibrates; painting and refit then stay restricted to the selected contigs.
 For parallel jobs on shared storage, use the [workflow commands](workflow.md).
 
 ## Resume and source identity
@@ -140,6 +144,48 @@ Changing a scientific setting, map, contig order or numerical environment can
 invalidate the binding; use a fresh run/checkpoint root for a different analysis.
 Commands require a checkpoint root with the current layout. Resume is at published-product
 boundaries, not at an unrecorded intermediate family-phase iteration.
+
+### Which code a record depends on
+
+A stage's records depend on that stage's own code and on the code it uses from earlier stages, never on a later
+stage. Editing pedigree code leaves the evidence, relatedness, discovery, selection, assembly and painting records
+of an existing run usable; editing discovery code invalidates discovery and everything computed from it. The test
+suite keeps the stages' code lists apart.
+
+### Reusing records after a source edit
+
+Even an edit that cannot change a result (a comment, a refactor, a speed-up with identical output) changes the
+code a stage's records depend on, and the next command does not find them. To keep them, name the edited stages
+once, or all of them:
+
+```sh
+haplotypes run cross.toml --reuse-records all --cores 8
+haplotypes run cross.toml --reuse-records discovery selection assembly --cores 8
+```
+
+A later stage's code includes the earlier-stage modules it uses, so an edit to a discovery module changes the code
+of every stage after discovery too. Name every stage whose code the edit reaches, or use `all`: a stage that is not
+named and whose existing records were made by other code cannot be computed again in the same run folder (the store
+never replaces a record), and the command stops with the record mismatch. Naming only some stages is for an edit that
+reaches only those, for example a pedigree-only edit with `--reuse-records pedigree`.
+
+The run folder remembers, for every stage, the package sources under which its records were last read or written
+by a successful command (`CHECKPOINTS/code/`). For a named stage the records are then looked up under those
+remembered sources and not the installed code; records of later stages derive from them in the usual way. The stage names
+are the packages under `stages`: `evidence`, `relatedness`, `discovery`, `selection`, `assembly`, `painting`
+(including the run calibration), `refit`, `pedigree`, `phase`, `recombination`, and so on; an unknown name is
+refused with the list. `all` means every stage the run folder remembers sources for.
+
+- It is off unless you ask for it, and it is a state of the run folder: once set, every later command on that
+  folder (`run`, the step commands, `report`, `evaluate`, `export`, `status`) applies it, until
+  `--reuse-records none`. The reading commands (`report`, `evaluate`, `export`, `status`) write nothing into the
+  checkpoint folder, so archived and read-only run folders stay readable.
+- Every command run under it prints a line naming the reused stages (`status` shows them in its report), the ledger
+  `CHECKPOINTS/code/ledger.json` records each change of the state and each computing command run under it, with its
+  time, and `haplotypes status --json` shows it under `records_reused`.
+- A stage can be named only after a command of this version has read or written its records without the override.
+- Nothing checks that the edit left the results unchanged. A run made with the override is reproducible only as
+  far as that judgement holds; for a result that must be reproducible from the released code, run it afresh.
 
 `status` reports durable products and recorded progress without decoding large
 scientific payloads or reading the task log. It checks completion certificates

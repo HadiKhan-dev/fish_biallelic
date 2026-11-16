@@ -10,13 +10,21 @@ initialised run.
 | Initialise once | `haplotypes init cross.toml` | Configuration and source observations/source configuration |
 | Evidence per contig | `haplotypes evidence cross.toml --contig chr1` | Initialisation |
 | Relatedness gather | `haplotypes relatedness cross.toml` | Evidence from every configured contig |
-| Reconstruct per contig | `haplotypes reconstruct cross.toml --contig chr1` | That contig's evidence; includes discovery through painting and refit |
+| Assemble per contig | `haplotypes reconstruct cross.toml --contig chr1` | That contig's evidence; discovery through the final assembly |
+| Calibration gather | `haplotypes calibrate cross.toml` | The final assembly of every analysed contig |
+| Paint per contig | `haplotypes reconstruct cross.toml --contig chr1` (again) | The calibration; painting and founder refit |
 | Pedigree gather | `haplotypes pedigree cross.toml` | Relatedness and reconstructed contigs |
 | Phase per contig | `haplotypes phase cross.toml --contig chr1` | Pedigree and that contig's prerequisites; includes mapping and export |
 | Reports gather | `haplotypes report cross.toml` | Available final records; after phase in the complete workflow |
 
 Reconstruction can overlap the relatedness gather because its per-contig inputs do
 not include relatedness. Pedigree is the barrier that needs both branches.
+
+`reconstruct` is run twice per contig. The painting's outlier rate and evidence
+strengths are estimated once per run, from every analysed contig's final assembly
+(`calibrate`). Before that estimate exists, `reconstruct` stops at the contig's
+final assembly; run again afterwards, it paints and refits the contig and does
+not repeat the assembly. `haplotypes run` schedules all of this itself.
 
 ## Shared-directory protocol
 
@@ -32,8 +40,9 @@ publish run-wide products. Invocation logs and run records remain distinct.
 
 Workflow markers live in **CHECKPOINTS/markers**. With the default checkpoint
 location this is `run/checkpoints/markers`, not `run/markers`. Global steps use
-`init.done`, `relatedness.done` and `pedigree.done`; contig steps use
-`evidence.CONTIG.done`, `reconstruct.CONTIG.done` and `phase.CONTIG.done`. The command
+`init.done`, `relatedness.done`, `calibrate.done` and `pedigree.done`; contig steps use
+`evidence.CONTIG.done`, `assembly.CONTIG.done` (a `reconstruct` before the calibration),
+`reconstruct.CONTIG.done` (painted and refitted) and `phase.CONTIG.done`. The command
 writes a marker only after validating the relevant products. If it dies between
 publication and the marker, rerunning verifies the products and recreates the
 marker. Never fabricate markers with `touch` as a substitute for running a step.
@@ -76,6 +85,10 @@ for c in chr1 chr2 chr3 chr4 chr5; do
     haplotypes evidence cross.toml --contig "$c" --cores 8
 done
 haplotypes relatedness cross.toml --cores 8
+for c in chr1 chr2 chr3 chr4 chr5; do
+    haplotypes reconstruct cross.toml --contig "$c" --cores 8
+done
+haplotypes calibrate cross.toml --cores 8
 for c in chr1 chr2 chr3 chr4 chr5; do
     haplotypes reconstruct cross.toml --contig "$c" --cores 8
 done
@@ -128,15 +141,20 @@ command on one allocated node:
 haplotypes run cross.toml --cores 8
 ```
 
-It reuses completed chromosome publications, runs relatedness if needed, and
-finishes pedigree, phase, recombination, export and reports. A failed scatter can
+It reuses completed chromosome publications, runs relatedness if needed,
+calibrates the painting, paints and refits every chromosome, and finishes
+pedigree, phase, recombination, export and reports. The scattered jobs above stop
+at each chromosome's final assembly, because the calibration needs all of them;
+painting is a small part of a reconstruction. A failed scatter can
 be rerun on its chromosome or left for this finishing command to resume. The
 relatedness gather may overlap reconstruction because reconstruction has no
 relatedness dependency. Pedigree still needs both branches for all contigs.
 
 Family phase is per chromosome too, and inside the finishing `run` its chromosomes share that one node. For a
 large cohort, scatter it as well: run `haplotypes relatedness cross.toml` once every evidence job has exited (it may
-overlap reconstruction), `haplotypes pedigree cross.toml` once relatedness and every reconstruction have exited, then
+overlap reconstruction), `haplotypes calibrate cross.toml` after every first reconstruction has exited, run each
+`haplotypes reconstruct cross.toml --contig chrN` again to paint and refit, then run `haplotypes pedigree cross.toml`
+after relatedness and those second reconstructions have exited. Run
 one `haplotypes phase cross.toml --contig chrN` job per chromosome on separate nodes, and let the finishing `run`
 complete recombination, export and reports.
 
@@ -160,3 +178,17 @@ Safety conditions:
 
 This uses the same dependency graph and identities as a single-node `run`; the
 scheduler changes placement and timing, not scientific decisions.
+
+### Painting calibration barrier
+
+The scattered workflow runs `haplotypes reconstruct OUTPUT --contig CONTIG` for
+each configured contig to publish its final assembly, then runs
+`haplotypes calibrate OUTPUT --cores CORES` once for the run. This command schedules
+per-contig outlier fits, their run reduction, per-contig hidden-window divisor fits,
+and the final run reduction. Completed products resume by their input identities.
+Run `reconstruct --contig` again for every contig after calibration exists; it reuses
+the assembly and publishes fine/reference painting and founder refit. Continue with
+`pedigree`, per-contig `phase`, and `report`. The combined `run` command schedules
+this barrier automatically, with every configured final assembly required before
+calibration and any painting. A fixed singleton grid still publishes the barrier,
+without performing its calibration fits.

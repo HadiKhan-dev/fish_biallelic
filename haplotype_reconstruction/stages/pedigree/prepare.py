@@ -156,7 +156,7 @@ def prepare_stored(
     store = CheckpointStore(root, nthreads=threads)
     contig = chromosome_map.contig
     file = store.contig(contig)
-    painted = painting_records.result_reader(store, manifest, product="painting", contig=contig, panels=False)
+    painted = painting_records.result_reader(store, manifest, product="reference", contig=contig, panels=False)
     observed = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
     if painted is None or observed is None:
         raise InputError(f"pedigree requires painting and evidence for {contig}")
@@ -316,6 +316,10 @@ def _after_bounds(
         file=store.run,
         identity=identity,
     )
+    from ..painting.records import reference_key
+    from ...science.painting.parameters import PaintingParameters
+
+    painting_key = reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))
     tasks = tuple(
         Task(
             TaskKey("pedigree", "scores", reference.contig),
@@ -416,6 +420,10 @@ def _after_prepared(
         del prepared
     else:
         require_schema(cached.payload, 1)
+    from ..painting.records import reference_key
+    from ...science.painting.parameters import PaintingParameters
+
+    painting_key = reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))
     tasks = tuple(
         Task(
             TaskKey("pedigree", "pair_bounds", r.contig),
@@ -474,6 +482,10 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     maps = working_maps(store, manifest, maps)  # the material, units and exclusion weights read this map (rl20)
     if any(json_digest(maps.identity(c)) != map_identity(store, manifest, c) for c in contigs):
         raise InputError("pedigree maps differ from the run's working maps")
+    from ..painting.records import reference_key
+    from ...science.painting.parameters import PaintingParameters
+
+    painting_key = reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))
     tasks = tuple(
         Task(
             TaskKey("pedigree", "prepare", c),
@@ -481,7 +493,7 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
             args=(root, manifest, maps.for_contig(c), parameters, numerical_policy),
             affinity=c,
             resources=ResourceRequest(max_cores=maximum_cores),
-            inputs=(RecordKey(c, "painting"), RecordKey(c, "evidence")),
+            inputs=(RecordKey(c, painting_key), RecordKey(c, "evidence")),
             outputs=(RecordKey(c, KEY),),
             thread_argument="threads",
         )
@@ -496,7 +508,7 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
         map_scale.run_stored,
         args=(root, manifest, maps, parameters, numerical_policy),
         resources=ResourceRequest(max_cores=maximum_cores),
-        inputs=tuple(RecordKey(c, "painting") for c in contigs),
+        inputs=tuple(RecordKey(c, painting_key) for c in contigs),
         outputs=(RecordKey("run", map_scale.KEY),),
         thread_argument="threads",
     )

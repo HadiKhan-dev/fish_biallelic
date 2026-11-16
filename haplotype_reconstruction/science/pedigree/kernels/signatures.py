@@ -2570,17 +2570,67 @@ OVERLOADS.update(
         "family_transmission.evaluate": (
             (_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_b1, _ft_f1, _ft_f, _ft_f, _ft_f1, _ft_f2, _ft_f1),
         ),
+        "family_transmission._prior_cached": ((_ft_i3, _ft_b1, _ft_n, _ft_f2, _ft_f1),),
+        "family_transmission._member_value": (
+            (_ft_i2, _ft_i3, _ft_b2, _ft_i3, _ft_f1, _ft_f, _ft_f, _ft_f2, _ft_n, _ft_n,
+             _ft_b2, _ft_f2, _ft_f3),
+        ),
+        "family_transmission._evaluate_cached": (
+            (_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_b1, _ft_f1, _ft_f, _ft_f, _ft_f1, _ft_f2,
+             _ft_f1, _ft_b2, _ft_f2, _ft_f3, _ft_f2),
+        ),
+        "family_transmission._prepare": ((_ft_i2, _ft_i3, _ft_b2, _ft_f1, _ft_f, _ft_f),),
+        "family_transmission._pair_transition": tuple(
+            (_ft_f2, _ft_f2, types.Array(types.int32, 3, "C"), _ft_n, _ft_f, _ft_f, _ft_f1, _ft_i1,
+             _ft_f1, _ft_i1, _ft_f2, size)
+            for size in (_ft_n, types.literal(6), types.literal(8))
+        ),
         "family_transmission._mstep": tuple(
-            (_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_f3, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f, maxmode, _ft_f4)
+            (_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_f3, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f, maxmode, _ft_f4, _ft_f4, _ft_i2, _ft_f2)
             for maxmode in (_ft_q, types.literal(True), types.literal(False))
         ),
         "family_transmission._emis4": ((_ft_i2, _ft_i2, _ft_b1, _ft_i3, _ft_n, _ft_f, _ft_f1),),
         "family_transmission._half_flip": ((_ft_i2, _ft_i2, _ft_b1, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f, _ft_f1),),
+        "family_transmission._flip_gains_both": ((_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_f1, _ft_f, _ft_f),),
         "family_transmission.flip_gains": ((_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f),),
         "family_transmission.fit": (
             (_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_b1, _ft_f1, _ft_f, _ft_f, _ft_n, _ft_f2, _ft_b1, _ft_b1,
-             _ft_f1),
+             _ft_f1, _ft_f4, _ft_i2, _ft_f2),
         ),
-        "family_transmission.init_latent": ((_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f),),
+        "family_transmission.init_latent": ((_ft_i2, _ft_i3, _ft_b2, _ft_i1, _ft_i3, _ft_n, _ft_f1, _ft_f, _ft_f, _ft_f4, _ft_i2, _ft_f2),),
     }
 )
+
+
+def _read_only(signature, positions):
+    """``signature`` with the arrays at ``positions`` read-only."""
+    return tuple(kind.copy(readonly=True) if index in positions else kind for index, kind in enumerate(signature))
+
+
+# Resampling: the workers' arguments (the shared decision inputs) and the results the parent gathers are read-only
+# (engine.workers), so the kernels of a resampling fit and of the gather run with these arguments read-only as well
+# as writable (the decision fit builds its own). Undeclared, each was compiled on first use: one worker compiled for
+# about ten seconds while every other worker of the stage waited for it.
+RESAMPLING_READ_ONLY_ARGUMENTS = {
+    "family._cavity_iterations": (1, 2),
+    "family._cavity_passes": (1, 2),
+    "family._child_cavity": (1, 2),
+    "family._child_log_odds": (1, 2),
+    "family._configuration_panels": (1, 2),
+    "family._family_log_odds": (1, 2),
+    "family._lane_cavity": (1, 2),
+    "family._path_correction": (1, 2),
+    "family._path_singles": (2,),
+    "family._path_target": (1,),
+    "family._sample_panel": (1, 2),
+    "family._with_incoming": (1,),
+    "graph._is_acyclic": (1,),
+    "orientation._order_probability": (0, 1, 2, 3),
+    "orientation._weighted_log_odds": (0, 1, 2, 3, 4, 5),
+    "resampling._accumulate": (0, 1, 2, 3),
+    "selection._units_present": (0, 1),
+}
+for _name, _positions in RESAMPLING_READ_ONLY_ARGUMENTS.items():
+    OVERLOADS[_name] = tuple(dict.fromkeys(
+        OVERLOADS[_name] + tuple(_read_only(signature, _positions) for signature in OVERLOADS[_name])
+    ))

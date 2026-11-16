@@ -1,0 +1,81 @@
+"""Derivations and readers of the two-stage run-level painting calibration."""
+
+from dataclasses import dataclass
+
+from ...contracts.contigs import AnalysisContigs
+from ...core.concurrency import threaded_each
+from ...contracts.payload import from_payload
+from ...core.errors import InvariantError
+from ...contracts.roles import require_schema
+from ...science.painting.parameters import PaintingParameters
+from ...store.identity import code_dependency_identity
+from ...store.protocol import Derivation, NumericalPolicy, read_items
+
+KEYS = dict(
+    robustness="painting/calibration/robustness",
+    outlier="painting/calibration/outlier",
+    divisor="painting/calibration/divisor",
+    calibration="painting/calibration",
+)
+
+
+@dataclass(frozen=True)
+class Reader:
+    identity: str
+    key: str
+    schema: int = 1
+    items: tuple | None = None
+
+    def decode(self, payload):
+        require_schema(payload, self.schema)
+        return dict(payload)
+
+
+def expected(store, manifest, *, product="calibration", contig=None):
+    # Pooled over the analysed contigs (the reconstruction axis), like the pedigree.
+    contigs = tuple(AnalysisContigs.from_manifest(manifest).included)
+    from .records import bound_upstream
+
+    inputs = {}
+    # each contig's chain (header reads and decodes back to discovery) is independent of the others, and is bound
+    # once per process (bound_upstream): every contig's painting reader derives this identity
+    for c, bound in zip(contigs, threaded_each(lambda c: bound_upstream(store, manifest, c), contigs), strict=True):
+        if bound is None:
+            raise InvariantError("painting calibration requires every final assembly and evidence product")
+        inputs[c + "/assembly"], inputs[c + "/evidence"], inputs[c + "/map"] = bound[1], bound[3], bound[4]
+    params = from_payload(PaintingParameters, manifest["parameters"]["painting"])
+    policy = NumericalPolicy(**manifest["numerical_policy"])
+    code = code_dependency_identity(
+        ("science.painting.calibration", "stages.painting.calibration_tasks", "stages.painting.calibration_records")
+    )
+
+    def identity(which, scope=None, upstream=None):
+        return Derivation(
+            code,
+            dict(product=which, contig=scope, contigs=contigs, parameters=params),
+            policy,
+            dict(inputs, **(upstream or {})),
+            tie_reverse=manifest["ties"]["reverse"],
+            tie_keep=tuple(manifest["ties"]["keep"]),
+        ).identity
+
+    shards = {c: identity("robustness", c) for c in contigs}
+    outlier = identity("outlier", upstream=shards)
+    if product == "robustness":
+        result = shards[contig]
+    elif product == "outlier":
+        result = outlier
+    elif product == "divisor":
+        result = identity("divisor", contig, dict(outlier=outlier))
+    else:
+        divisors = {c: identity("divisor", c, dict(outlier=outlier)) for c in contigs}
+        result = identity("calibration", upstream=dict(divisors, outlier=outlier))
+    return Reader(result, KEYS[product])
+
+
+def result_reader(store, manifest, *, product="calibration", contig=None):
+    file = store.run if contig is None else store.contig(contig)
+    if not file.has(KEYS[product]):
+        return None
+    request = expected(store, manifest, product=product, contig=contig)
+    return request if read_items(file, request.key, request.identity, ("schema",)) is not None else None

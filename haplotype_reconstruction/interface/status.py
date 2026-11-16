@@ -147,6 +147,9 @@ def run_status(
         if manifest is None:
             raise OSError(f"{directory}: run has not been initialized; use haplotypes init")
         require_schema(manifest, 1)
+        from . import reuse
+
+        reuse.install(root, None, "status")  # the run folder's record-reuse state, if any: read it as the commands do
         reader = Results(directory, checkpoints=root)
         store = CheckpointStore(reader.checkpoint_location)
         selection = reader.analysis
@@ -160,6 +163,11 @@ def run_status(
         if selection.excluded and shared_init.is_file():
             markers.append(shared_init)
         report["markers"] = [str(path.relative_to(root)) for path in sorted(markers)]
+        from . import reuse
+
+        ledger = reuse.state(root)
+        # the explicit record-reuse override: which stages' records are accepted under remembered sources, and when
+        report["records_reused"] = dict(stages=ledger["reused"], uses=len(ledger["history"]), last=ledger["history"][-1:])
         names = (
             list(contigs)
             if contigs is not None

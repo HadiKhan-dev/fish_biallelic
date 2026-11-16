@@ -47,6 +47,14 @@ def _add_run_options(command):
     command.add_argument("--contig-lanes", type=int, help="Concurrent contig lanes ([execution] contig_lanes).")
     command.add_argument("--scratch", help="Mapped scratch and kernel cache base ([execution] scratch).")
     command.add_argument(
+        "--reuse-records",
+        nargs="+",
+        metavar="STAGE",
+        help="Explicit override ([execution] reuse_records): accept this run folder's existing records of these "
+        "stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays "
+        "in force for the run folder until --reuse-records none.",
+    )
+    command.add_argument(
         "--rate-estimate",
         choices=("veto", "ignore", "adopt"),
         help="What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) "
@@ -83,7 +91,8 @@ def build_parser() -> argparse.ArgumentParser:
         ("init", "Validate inputs and initialize the run manifest."),
         ("evidence", "Record one contig's evidence."),
         ("relatedness", "Gather relatedness from every contig's evidence."),
-        ("reconstruct", "Reconstruct and refit one contig; concurrent invocations share unclaimed units."),
+        ("reconstruct", "Assemble one contig; also paint and refit after run calibration exists."),
+        ("calibrate", "Calibrate painting across all final assemblies."),
         ("pedigree", "Gather the genome-wide pedigree."),
         ("phase", "Phase, map and export one contig."),
         ("report", "Publish tables from available records."),
@@ -192,6 +201,7 @@ def run_options(args: argparse.Namespace) -> dict[str, dict[str, Any]]:
     put("execution", "max_contigs", args.max_contigs)
     put("execution", "contig_lanes", args.contig_lanes)
     put("execution", "scratch", args.scratch)
+    put("execution", "reuse_records", args.reuse_records)
     put("genetic_map", "rate_estimate", args.rate_estimate)
     return options
 
@@ -261,7 +271,7 @@ def _command_recombination(args: argparse.Namespace) -> int:
 
 
 def _dispatch(args: argparse.Namespace) -> int:
-    if args.command in {"run", "init", "evidence", "relatedness", "reconstruct", "pedigree", "phase", "report"}:
+    if args.command in {"run", "init", "evidence", "relatedness", "reconstruct", "calibrate", "pedigree", "phase", "report"}:
         return _command_workflow(args)
     if args.command == "status":
         return _command_status(args)
@@ -294,6 +304,14 @@ def main(argv: list[str] | None = None) -> int:
         return 4
     args = build_parser().parse_args(argv)
 
+    # One command runs one installed code snapshot from start to finish, so each code closure is hashed once for the
+    # whole command. Without this, every identity a reader resolves before the engine runtime starts re-parses and
+    # re-hashes its closure (a painting's identity alone resolves the assembly and evidence identities of every
+    # analysed contig through the run calibration): minutes in evaluate, report and export.
+    from ..store.identity import fix_installed_sources
+
+    fix_installed_sources()
+
     from ..core.errors import InputError, ResourceError, SettingsError
     from ..engine.runtime import RunInterrupted, signal_boundary
 
@@ -319,6 +337,12 @@ def main(argv: list[str] | None = None) -> int:
 
         if isinstance(error, CheckpointMismatch):
             print(f"haplotypes {args.command}: {error}", file=sys.stderr)
+            print(
+                "haplotypes: an existing record was made by other code or settings. After a source edit that does not "
+                "change results, --reuse-records (see docs/user/running.md) can accept the existing records; "
+                "otherwise use a new output root.",
+                file=sys.stderr,
+            )
             return 2
         from .run import error_report
 

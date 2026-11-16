@@ -23,7 +23,7 @@ from ...core.ties import TieCounts
 from ...science.pedigree.parameters import PedigreeParameters
 from ...science.pedigree.run import exclusion_contigs
 from ...store.container import CheckpointFile
-from ...store.identity import CodeIdentity, code_dependency_identity
+from ...store.identity import CodeIdentity, code_dependency_identity, pin_generation
 from ...store.protocol import Derivation, NumericalPolicy, read_items
 from ...store.store import CheckpointStore
 from ..evidence import records as evidence_records
@@ -232,7 +232,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         file = store.contig(c)
         evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=c)
         painting = painting_records.result_reader(
-            store, manifest, product="painting", contig=c, panels=False, emissions=False
+            store, manifest, product="reference", contig=c, panels=False, emissions=False
         )
         if evidence is None or painting is None:
             raise InvariantError(f"pedigree requires evidence and painting for {c}")
@@ -419,12 +419,13 @@ class Reader:
         return (TieCounts(()) if result.retained is None else result.retained.decision.tie_events) if self.product == "pedigree_ties" else result
 
 
-# Pedigree readers this process derived, by run container (path, inode), manifest digest and product. A derivation
+# Pedigree readers this process derived, by run container (path, inode), manifest digest, product and record-reuse
+# pin generation (store.identity.pin_generation: the code identities the derivation binds). A derivation
 # checks every contig's evidence, painting, preparation and score headers (bound_inputs), and every phase,
 # recombination and export read of each contig needs it: re-deriving it per read made a report over eight contigs
 # read for minutes. Those records are immutable once the pedigree is published, so one derivation per run serves the
 # process; the product's own identity is still checked at every read.
-_DERIVED: dict[tuple[str, int, str, str], Reader] = {}
+_DERIVED: dict[tuple[str, int, str, str, int], Reader] = {}
 
 
 def result_reader(
@@ -444,7 +445,7 @@ def result_reader(
         raise InputError("invalid pedigree reader request")
     if not store.run.has(PRODUCT):
         return None
-    derived = (store.run.path, os.stat(store.run.path).st_ino, json_digest(manifest), product)
+    derived = (store.run.path, os.stat(store.run.path).st_ino, json_digest(manifest), product, pin_generation())
     reader = _DERIVED.get(derived)
     if reader is None:
         reader = _DERIVED[derived] = _derive_reader(store, manifest, product)

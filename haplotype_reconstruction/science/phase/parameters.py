@@ -34,7 +34,7 @@ class PhaseParameters:
         parental homologue it copies there is pinned by the parent's own reads: on each flank the parent's pair beats
         every pair putting the other junction label on that homologue, whatever the partner, by at least this many
         nats.
-      junction_pin_bins: the flank window of that test (bins, cut at the relative's own label changes).
+      junction_pin_reference_bins: the flank window of that test (reference windows, cut at the relative's own label changes).
     Release (release.py):
       site_deviation: mixture mass of the release's site model: given its label pair, a sample's ordered alleles at a
         site are the pair's panel alleles (each with its own leave-one-out flip probability, allele_evidence.py), or
@@ -127,11 +127,11 @@ class PhaseParameters:
             "units": "nats",
         },
     )
-    junction_pin_bins: int = field(
+    junction_pin_reference_bins: int = field(
         default=10,
         metadata={
-            "provenance": "FP10; inspect up to 10 bins per flank, stopping at parental label changes.",
-            "units": "bins",
+            "provenance": "FP10; inspect up to 10 painting reference windows per flank, stopping at parental label changes.",
+            "units": "reference windows",
         },
     )
     site_deviation: float = field(
@@ -182,7 +182,7 @@ class PhaseParameters:
     def __post_init__(self):
         if not 0 < self.not_copy_rate_per_bp < 1e-3 or not self.not_copy_mean_bp > 0:
             raise SettingsError("family_phase not-a-copy rates must be positive (rate per bp below 1e-3)")
-        for name in ("max_sweeps", "junction_min_samples", "junction_pin_bins"):
+        for name in ("max_sweeps", "junction_min_samples", "junction_pin_reference_bins"):
             if int(getattr(self, name)) != getattr(self, name) or getattr(self, name) < 1:
                 raise SettingsError(f"family_phase.{name} must be a positive integer")
         for name in ("genotype_posterior", "phase_posterior", "set_posterior"):

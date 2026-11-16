@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...engine.graph import ResourceRequest, ResultRef, Task, TaskKey
-from .painting import contig_painting, write_painting
+from .painting import contig_painting, write_painting, write_calibration
 from .pair_sharing import contig_pair_sharing, write_pair_sharing
 from .pedigree import write_pedigree
 from .quality import contig_quality, write_quality
@@ -141,6 +141,7 @@ def run_tasks(
             )
         )
     for name, writer in (
+        ("calibration", write_calibration),
         ("truth", _truth),
         ("relatedness", _relatedness),
         ("pedigree", _pedigree),

@@ -28,7 +28,7 @@ class RefitParameters:
     fill_min_supporters: an allele the painted panel leaves unknown is called when one
         allele beats the other by ``minimum_gain_nats`` and at least this many painted carriers'
         own reads favour it (the same minimum as local selection's and discovery's ``min_supporters``).
-    The genotype-error mixture is the painting's (``PaintingParameters.robustness_epsilon``), untempered:
+    The genotype-error mixture is the painting's (``Painting.robustness_epsilon``), untempered:
     the refit is a per-site conditional correction given the painting's released labels, not the
     M-step of painting's tempered copying-model likelihood.
     """

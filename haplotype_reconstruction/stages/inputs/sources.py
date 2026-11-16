@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
@@ -198,8 +198,8 @@ def observation_source(
         from .simulation import SimulationSource
 
         if simulation_parameters is None:
-            from ..configure import simulation
+            from .simulation import simulation_config
 
-            simulation_parameters = simulation(cast("SettingsView", settings))
+            simulation_parameters = simulation_config(settings)
         source = SimulationSource(simulation_parameters)
     return canonical_order_source(source, reverse=reverse)

@@ -1,4 +1,11 @@
-"""Check expected product requests without importing stage orchestration or science."""
+"""Check expected product requests without importing stage orchestration or science.
+
+This module is what every stage task uses to read its inputs, so everything it imports becomes part of every stage's
+code identity (store.identity follows a module's imports and its parent packages'). It lives here, below the results
+package: imported from the results package, it made each stage's identity include the results reader, and through it
+every later stage's code, so that an edit to pedigree code invalidated discovery records. Keep its imports to the
+contracts, core and store layers.
+"""
 
 from __future__ import annotations
 
@@ -6,10 +13,10 @@ import copy
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from ..contracts.roles import require_schema
-from ..core.errors import SettingsError
-from ..store.protocol import read_items, resume
-from ..store.store import CheckpointStore
+from ...contracts.roles import require_schema
+from ...core.errors import SettingsError
+from ...store.protocol import read_items, resume
+from ...store.store import CheckpointStore
 
 Product = TypeVar("Product", covariant=True)
 
@@ -92,7 +99,7 @@ class ProductInputs:
 
     def output_receipt(self, key, identity, schema, contig):
         """Check a supersedable output publication against its selected source products."""
-        from ..store.protocol import read_output
+        from ...store.protocol import read_output
 
         record = read_output(self._file(contig), key, identity=lambda payload: payload["identity"])
         if record is None or record.identity != identity:

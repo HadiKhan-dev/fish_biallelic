@@ -65,18 +65,35 @@ def build_states(positions: np.ndarray, inference: np.ndarray, kept: np.ndarray)
     )
 
 
-def build_bins(positions: np.ndarray, snps_per_bin: int) -> PaintingBins:
-    """Split the selected sites into max(1, L // snps_per_bin) near-equal consecutive bins."""
+def build_bins(positions: np.ndarray, snps_per_bin: int, reference_snps_per_bin: int) -> PaintingBins:
+    """Split the selected sites into reference windows, and every window into bins.
+
+    Reference windows are max(1, L // reference_snps_per_bin) near-equal consecutive runs of the L selected sites;
+    each window is split into reference_snps_per_bin // snps_per_bin near-equal consecutive bins (a component with
+    fewer than reference_snps_per_bin sites is one window of max(1, L // snps_per_bin) bins). So consecutive groups
+    of reference_snps_per_bin // snps_per_bin bins are exactly the reference windows, and the bins of a painting at
+    snps_per_bin = reference_snps_per_bin are those windows. The reference size is explicit at every caller.
+    """
     positions = np.asarray(positions, dtype=np.int64)
     n_sites = len(positions)
     if n_sites == 0:
         empty = np.zeros(0, dtype=np.int64)
         return PaintingBins(empty, empty.copy(), np.zeros(0, dtype=np.float64), np.zeros(0, dtype=np.int64))
-    n_bins = max(1, n_sites // int(snps_per_bin))
-    # np.array_split sizes: the first (n_sites mod n_bins) bins hold one extra site.
-    base, extra = divmod(n_sites, n_bins)
-    sizes = np.full(n_bins, base, dtype=np.int64)
-    sizes[:extra] += 1
+    reference = int(reference_snps_per_bin)
+    group = reference // int(snps_per_bin)
+    n_windows = max(1, n_sites // reference)
+    # np.array_split sizes: the first (n mod k) parts hold one extra site.
+    base, extra = divmod(n_sites, n_windows)
+    window_sizes = np.full(n_windows, base, dtype=np.int64)
+    window_sizes[:extra] += 1
+    per_window = group if n_sites >= reference else max(1, n_sites // int(snps_per_bin))
+    sizes = np.empty(n_windows * per_window, dtype=np.int64)
+    for w in range(n_windows):
+        base, extra = divmod(int(window_sizes[w]), per_window)
+        part = sizes[w * per_window : (w + 1) * per_window]
+        part[:] = base
+        part[:extra] += 1
+    n_bins = len(sizes)
     stops = np.cumsum(sizes)
     starts = stops - sizes
     # Exact integer sums (far below 2**53) divided by the counts: equal to np.mean per bin.
@@ -87,7 +104,6 @@ def build_bins(positions: np.ndarray, snps_per_bin: int) -> PaintingBins:
     edges[1:-1] = (positions[stops[:-1] - 1] + positions[starts[1:]] + 1) // 2
     edges[-1] = positions[-1] + 1
     return PaintingBins(starts.astype(np.int64), stops.astype(np.int64), centers, edges)
-
 
 # Supported layouts for typed stage routes.
 _OVERLOADS = {

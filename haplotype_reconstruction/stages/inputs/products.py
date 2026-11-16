@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ...engine.cpu import TASK_THREADS
-from ...results.protocol import ProductInputs
+from .protocol import ProductInputs
 from ...store.store import CheckpointStore
 
 

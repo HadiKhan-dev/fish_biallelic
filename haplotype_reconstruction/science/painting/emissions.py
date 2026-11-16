@@ -142,7 +142,7 @@ _OVERLOADS["_tempered_into"] = (
     (
         *_window_inputs(True),
         *(types.Array(types.int64, 1, "C", readonly=True, aligned=True),) * 4,
-        *(types.int64,) * 5,
+        *(types.int64,) * 6,
         types.float64,
         types.float64,
         types.float64,
@@ -183,10 +183,89 @@ def _gather_kernel(likelihoods, observed, sites):
     return values, flags
 
 
-def design_effect(
-    likelihoods: np.ndarray, observed: np.ndarray, bin_starts: np.ndarray, correlation: float
+class SharedEmissions:
+    """An EmissionBuilder that serves every evidence strength from one build per request.
+
+    The kernel divides each bin's (or part's) summed site logs by its reference window's design effect
+    1 + (n - 1) r as its last operation, so a build at r = 0 holds the sums themselves and the emissions at any r are
+    those sums divided by the same design effect: the same values, bit for bit, as a direct build at r. Requests are
+    matched on the sample range, the label alleles, the bin and part layout and the outlier rate; the evidence source
+    (likelihoods, observed flags, sites) must be the one this instance was made for. ``max_bytes`` bounds the kept
+    sums; a request that does not fit is built directly at its own strength.
+    """
+
+    def __init__(self, builder: "EmissionBuilder", bins_per_reference_window: int, max_bytes: int) -> None:
+        self.builder = builder
+        self.group = int(bins_per_reference_window)
+        self.remaining = int(max_bytes)
+        self.kept: list[tuple] = []
+        self.builds = 0
+        self.served = 0
+
+    def __call__(self, likelihoods, observed, sites, samples, alt_probability, background_frequency, bin_starts,
+                 bin_stops, config, *, robustness_epsilon, site_correlation, parts=None):
+        for entry in self.kept:
+            (e_samples, e_epsilon, e_alt, e_starts, e_stops, e_parts, sums, flags, informative, extra) = entry
+            if (
+                e_samples == (samples.start, samples.stop)
+                and e_epsilon == float(robustness_epsilon)
+                and (e_parts is None) == (parts is None)
+                and np.array_equal(e_starts, bin_starts)
+                and np.array_equal(e_stops, bin_stops)
+                and (parts is None or all(np.array_equal(a, b) for a, b in zip(e_parts, parts, strict=True)))
+                and np.array_equal(e_alt, alt_probability)
+            ):
+                break
+        else:
+            sums, flags, informative = self.builder(
+                likelihoods, observed, sites, samples, alt_probability, background_frequency, bin_starts, bin_stops,
+                config, robustness_epsilon=robustness_epsilon, site_correlation=0.0, parts=parts,
+            )
+            self.builds += 1
+            counts = np.add.reduceat(informative.astype(np.int64), np.asarray(bin_starts, dtype=np.int64), axis=1)
+            window = np.add.reduceat(counts, np.arange(0, counts.shape[1], self.group), axis=1)
+            extra = np.maximum(np.repeat(window, self.group, axis=1)[:, : counts.shape[1]] - 1, 0)
+            if parts is not None:
+                extra = extra[:, np.asarray(parts[2], dtype=np.int64)]
+            if sums.nbytes <= self.remaining:
+                self.remaining -= sums.nbytes
+                self.kept.append((
+                    (samples.start, samples.stop), float(robustness_epsilon), np.array(alt_probability, copy=True),
+                    np.array(bin_starts, copy=True), np.array(bin_stops, copy=True),
+                    None if parts is None else tuple(np.array(a, copy=True) for a in parts),
+                    sums, flags, informative, extra,
+                ))
+        self.served += 1
+        design = 1.0 + extra * float(site_correlation)
+        return sums / design[:, None, :], flags, informative
+
+
+def confidence_scale(
+    informative: np.ndarray,
+    bin_starts: np.ndarray,
+    path_correlation: float,
+    confidence_correlation: float,
+    bins_per_reference_window: int,
 ) -> np.ndarray:
-    """float64[N, B]: 1 + (n - 1) r for the n informative sites (informative_sites) of each sample in each bin (1 when
+    """float64[N, B]: (1 + (n - 1) r_path) / (1 + (n - 1) r_confidence), n the sample's informative sites of the
+    bin's reference window (``informative`` bool[N, L_s] over the component's selected sites, as the emission builder
+    returns it). Bin log emissions tempered at the path strength times this factor are the emissions tempered at the
+    confidence strength: the site floor is applied before tempering, so the ratio is exact up to rounding."""
+    counts = np.add.reduceat(informative.astype(np.int64), np.asarray(bin_starts, dtype=np.int64), axis=1)
+    group = int(bins_per_reference_window)
+    window = np.add.reduceat(counts, np.arange(0, counts.shape[1], group), axis=1)
+    extra = np.maximum(np.repeat(window, group, axis=1)[:, : counts.shape[1]] - 1, 0)
+    return (1.0 + extra * float(path_correlation)) / (1.0 + extra * float(confidence_correlation))
+
+
+def design_effect(
+    likelihoods: np.ndarray,
+    observed: np.ndarray,
+    bin_starts: np.ndarray,
+    correlation: float,
+    bins_per_reference_window: int,
+) -> np.ndarray:
+    """float64[N, B]: 1 + (n - 1) r for the n informative sites (informative_sites) of each sample in each reference window (1 when
     n <= 1), r = ``correlation``; ``likelihoods``/``observed`` are gathered at the component's selected sites and
     ``bin_starts`` are the bins' first selected sites. The variance inflation of a sum of n
     equal-variance terms with common correlation r (Kish's design effect), used as a tuned working weight of a bin's
@@ -198,6 +277,9 @@ def design_effect(
         axis=1,
         dtype=np.int64,
     )
+    group = int(bins_per_reference_window)
+    window_counts = np.add.reduceat(counts, np.arange(0, counts.shape[1], group), axis=1)
+    counts = np.repeat(window_counts, group, axis=1)[:, : counts.shape[1]]
     return 1.0 + np.maximum(counts - 1, 0) * float(correlation)
 
 
@@ -225,8 +307,6 @@ def gather_sites(
             np.ascontiguousarray(observed[samples, window], dtype=np.bool_),
         )
     return _gather_kernel(likelihoods[samples], observed[samples], sites)
-
-
 
 
 @kernel(overloads=_OVERLOADS["_pair_bin_score"], cache=True, inline="always", nogil=True)
@@ -351,6 +431,7 @@ def _tempered_into(
     first_bin,
     last_bin,
     left,
+    bins_per_reference_window,
     robustness_epsilon,
     log_floor,
     correlation,
@@ -359,11 +440,11 @@ def _tempered_into(
     informative,
     sample_offset,
 ):
-    """tempered_window of one whole-bin window, written in place.
+    """tempered_window of complete reference windows, written in place.
 
     ``values``/``seen`` hold the window's GL rows and flags, site s being the batch's selected site ``left`` + s.
     Parts [first_part, last_part) and whole bins [first_bin, last_bin) carry the batch's indices; a part's emission is
-    divided by the design effect of its whole bin (part_bins), the last whole bin running to the window's end (as
+    divided by the design effect of its whole reference window (part_bins), the last whole bin running to the window's end (as
     np.add.reduceat). Writes raw[sample_offset + n, :, part] and flags/informative[sample_offset + n, left + s]. The
     same values as binned_emissions, design_effect and the division in tempered_window."""
     n_samples, n_sites, _ = values.shape
@@ -380,13 +461,16 @@ def _tempered_into(
             c = values[sample, site, 2]
             flags[target, left + site] = seen[sample, site]
             informative[target, left + site] = seen[sample, site] and max(a, b, c) - min(a, b, c) > INFORMATIVE_SPREAD
-        for whole in range(n_whole):
-            low = bin_starts[first_bin + whole] - left
-            high = bin_starts[first_bin + whole + 1] - left if whole + 1 < n_whole else n_sites
+        # Storage windows start on a reference-window boundary and contain complete windows.
+        for first in range(0, n_whole, bins_per_reference_window):
+            last = min(first + bins_per_reference_window, n_whole)
+            low = bin_starts[first_bin + first] - left
+            high = bin_starts[first_bin + last] - left if last < n_whole else n_sites
             count = 0
             for site in range(low, high):
                 count += informative[target, left + site]
-            design[sample, whole] = 1.0 + max(count - 1, 0) * correlation
+            for whole in range(first, last):
+                design[sample, whole] = 1.0 + max(count - 1, 0) * correlation
     uniform_log = max(math.log(1.0 / 3.0), log_floor)
     floor_probability = math.exp(log_floor)
     for task in prange(n_samples * n_pairs):
@@ -438,6 +522,9 @@ def tempered_into(
     flags: np.ndarray,
     informative: np.ndarray,
     sample_offset: int,
+    *,
+    robustness_epsilon: float,
+    site_correlation: float,
 ) -> None:
     """Temper one whole-bin window of a batch into ``raw``/``flags``/``informative`` (_tempered_into)."""
     _tempered_into(
@@ -454,9 +541,10 @@ def tempered_into(
         int(bins[0]),
         int(bins[1]),
         int(left),
-        float(config.robustness_epsilon),
+        int(config.reference_snps_per_bin // config.snps_per_bin),
+        float(robustness_epsilon),
         float(config.emission_log_floor),
-        float(config.emission_site_correlation),
+        float(site_correlation),
         raw,
         flags,
         informative,
@@ -574,6 +662,8 @@ class EmissionBuilder(Protocol):
         bin_stops: np.ndarray,
         config: PaintingParameters,
         *,
+        robustness_epsilon: float,
+        site_correlation: float,
         parts: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 
@@ -588,9 +678,11 @@ def tempered_window(
     whole_bin_starts: np.ndarray,
     config: PaintingParameters,
     *,
+    robustness_epsilon: float,
+    site_correlation: float,
     part_bins: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Temper complete bins or parts by the whole bin's design effect, in site order.
+    """Temper complete bins or parts by the whole reference window's design effect, in site order.
 
     All indices are local to this whole-bin window. Returned emissions and informative
     masks are owned; inputs are unchanged. Cost O(samples * selected sites * S**2).
@@ -616,6 +708,8 @@ def tempered_window(
         np.empty((n_samples, n_sites), dtype=np.bool_),
         informative,
         0,
+        robustness_epsilon=robustness_epsilon,
+        site_correlation=site_correlation,
     )
     return raw, informative
 
@@ -631,11 +725,13 @@ def tempered_emissions(
     bin_stops: np.ndarray,
     config: PaintingParameters,
     *,
+    robustness_epsilon: float,
+    site_correlation: float,
     parts: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Resident-array emissions, observed and informative masks for a contiguous sample batch.
 
-    Parts use their whole bin's design effect. No storage or live resource access;
+    Parts use their whole reference window's design effect. No storage or live resource access;
     a stage can provide an equivalent EmissionBuilder over physical windows.
     """
     values, flags = gather_sites(cast(np.ndarray, likelihoods), cast(np.ndarray, observed), sites, samples)
@@ -649,6 +745,8 @@ def tempered_emissions(
         stops,
         bin_starts,
         config,
+        robustness_epsilon=robustness_epsilon,
+        site_correlation=site_correlation,
         part_bins=None if parts is None else parts[2],
     )
     return raw, flags, informative

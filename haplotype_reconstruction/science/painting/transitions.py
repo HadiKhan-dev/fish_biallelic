@@ -19,7 +19,7 @@ ancestry-change rate (a pooled copying rate of its samples, not a number of meio
 samples, with the panel-error chain that painting's decoder adds to anchored labels (painting.fidelity). This
 label-level table is that process without the panel-error state: label continuity's gain screen and pedigree's
 source chain use it, with the estimated rho and the tempered emissions (each sample's bin divided by its design
-effect, PaintingParameters.emission_site_correlation).
+effect, PaintingTransitions.site_correlation).
 
 
 """

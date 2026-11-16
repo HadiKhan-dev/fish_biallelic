@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections.abc import Callable
 
 import numpy as np
 
@@ -55,8 +56,9 @@ def _child_fb(tc, cls, known, paths, theta, floor, delta, want_gamma, gamma, inc
     fw = np.empty((B, 4))
     scale = np.empty(B)
     total = 0.0
+    emissions = np.ones((B, 4))
     for t in range(B):
-        e = np.ones(4)
+        e = emissions[t]
         if known[t]:
             for s in range(2):
                 u = tc[paths[0, s, t], t]
@@ -88,6 +90,7 @@ def _child_fb(tc, cls, known, paths, theta, floor, delta, want_gamma, gamma, inc
         total += lz
     if want_gamma:
         bw = np.ones(4)
+        nb = np.empty(4)
         for t in range(B - 1, -1, -1):
             g = 0.0
             for q in range(4):
@@ -96,16 +99,9 @@ def _child_fb(tc, cls, known, paths, theta, floor, delta, want_gamma, gamma, inc
             for q in range(4):
                 gamma[t, q] /= g
             if t > 0:
-                e = np.ones(4)
-                if known[t]:
-                    for s in range(2):
-                        u = tc[paths[0, s, t], t]
-                        for r in range(2):
-                            v = tc[paths[1, r, t], t]
-                            e[2 * s + r] = _emit(cls[t, 0], cls[t, 1], u, v, delta)
+                e = emissions[t]
                 th = _switch(theta[t - 1], floor)
                 st = 1.0 - th
-                nb = np.zeros(4)
                 for p in range(4):
                     ps, pr = p >> 1, p & 1
                     acc = 0.0
@@ -114,7 +110,7 @@ def _child_fb(tc, cls, known, paths, theta, floor, delta, want_gamma, gamma, inc
                         w = (st if ps == s else th) * (st if pr == r else th)
                         acc += w * e[q] * bw[q]
                     nb[p] = acc / scale[t]
-                bw = nb
+                bw, nb = nb, bw
     return total
 
 
@@ -127,7 +123,11 @@ def _half_fb(tc, cls, known, paths, latent, theta, floor, delta, want_gamma, gam
     B = cls.shape[0]
     fw = np.empty((B, 2, T))
     scale = np.empty(B)
+    emissions = np.empty((B if want_gamma else 0, 2, T))
     total = 0.0
+    sel = np.empty(T)
+    eb = np.empty((2, T))
+    mo = np.empty((2, T))
     for t in range(B):
         if t == 0:
             for sl in range(2):
@@ -135,13 +135,14 @@ def _half_fb(tc, cls, known, paths, latent, theta, floor, delta, want_gamma, gam
                     e = 1.0
                     if known[t]:
                         e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], delta)
+                    if want_gamma:
+                        emissions[t, sl, f] = e
                     fw[t, sl, f] = 0.5 / T * e
         else:
             th = _switch(theta[t - 1], floor)
             st = 1.0 - th
             ch = th / (T - 1) if T > 1 else 0.0
             for sl in range(2):
-                sel = np.empty(T)
                 tot = 0.0
                 for f in range(T):
                     sel[f] = fw[t - 1, sl, f] * st + fw[t - 1, 1 - sl, f] * th
@@ -151,6 +152,8 @@ def _half_fb(tc, cls, known, paths, latent, theta, floor, delta, want_gamma, gam
                     e = 1.0
                     if known[t]:
                         e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], delta)
+                    if want_gamma:
+                        emissions[t, sl, f] = e
                     fw[t, sl, f] = v * e
         z = 0.0
         for sl in range(2):
@@ -180,15 +183,10 @@ def _half_fb(tc, cls, known, paths, latent, theta, floor, delta, want_gamma, gam
                 th = _switch(theta[t - 1], floor)
                 st = 1.0 - th
                 ch = th / (T - 1) if T > 1 else 0.0
-                eb = np.empty((2, T))
                 for sl in range(2):
                     for f in range(T):
-                        e = 1.0
-                        if known[t]:
-                            e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], delta)
-                        eb[sl, f] = e * bw[sl, f]
+                        eb[sl, f] = emissions[t, sl, f] * bw[sl, f]
                 # transpose of mosaic step then selector step
-                mo = np.empty((2, T))
                 for sl in range(2):
                     tot = 0.0
                     for f in range(T):
@@ -264,8 +262,170 @@ def evaluate(tc, mcls, mknown, roles, paths, which, theta, floor, delta, inc, al
     return total
 
 
+@kernel(overloads=OVERLOADS["family_transmission._prior_cached"], cache=True, nogil=True)
+def _prior_cached(paths, which, T, transition, inc):
+    B = paths.shape[2]
+    total = 0.0
+    lt = -math.log(T)
+    for l in range(2):
+        if not which[l]:
+            continue
+        for h in range(2):
+            inc[0] += lt
+            total += lt
+            for t in range(1, B):
+                v = transition[t - 1, 0 if paths[l, h, t] == paths[l, h, t - 1] else 1]
+                inc[t] += v
+                total += v
+    return total
+
+
+@kernel(overloads=OVERLOADS["family_transmission._member_value"], cache=True, nogil=True)
+def _member_value(tc, mcls, mknown, paths, theta, floor, delta, alone_inc, m, r, valid, values, increments):
+    """One role's exact member likelihood, cached until a latent path it uses changes."""
+    if valid[m, r]:
+        return values[m, r]
+    B = tc.shape[1]
+    if r == 4:
+        value = alone_inc[m].sum()
+    else:
+        for t in range(B):
+            increments[m, r, t] = 0.0
+        if r == 2:
+            dummy = np.empty((1, 4))
+            value = _child_fb(tc, mcls[m], mknown[m], paths, theta, floor, delta, False, dummy, increments[m, r])
+        elif r >= 5:
+            dummy3 = np.empty((1, 1, 1))
+            value = _half_fb(tc, mcls[m], mknown[m], paths, r - 5, theta, floor, delta, False, dummy3,
+                             increments[m, r])
+        else:
+            value = _direct_inc(tc, mcls[m], mknown[m], paths, r, delta, increments[m, r])
+    values[m, r] = value
+    valid[m, r] = True
+    return value
+
+
+@kernel(overloads=OVERLOADS["family_transmission._evaluate_cached"], cache=True, nogil=True)
+def _evaluate_cached(tc, mcls, mknown, roles, paths, which, theta, floor, delta, inc, alone_inc, role_lp,
+                     valid, values, increments, transition):
+    """Evaluate with reusable member terms, retaining evaluate's exact total and per-bin addition order.
+
+    In particular, outsiders add each bin to the total (not their pre-summed member likelihood). The latent
+    prior is still evaluated in its original homologue/bin order. The caller owns and invalidates the cache.
+    """
+    T, B = tc.shape
+    total = _prior_cached(paths, which, T, transition, inc)
+    for m in range(len(roles)):
+        inc[0] += role_lp[m]
+        total += role_lp[m]
+        r = roles[m]
+        if r == 4:
+            for t in range(B):
+                inc[t] += alone_inc[m, t]
+                total += alone_inc[m, t]
+        elif r != 3:
+            total += _member_value(tc, mcls, mknown, paths, theta, floor, delta, alone_inc, m, r,
+                                   valid, values, increments)
+            for t in range(B):
+                if r >= 2 or mknown[m, t]:
+                    inc[t] += increments[m, r, t]
+    return total
+
+
+@kernel(overloads=OVERLOADS["family_transmission._prepare"], cache=True, nogil=True)
+def _prepare(tc, mcls, mknown, theta, floor, delta):
+    """Fixed member/trajectory-pair log emissions, reused by all starts and M steps of this search.
+
+    The table uses _emit and math.log unchanged; every subsequent likelihood reduction retains its original
+    member, slot and state order. Unknown bins are never read by the M step. Also prepare the first trajectory
+    of each bin-local class and the exact mosaic transition logs shared by every fit.
+    """
+    T, B = tc.shape
+    representatives = np.empty((B, T), dtype=np.int64)
+    transition = np.empty((B - 1, 2))
+    for t in range(B):
+        for a in range(T):
+            representatives[t, a] = a
+            for b in range(a):
+                if tc[a, t] == tc[b, t]:
+                    representatives[t, a] = representatives[t, b]
+                    break
+        if t > 0:
+            th = _switch(theta[t - 1], floor)
+            transition[t - 1, 0] = math.log(1.0 - th)
+            transition[t - 1, 1] = math.log(th / (T - 1)) if T > 1 else NEG
+    out = np.empty((len(mcls), B, T, T))
+    for m in range(len(mcls)):
+        for t in range(B):
+            if not mknown[m, t]:
+                continue
+            x, y = mcls[m, t, 0], mcls[m, t, 1]
+            for a in range(T):
+                for b in range(T):
+                    out[m, t, a, b] = math.log(_emit(x, y, tc[a, t], tc[b, t], delta))
+    return out, representatives, transition
+
+
+@kernel(overloads=OVERLOADS["family_transmission._pair_transition"], cache=True, nogil=True, inline="always")
+def _pair_transition(V, score, back, t, ls, lc, rowmax, rowarg, colmax, colarg, NV, T):
+    """One pair Viterbi transition, preserving the released stay/row/column/global comparison order.
+
+    Inlining the common fixed dimensions lets the compiler unroll these short loops; the general T path is
+    the very same recurrence. T is an implementation dimension, never a model limit.
+    """
+    gmax = NEG
+    ga = 0
+    gb = 0
+    for a in range(T):
+        colmax[a] = NEG
+    for a in range(T):
+        row_best = NEG
+        row_arg = 0
+        for b in range(T):
+            v = V[a, b]
+            if v > row_best:
+                row_best = v
+                row_arg = b
+            if v > colmax[b]:
+                colmax[b] = v
+                colarg[b] = a
+            if v > gmax:
+                gmax = v
+                ga = a
+                gb = b
+        rowmax[a] = row_best
+        if row_best > NEG:
+            rowarg[a] = row_arg
+    # These candidate values are identical for every cell of a row/column. Materialize them once;
+    # addition order and the stay, row, column, global comparison sequence below remain unchanged.
+    for a in range(T):
+        rowmax[a] = rowmax[a] + ls + lc
+        colmax[a] = colmax[a] + lc + ls
+    global_value = gmax + 2.0 * lc
+    global_arg = ga * T + gb
+    for a in range(T):
+        for b in range(T):
+            best = V[a, b] + 2.0 * ls
+            arg = a * T + b
+            c = rowmax[a]
+            if c > best:
+                best = c
+                arg = a * T + rowarg[a]
+            c = colmax[b]
+            if c > best:
+                best = c
+                arg = colarg[b] * T + b
+            c = global_value
+            if c > best:
+                best = c
+                arg = global_arg
+            NV[a, b] = best + score[a, b]
+            back[t, a, b] = arg
+
+
 @kernel(overloads=OVERLOADS["family_transmission._mstep"], cache=True, nogil=True)
-def _mstep(tc, mcls, mknown, roles, gammas, paths, latent, theta, floor, delta, maxmode, hgam):
+def _mstep(tc, mcls, mknown, roles, gammas, paths, latent, theta, floor, delta, maxmode, hgam, loge,
+           representatives, transition):
     """Viterbi over ordered homologue pairs (a, b) of one latent diploid with the other latent fixed.
     Maximises sum_t expected complete log emission + mosaic prior. Returns new paths [2, B] for that latent."""
     T = tc.shape[0]
@@ -274,127 +434,98 @@ def _mstep(tc, mcls, mknown, roles, gammas, paths, latent, theta, floor, delta, 
     V = np.empty((T, T))
     back = np.empty((B, T, T), dtype=np.int32)
     score = np.zeros((T, T))
+    rowmax = np.empty(T)
+    rowarg = np.empty(T, dtype=np.int64)
+    colmax = np.empty(T)
+    colarg = np.empty(T, dtype=np.int64)
+    NV = np.empty((T, T))
+    accs = np.empty((2, T))
+    classes = np.empty(T, dtype=np.int64)
+    unique = np.empty(T, dtype=np.int64)
     for t in range(B):
-        # emission score of every pair at bin t
+        # Only emission scores are compressed. Every distinct trajectory remains in the Viterbi recurrence,
+        # with its original prior, index, transition and tie order. Dense class indices keep score writes local.
+        count = 0
         for a in range(T):
-            for b in range(T):
+            representative = representatives[t, a]
+            if representative == a:
+                unique[count] = a
+                classes[a] = count
+                count += 1
+            else:
+                classes[a] = classes[representative]
+        for a in range(count):
+            for b in range(count):
                 score[a, b] = 0.0
         for m in range(len(roles)):
             if not mknown[m, t]:
                 continue
-            x = mcls[m, t, 0]
-            y = mcls[m, t, 1]
             if roles[m] == latent:
-                for a in range(T):
-                    ua = tc[a, t]
-                    for b in range(T):
-                        score[a, b] += math.log(_emit(x, y, ua, tc[b, t], delta))
+                for a in range(count):
+                    for b in range(count):
+                        score[a, b] += loge[m, t, unique[a], unique[b]]
             elif roles[m] == 5 + latent:
-                # half child of this latent: its slot-s homologue against the free mosaic's posterior
                 for slot in range(2):
-                    for a in range(T):
-                        ua = tc[a, t]
+                    for a in range(count):
                         acc = 0.0
                         for f in range(T):
                             g = hgam[m, t, slot, f]
                             if g > 0.0:
-                                acc += g * math.log(_emit(x, y, ua, tc[f, t], delta))
-                        if slot == 0:
-                            for b in range(T):
-                                score[a, b] += acc
-                        else:
-                            for b in range(T):
-                                score[b, a] += acc
+                                acc += g * loge[m, t, unique[a], f]
+                        accs[slot, a] = acc
+                for a in range(count):
+                    for b in range(count):
+                        score[a, b] += accs[0, a]
+                        score[a, b] += accs[1, b]
             elif roles[m] == 2 and maxmode:
-                # initialisation: each child explained by its best selector state at this bin (no continuity)
-                for a in range(T):
-                    ua = tc[a, t]
-                    for b in range(T):
-                        ub = tc[b, t]
+                for a in range(count):
+                    for b in range(count):
                         best = NEG
                         for o in range(2):
-                            vo = tc[paths[other, o, t], t]
-                            va = math.log(_emit(x, y, ua, vo, delta))
-                            vb = math.log(_emit(x, y, ub, vo, delta))
+                            va = loge[m, t, unique[a], paths[other, o, t]]
+                            vb = loge[m, t, unique[b], paths[other, o, t]]
                             if va > best:
                                 best = va
                             if vb > best:
                                 best = vb
                         score[a, b] += best
             elif roles[m] == 2:
-                # child: homologue slot s of latent 0 (paternal) or r of latent 1 (maternal)
                 for slot in range(2):
-                    for a in range(T):
-                        ua = tc[a, t]
+                    for a in range(count):
                         acc = 0.0
                         for o in range(2):
-                            vo = tc[paths[other, o, t], t]
                             if latent == 0:
                                 g = gammas[m, t, 2 * slot + o]
                             else:
                                 g = gammas[m, t, 2 * o + slot]
                             if g > 0.0:
                                 if latent == 0:
-                                    acc += g * math.log(_emit(x, y, ua, vo, delta))
+                                    acc += g * loge[m, t, unique[a], paths[other, o, t]]
                                 else:
-                                    acc += g * math.log(_emit(x, y, vo, ua, delta))
-                        if slot == 0:
-                            for b in range(T):
-                                score[a, b] += acc
-                        else:
-                            for b in range(T):
-                                score[b, a] += acc
+                                    acc += g * loge[m, t, paths[other, o, t], unique[a]]
+                        accs[slot, a] = acc
+                for a in range(count):
+                    for b in range(count):
+                        score[a, b] += accs[0, a]
+                        score[a, b] += accs[1, b]
         if t == 0:
             for a in range(T):
                 for b in range(T):
-                    V[a, b] = score[a, b] - 2.0 * math.log(T)
+                    V[a, b] = score[classes[a], classes[b]] - 2.0 * math.log(T)
             continue
-        th = _switch(theta[t - 1], floor)
-        ls = math.log(1.0 - th)
-        lc = math.log(th / (T - 1)) if T > 1 else NEG
-        rowmax = np.empty(T)
-        rowarg = np.empty(T, dtype=np.int64)
-        colmax = np.empty(T)
-        colarg = np.empty(T, dtype=np.int64)
-        gmax = NEG
-        ga = 0
-        gb = 0
-        for a in range(T):
-            rowmax[a] = NEG
-            colmax[a] = NEG
+        # Expand into the next-value buffer. Each transition reads its own cell's score before replacing it.
         for a in range(T):
             for b in range(T):
-                v = V[a, b]
-                if v > rowmax[a]:
-                    rowmax[a] = v
-                    rowarg[a] = b
-                if v > colmax[b]:
-                    colmax[b] = v
-                    colarg[b] = a
-                if v > gmax:
-                    gmax = v
-                    ga = a
-                    gb = b
-        NV = np.empty((T, T))
-        for a in range(T):
-            for b in range(T):
-                best = V[a, b] + 2.0 * ls
-                arg = a * T + b
-                c = rowmax[a] + ls + lc
-                if c > best:
-                    best = c
-                    arg = a * T + rowarg[a]
-                c = colmax[b] + lc + ls
-                if c > best:
-                    best = c
-                    arg = colarg[b] * T + b
-                c = gmax + 2.0 * lc
-                if c > best:
-                    best = c
-                    arg = ga * T + gb
-                NV[a, b] = best + score[a, b]
-                back[t, a, b] = arg
-        V = NV
+                NV[a, b] = score[classes[a], classes[b]]
+        ls = transition[t - 1, 0]
+        lc = transition[t - 1, 1]
+        if T == 6:
+            _pair_transition(V, NV, back, t, ls, lc, rowmax, rowarg, colmax, colarg, NV, 6)
+        elif T == 8:
+            _pair_transition(V, NV, back, t, ls, lc, rowmax, rowarg, colmax, colarg, NV, 8)
+        else:
+            _pair_transition(V, NV, back, t, ls, lc, rowmax, rowarg, colmax, colarg, NV, T)
+        V, NV = NV, V
     # traceback (first maximum in (a, b) order)
     out = np.empty((2, B), dtype=np.int64)
     best = NEG
@@ -435,6 +566,7 @@ def _half_flip(tc, cls, known, paths, latent, theta, floor, delta, gains):
     B = cls.shape[0]
     fw = np.empty((B, 2, T))
     scale = np.empty(B)
+    emissions = np.empty((B, 2, T))
     for t in range(B):
         if t == 0:
             for sl in range(2):
@@ -442,6 +574,7 @@ def _half_flip(tc, cls, known, paths, latent, theta, floor, delta, gains):
                     e = 1.0
                     if known[t]:
                         e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], delta)
+                    emissions[t, sl, f] = e
                     fw[t, sl, f] = 0.5 / T * e
         else:
             th = _switch(theta[t - 1], floor)
@@ -456,6 +589,7 @@ def _half_flip(tc, cls, known, paths, latent, theta, floor, delta, gains):
                     e = 1.0
                     if known[t]:
                         e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], delta)
+                    emissions[t, sl, f] = e
                     fw[t, sl, f] = (sel * (1.0 - th) + (tot - sel) * ch) * e
         z = 0.0
         for sl in range(2):
@@ -477,10 +611,7 @@ def _half_flip(tc, cls, known, paths, latent, theta, floor, delta, gains):
         ch = th / (T - 1) if T > 1 else 0.0
         for sl in range(2):
             for f in range(T):
-                e = 1.0
-                if known[t]:
-                    e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], delta)
-                g[sl, f] = e * bw[sl, f]
+                g[sl, f] = emissions[t, sl, f] * bw[sl, f]
         # mosaic step from t - 1: mixed[s, f'] = sum_f fw[t-1, s, f] Mos(f, f')
         for sl in range(2):
             tot = 0.0
@@ -513,29 +644,32 @@ def _half_flip(tc, cls, known, paths, latent, theta, floor, delta, gains):
                 bw[sl, f] = (mo[sl, f] * st + mo[1 - sl, f] * th) / scale[t]
 
 
-@kernel(overloads=OVERLOADS["family_transmission.flip_gains"], cache=True, nogil=True)
-def flip_gains(tc, mcls, mknown, roles, paths, latent, theta, floor, delta):
-    """Exact log-likelihood change of swapping the two homologue labels of one latent diploid on every bin after
-    boundary t (t = 0 .. B-2): the children's selector transition on that latent inverts at t (exact through the
+@kernel(overloads=OVERLOADS["family_transmission._flip_gains_both"], cache=True, nogil=True)
+def _flip_gains_both(tc, mcls, mknown, roles, paths, theta, floor, delta):
+    """Exact log-likelihood changes [latent, boundary] for both latent diploids, sharing selector messages.
+
+    Swapping homologue labels on every bin after boundary t (t = 0 .. B-2): the children's selector transition on that latent inverts at t (exact through the
     pairwise posteriors, the likelihood being linear in one transition matrix) and the latent's mosaic prior
     changes at t; direct observations are unordered and unchanged; half children of the latent add their own
     exact selector term (_half_flip)."""
     T = tc.shape[0]
     B = tc.shape[1]
-    gains = np.zeros(B - 1)
+    gains = np.zeros((2, B - 1))
     fw = np.empty((B, 4))
     scale = np.empty(B)
     bw = np.empty((B, 4))
-    e = np.empty(4)
+    emissions = np.empty((B, 4))
     for m in range(len(roles)):
-        if roles[m] == 5 + latent:
-            _half_flip(tc, mcls[m], mknown[m], paths, latent, theta, floor, delta, gains)
+        if roles[m] >= 5:
+            latent = roles[m] - 5
+            _half_flip(tc, mcls[m], mknown[m], paths, latent, theta, floor, delta, gains[latent])
             continue
         if roles[m] != 2:
             continue
         cls = mcls[m]
         known = mknown[m]
         for t in range(B):
+            e = emissions[t]
             _emis4(tc, cls, known, paths, t, delta, e)
             if t == 0:
                 for q in range(4):
@@ -556,12 +690,13 @@ def flip_gains(tc, mcls, mknown, roles, paths, latent, theta, floor, delta):
         for q in range(4):
             bw[B - 1, q] = 1.0
         for t in range(B - 1, 0, -1):
-            _emis4(tc, cls, known, paths, t, delta, e)
+            e = emissions[t]
             th = _switch(theta[t - 1], floor)
             st = 1.0 - th
             ratio_stay = th / st
             ratio_switch = st / th
-            num = 0.0
+            num0 = 0.0
+            num1 = 0.0
             for p in range(4):
                 acc = 0.0
                 for q in range(4):
@@ -570,30 +705,39 @@ def flip_gains(tc, mcls, mknown, roles, paths, latent, theta, floor, delta):
                     w = (st if same_s else th) * (st if same_r else th)
                     x = w * e[q] * bw[t, q]
                     acc += x
-                    same = same_s if latent == 0 else same_r
-                    num += fw[t - 1, p] * x * (ratio_stay if same else ratio_switch)
+                    num0 += fw[t - 1, p] * x * (ratio_stay if same_s else ratio_switch)
+                    num1 += fw[t - 1, p] * x * (ratio_stay if same_r else ratio_switch)
                 bw[t - 1, p] = acc / scale[t]
             # sum_pq xi(p,q) r(p,q) = num / scale[t] (xi normalised)
-            gains[t - 1] += math.log(num / scale[t])
-    # prior change of the latent's own homologue paths at each boundary
-    if T > 1:
-        for t in range(B - 1):
-            th = _switch(theta[t], floor)
-            ls = math.log(1.0 - th)
-            lc = math.log(th / (T - 1))
-            a0, b0 = paths[latent, 0, t], paths[latent, 1, t]
-            a1, b1 = paths[latent, 0, t + 1], paths[latent, 1, t + 1]
-            old = (ls if a0 == a1 else lc) + (ls if b0 == b1 else lc)
-            new = (ls if a0 == b1 else lc) + (ls if b0 == a1 else lc)
-            gains[t] += new - old
+            gains[0, t - 1] += math.log(num0 / scale[t])
+            gains[1, t - 1] += math.log(num1 / scale[t])
+    for latent in range(2):
+        # prior change of the latent's own homologue paths at each boundary
+        if T > 1:
+            for t in range(B - 1):
+                th = _switch(theta[t], floor)
+                ls = math.log(1.0 - th)
+                lc = math.log(th / (T - 1))
+                a0, b0 = paths[latent, 0, t], paths[latent, 1, t]
+                a1, b1 = paths[latent, 0, t + 1], paths[latent, 1, t + 1]
+                old = (ls if a0 == a1 else lc) + (ls if b0 == b1 else lc)
+                new = (ls if a0 == b1 else lc) + (ls if b0 == a1 else lc)
+                gains[latent, t] += new - old
     return gains
 
 
+@kernel(overloads=OVERLOADS["family_transmission.flip_gains"], cache=True, nogil=True)
+def flip_gains(tc, mcls, mknown, roles, paths, latent, theta, floor, delta):
+    """Exact label-flip gains for one latent; both selector terms share the same messages."""
+    return _flip_gains_both(tc, mcls, mknown, roles, paths, theta, floor, delta)[latent]
+
+
 @kernel(overloads=OVERLOADS["family_transmission.fit"], cache=True, nogil=True)
-def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, delta, max_iter, alone_inc, flex, allowed, lpr):
+def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, delta, max_iter, alone_inc, flex, allowed, lpr, loge,
+        representatives, transition):
     """MAP-EM over the latent paths of the latent diploids flagged in which[2] and the roles of flexible members.
-    lpr[5] are the role log priors (0, 1 direct of latent 0/1; 2 child; 4 outsider); a flexible member may take
-    the roles flagged in allowed[5]; fixed members pay no role prior. Returns (log lik, inc[B], paths, iterations,
+    lpr[7] are the role log priors (0, 1 direct; 2 child; 4 outsider; 5, 6 half child); a flexible member may take
+    the roles flagged in allowed[7]; fixed members pay no role prior. Returns (log lik, inc[B], paths, iterations,
     roles). Monotone: no step lowers log P(data, paths, roles)."""
     B = tc.shape[1]
     paths = paths0.copy()
@@ -604,38 +748,76 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, delta, max_iter, 
         if flex[m]:
             role_lp[m] = lpr[roles[m]]
     gammas = np.zeros((n, B, 4))
+    gamma_valid = np.zeros(n, dtype=np.bool_)
+    half_valid = np.zeros(n, dtype=np.bool_)
     T = tc.shape[0]
     hgam = np.zeros((n, B, 2, T))
     inc = np.zeros(B)
-    current = evaluate(tc, mcls, mknown, roles, paths, which, theta, floor, delta, inc, alone_inc, role_lp)
+    valid = np.zeros((n, 7), dtype=np.bool_)
+    values = np.zeros((n, 7))
+    increments = np.zeros((n, 7, B))
+    # The initial evaluation and first E step share their forward pass.
+    for m in range(n):
+        r = roles[m]
+        if r == 2:
+            values[m, r] = _child_fb(tc, mcls[m], mknown[m], paths, theta, floor, delta, True, gammas[m],
+                                      increments[m, r])
+            valid[m, r] = True
+            gamma_valid[m] = True
+        elif r >= 5:
+            values[m, r] = _half_fb(tc, mcls[m], mknown[m], paths, r - 5, theta, floor, delta, True, hgam[m],
+                                     increments[m, r])
+            valid[m, r] = True
+            half_valid[m] = True
+    current = _evaluate_cached(tc, mcls, mknown, roles, paths, which, theta, floor, delta, inc, alone_inc, role_lp,
+                               valid, values, increments, transition)
     it = 0
     for it in range(max_iter):
         improved = False
         for latent in range(2):
             if not which[latent]:
                 continue
-            junk = np.zeros(B)
             for m in range(n):
-                if roles[m] == 2:
-                    _child_fb(tc, mcls[m], mknown[m], paths, theta, floor, delta, True, gammas[m], junk)
-                elif roles[m] == 5 + latent:
-                    _half_fb(tc, mcls[m], mknown[m], paths, latent, theta, floor, delta, True, hgam[m], junk)
-            new = _mstep(tc, mcls, mknown, roles, gammas, paths, latent, theta, floor, delta, False, hgam)
+                if roles[m] == 2 and not gamma_valid[m]:
+                    increments[m, 2, :] = 0.0
+                    values[m, 2] = _child_fb(tc, mcls[m], mknown[m], paths, theta, floor, delta, True, gammas[m],
+                                              increments[m, 2])
+                    valid[m, 2] = True
+                    gamma_valid[m] = True
+                elif roles[m] == 5 + latent and not half_valid[m]:
+                    increments[m, 5 + latent, :] = 0.0
+                    values[m, 5 + latent] = _half_fb(tc, mcls[m], mknown[m], paths, latent, theta, floor, delta,
+                                                     True, hgam[m], increments[m, 5 + latent])
+                    valid[m, 5 + latent] = True
+                    half_valid[m] = True
+            new = _mstep(tc, mcls, mknown, roles, gammas, paths, latent, theta, floor, delta, False, hgam, loge,
+                         representatives, transition)
+            if np.array_equal(new, paths[latent]):
+                continue  # the exact same paths have the exact same evaluation
             trial = paths.copy()
             trial[latent, 0, :] = new[0]
             trial[latent, 1, :] = new[1]
             tinc = np.zeros(B)
-            value = evaluate(tc, mcls, mknown, roles, trial, which, theta, floor, delta, tinc, alone_inc, role_lp)
+            tvalid = valid.copy()
+            tvalues = values.copy()
+            tincrements = increments.copy()
+            tvalid[:, 2] = False
+            tvalid[:, latent] = False
+            tvalid[:, 5 + latent] = False
+            value = _evaluate_cached(tc, mcls, mknown, roles, trial, which, theta, floor, delta, tinc, alone_inc,
+                                     role_lp, tvalid, tvalues, tincrements, transition)
             if value > current + 1e-9:
                 paths = trial
+                valid, values, increments = tvalid, tvalues, tincrements
+                gamma_valid[:] = False
+                for m in range(n):
+                    if roles[m] == 5 + latent:
+                        half_valid[m] = False
                 current = value
                 inc = tinc
                 improved = True
         if not improved:
             # roles of flexible members given the paths
-            junk = np.zeros(B)
-            dummy = np.empty((1, 4))
-            dummy3 = np.empty((1, 1, 1))
             trial_roles = roles.copy()
             trial_lp = role_lp.copy()
             for m in range(n):
@@ -646,40 +828,43 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, delta, max_iter, 
                 for r in (2, 0, 1, 4, 5, 6):
                     if not allowed[r]:
                         continue
-                    if r == 2:
-                        v = _child_fb(tc, mcls[m], mknown[m], paths, theta, floor, delta, False, dummy, junk)
-                    elif r == 4:
-                        v = alone_inc[m].sum()
-                    elif r >= 5:
-                        if not which[r - 5]:
-                            continue
-                        v = _half_fb(tc, mcls[m], mknown[m], paths, r - 5, theta, floor, delta, False, dummy3, junk)
-                    else:
-                        if not which[r]:
-                            continue
-                        v = _direct_inc(tc, mcls[m], mknown[m], paths, r, delta, junk)
+                    if r >= 5 and not which[r - 5]:
+                        continue
+                    if r < 2 and not which[r]:
+                        continue
+                    v = _member_value(tc, mcls, mknown, paths, theta, floor, delta, alone_inc, m, r,
+                                      valid, values, increments)
                     v += lpr[r]
                     if v > best_v + 1e-9:
                         best_v = v
                         best_r = r
                 trial_roles[m] = best_r
                 trial_lp[m] = lpr[best_r]
-            tinc = np.zeros(B)
-            value = evaluate(tc, mcls, mknown, trial_roles, paths, which, theta, floor, delta, tinc, alone_inc, trial_lp)
-            if value > current + 1e-9:
-                roles = trial_roles
-                role_lp = trial_lp
-                current = value
-                inc = tinc
-                improved = True
+            if not np.array_equal(trial_roles, roles):
+                tinc = np.zeros(B)
+                value = _evaluate_cached(tc, mcls, mknown, trial_roles, paths, which, theta, floor, delta, tinc,
+                                         alone_inc, trial_lp, valid, values, increments, transition)
+                if value > current + 1e-9:
+                    roles = trial_roles
+                    role_lp = trial_lp
+                    gamma_valid[:] = False
+                    half_valid[:] = False
+                    current = value
+                    inc = tinc
+                    improved = True
         if not improved:
-            # label-flip moves (one per latent per round), then back to EM
+            # The two latent flip gains share messages until an accepted flip changes the paths.
+            flips_valid = False
+            gains = np.empty((2, 0))
             for latent in range(2):
                 if not which[latent]:
                     continue
                 if B < 2:
                     continue  # a one-bin segment has no boundary to flip at
-                g = flip_gains(tc, mcls, mknown, roles, paths, latent, theta, floor, delta)
+                if not flips_valid:
+                    gains = _flip_gains_both(tc, mcls, mknown, roles, paths, theta, floor, delta)
+                    flips_valid = True
+                g = gains[latent]
                 t = np.argmax(g)
                 if g[t] > 1e-6:
                     trial = paths.copy()
@@ -687,10 +872,22 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, delta, max_iter, 
                         trial[latent, 0, b] = paths[latent, 1, b]
                         trial[latent, 1, b] = paths[latent, 0, b]
                     tinc = np.zeros(B)
-                    value = evaluate(tc, mcls, mknown, roles, trial, which, theta, floor, delta, tinc, alone_inc,
-                                     role_lp)
+                    tvalid = valid.copy()
+                    tvalues = values.copy()
+                    tincrements = increments.copy()
+                    tvalid[:, 2] = False
+                    tvalid[:, latent] = False
+                    tvalid[:, 5 + latent] = False
+                    value = _evaluate_cached(tc, mcls, mknown, roles, trial, which, theta, floor, delta, tinc,
+                                             alone_inc, role_lp, tvalid, tvalues, tincrements, transition)
                     if value > current + 1e-9:
                         paths = trial
+                        flips_valid = False
+                        valid, values, increments = tvalid, tvalues, tincrements
+                        gamma_valid[:] = False
+                        for m in range(n):
+                            if roles[m] == 5 + latent:
+                                half_valid[m] = False
                         current = value
                         inc = tinc
                         improved = True
@@ -700,13 +897,14 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, delta, max_iter, 
 
 
 @kernel(overloads=OVERLOADS["family_transmission.init_latent"], cache=True, nogil=True)
-def init_latent(tc, mcls, mknown, roles, paths, latent, theta, floor, delta):
+def init_latent(tc, mcls, mknown, roles, paths, latent, theta, floor, delta, loge, representatives, transition):
     """Initial pair path of one latent diploid: the M step under uniform member selector posteriors."""
     n = len(roles)
     B = tc.shape[1]
     gammas = np.full((n, B, 4), 0.25)
     hgam = np.zeros((n, B, 2, tc.shape[0]))
-    return _mstep(tc, mcls, mknown, roles, gammas, paths, latent, theta, floor, delta, True, hgam)
+    return _mstep(tc, mcls, mknown, roles, gammas, paths, latent, theta, floor, delta, True, hgam, loge,
+                  representatives, transition)
 
 
 def _closest(paths, latent_pair, cpairs):
@@ -730,8 +928,22 @@ def _complement(p, cpairs):
     return q
 
 
+# A caller-owned map factory: mapper(width) -> map(function, items), the results in input order, on up to ``width``
+# threads (the fits release the interpreter lock). The stage supplies it (science owns no concurrency); every
+# function here reduces the results in input order, so they depend neither on the factory nor on ``width``.
+Mapper = Callable[[int], Callable]
+
+
+def _serial(function, items):
+    return [function(item) for item in items]
+
+
+def _maps(mapper: Mapper | None, width: int):
+    return mapper(width) if mapper is not None and width > 1 else _serial
+
+
 def family_models(tc, mcls, mknown, cpairs, theta, floor, delta, max_iter=30, rounds=3, rho=0.01, n_random=3,
-                  seed=None):
+                  seed=None, width=1, mapper=None):
     """Profile log likelihoods and per-bin increments of PAR, REL and UNR for members [C, S] + witnesses.
 
     cpairs int64 [2, B]: C's scheduled trajectory pair. S (member 1) is always a child; each witness (members 2..)
@@ -740,9 +952,17 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, delta, max_iter=30, ro
     (a relative that is not a sib). Every model is refitted from starts derived from every other model's best
     latent paths (direct, homologues crossed between the diploids, maternal pair swapped, and for PAR the
     complement of C's homologues) until no model improves (at most ``rounds``). Returns dict(name -> (loglik,
-    inc[B], paths, iterations, roles))."""
+    inc[B], paths, iterations, roles)).
+
+    ``width``, ``mapper``: threads for the search's independent fits (each member alone, the member-seeded starts,
+    and each round's starts of one model, which are fixed before that model's loop), and the caller's map factory
+    for them (None: in sequence). They are fitted at once and compared in their sequential order, so the result
+    does not depend on ``width``. The adaptive steps stay sequential: adopt prefetches the moves it can know in
+    advance onto spare threads (only with more than one thread), perturbed draws one start at a time."""
+    map_fits = _maps(mapper, width)
     B = tc.shape[1]
     n = len(mcls)
+    loge, representatives, transition = _prepare(tc, mcls, mknown, theta, floor, delta)
     k = n - 1
     yes = np.array([True, True])
     one = np.array([True, False])
@@ -754,11 +974,14 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, delta, max_iter=30, ro
     nflex = np.zeros(n, dtype=np.bool_)
     lpr0 = np.zeros(7)
     allow0 = np.zeros(7, dtype=np.bool_)
-    for m in range(n):
+    def alone(m):
         q = p0.copy()
         r = np.full(n, 3, dtype=np.int64)
         r[m] = 0
-        res = fit(tc, mcls, mknown, r, q, one, theta, floor, delta, max_iter, none_inc, nflex, allow0, lpr0)
+        return fit(tc, mcls, mknown, r, q, one, theta, floor, delta, max_iter, none_inc, nflex, allow0, lpr0, loge,
+                   representatives, transition)
+
+    for m, res in enumerate(map_fits(alone, range(n))):
         alone_inc[m] = res[1]
         alone_paths[m] = res[2][0]
     calone = (float(alone_inc[0].sum()), alone_inc[0].copy(), None, 1, None)
@@ -776,11 +999,31 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, delta, max_iter=30, ro
     p0[0] = cpairs
     p0[1] = cpairs
     pp = p0.copy()
-    pp[1] = init_latent(tc, mcls, mknown, roles["PAR"], pp, 1, theta, floor, delta)
+    pp[1] = init_latent(tc, mcls, mknown, roles["PAR"], pp, 1, theta, floor, delta, loge, representatives,
+                        transition)
+
+    fitted = {}
 
     def run(name, start, start_roles):
-        return fit(tc, mcls, mknown, start_roles, start.copy(), yes, theta, floor, delta, max_iter, alone_inc, flex,
-                   allowed[name], lpr)
+        # All other fit inputs are fixed for this family search. Keep exact bytes, including the roles, so only
+        # identical deterministic fits are reused. Cached arrays are read only throughout the search.
+        key = (name, start.tobytes(), start_roles.tobytes())
+        if key not in fitted:
+            fitted[key] = fit(tc, mcls, mknown, start_roles, start, yes, theta, floor, delta, max_iter, alone_inc,
+                              flex, allowed[name], lpr, loge, representatives, transition)
+        return fitted[key]
+
+    def run_all(requests):
+        # Fit every (name, start, roles) not yet fitted at once (distinct keys, first occurrence), then serve all in
+        # order: the same fits as calling run() on each in turn.
+        keys = [(name, start.tobytes(), start_roles.tobytes()) for name, start, start_roles in requests]
+        missing = {}
+        for key, request in zip(keys, requests, strict=True):
+            if key not in fitted and key not in missing:
+                missing[key] = request
+        for key, value in zip(missing, map_fits(lambda r: run(*r), list(missing.values())), strict=True):
+            fitted[key] = value
+        return [fitted[key] for key in keys]
 
     best = dict(PAR=run("PAR", pp, roles["PAR"]))
 
@@ -814,6 +1057,25 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, delta, max_iter=30, ro
         res0 = best[name]
         changed = False
         targets = (1,) if name == "PAR" else (0, 1)
+        if map_fits is not _serial:
+            # Prefetch on spare threads: the direct-observation moves depend only on res0, and the half-child moves
+            # on best[name], which is res0 unless a move below improves it. Fitting them now only fills run()'s
+            # cache; the sequential loop below is unchanged, so the result is the same (an improvement makes some
+            # prefetched half-child fits unused).
+            requests = []
+            for m in range(2, n):
+                for j in targets:
+                    q = res0[2].copy()
+                    q[j] = alone_paths[m]
+                    r = res0[4].copy()
+                    r[m] = j
+                    requests.append((name, q, r))
+                for j in (0, 1):
+                    r = res0[4].copy()
+                    if r[m] != 5 + j:
+                        r[m] = 5 + j
+                        requests.append((name, res0[2].copy(), r))
+            run_all(requests)
         for m in range(2, n):
             for j in targets:
                 q = res0[2].copy()
@@ -840,21 +1102,21 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, delta, max_iter=30, ro
         # v7: member-seeded starts (S3): latent diploids initialised at members' own best mosaics, so the
         # alternatives are not reached only through PAR's solution
         k_seed = min(n, 4)
+        requests = []
         for name in ("UNR", "REL"):
             for i in range(k_seed):
                 for j in range(i + 1, k_seed):
                     q = np.empty_like(p0)
                     q[0] = alone_paths[i]
                     q[1] = alone_paths[j]
-                    res = run(name, q, roles[name])
-                    if res[0] > best.get(name, (-np.inf,))[0] + 1e-9:
-                        best[name] = res
+                    requests.append((name, q, roles[name]))
         for m in range(1, k_seed):
             q = p0.copy()
             q[1] = alone_paths[m]
-            res = run("PAR", q, roles["PAR"])
-            if res[0] > best["PAR"][0] + 1e-9:
-                best["PAR"] = res
+            requests.append(("PAR", q, roles["PAR"]))
+        for (name, _, _), res in zip(requests, run_all(requests), strict=True):
+            if res[0] > best.get(name, (-np.inf,))[0] + 1e-9:
+                best[name] = res
 
     def perturbed(rng):
         # v7: deterministic random block perturbations of each model's best paths (S3), seeded from the data
@@ -881,12 +1143,15 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, delta, max_iter=30, ro
     for _ in range(rounds):
         changed = False
         for name in ("UNR", "REL", "PAR"):
+            # this model's starts are fixed before its loop: fit the untried ones at once, compare them in order
+            starts = []
             for s0 in starts_for(name):
                 key = (name, s0.tobytes())
                 if key in tried:
                     continue
                 tried.add(key)
-                res = run(name, s0, roles[name])
+                starts.append(s0)
+            for res in run_all([(name, s0, roles[name]) for s0 in starts]):
                 if name not in best or res[0] > best[name][0] + 1e-9:
                     best[name] = res
                     changed = True
@@ -930,51 +1195,77 @@ def segments(theta: np.ndarray, unit_morgans: float, tail_morgans: float) -> tup
     return segment, lengths
 
 
-def segment_models(tc, mcls, mknown, cpairs, theta, floor, delta, ft, seed):
+def segment_models(tc, mcls, mknown, cpairs, theta, floor, delta, ft, seed, width=1, mapper=None):
     """(PAR, REL, UNR) profile log likelihoods of one segment for members [C, S, witnesses...] (UNR includes C's own
     mosaic): the best, per model, of two searches from data-derived starts, the witnesses ordered by a digest of
     each witness's painted classes and known bits and in the reverse of that order. Each search only raises the
     profile, so the value is the better of two local optima; it depends neither on the input witness order nor on
-    sample names (witnesses with identical data are interchangeable)."""
+    sample names (witnesses with identical data are interchangeable).
+
+    ``width``, ``mapper``: threads for this segment and the caller's map factory (family_models). The two searches
+    are independent and run at once, each with half of the threads for its own independent fits; the result does
+    not depend on ``width``."""
     n = mcls.shape[0]
     order = sorted(range(2, n), key=lambda w: hashlib.sha256(np.ascontiguousarray(mcls[w]).tobytes()
                                                              + np.ascontiguousarray(mknown[w]).tobytes()).digest())
-    best = None
-    for witnesses in ((order, order[::-1]) if n > 3 else (order,)):
+    orders = (order, order[::-1]) if n > 3 else (order,)
+
+    def search(witnesses):
         idx = np.asarray([0, 1] + witnesses, dtype=np.int64)
         res = family_models(tc, np.ascontiguousarray(mcls[idx]), np.ascontiguousarray(mknown[idx]), cpairs, theta,
                             floor, delta, max_iter=ft.maximum_iterations, rounds=ft.start_rounds, rho=ft.role_prior,
-                            n_random=ft.random_starts, seed=seed)
-        value = (res["PAR"][0], res["REL"][0], res["C"][0] + res["UNR"][0])
+                            n_random=ft.random_starts, seed=seed, width=max(1, width // len(orders)),
+                            mapper=mapper)
+        return (res["PAR"][0], res["REL"][0], res["C"][0] + res["UNR"][0])
+
+    best = None
+    for value in _maps(mapper, min(width, len(orders)))(search, orders):
         best = value if best is None else tuple(max(a, b) for a, b in zip(best, value, strict=True))
     return best
+
+
+def component_plan(schedule, theta: np.ndarray, parameters) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """(trajectory classes, the segment of every bin, the Morgans of every segment) of one component, or None when
+    the component has no bins. The plan does not depend on the edge: one per component serves every edge."""
+    if schedule.classes.shape[1] == 0:
+        return None
+    m = parameters.material
+    seg, lengths = segments(theta, m.unit_morgans, m.tail_morgans)
+    return _trajectory_classes(schedule), seg, lengths
+
+
+def segment_unit(schedule, plan, theta: np.ndarray, members: tuple[int, ...], u: int, parameters, delta: float,
+                 floor: float, width: int = 1, mapper: Mapper | None = None) -> tuple[float, float, float]:
+    """(PAR, REL, UNR) profile log likelihoods of segment ``u`` of one component for members (C, S, witnesses...).
+    Every segment of every component and edge is fitted independently of the others (segment_models): a caller may
+    fit them in any order, or at once on separate threads; ``width`` threads, mapped by the caller's ``mapper``,
+    serve this one segment's search."""
+    trajectories, seg, _ = plan
+    idx = np.asarray(members, dtype=np.int64)
+    bins = np.flatnonzero(seg == u)
+    lo, hi = int(bins[0]), int(bins[-1]) + 1
+    return segment_models(
+        np.ascontiguousarray(trajectories[:, lo:hi], dtype=np.int64),
+        np.ascontiguousarray(schedule.classes[idx, lo:hi], dtype=np.int64),
+        np.ascontiguousarray(schedule.known[idx, lo:hi], dtype=np.bool_),
+        np.ascontiguousarray(schedule.pairs[idx[0], lo:hi].T, dtype=np.int64),
+        np.array(theta[lo:hi - 1], dtype=np.float64, order="C", copy=True),
+        float(floor), float(delta), parameters.family_transmission, parameters.resampling.bootstrap_seed, width=width,
+        mapper=mapper,
+    )
 
 
 def score_component(schedule, theta: np.ndarray, members: tuple[int, ...], parameters, delta: float,
                     floor: float) -> tuple[np.ndarray, np.ndarray]:
     """(float64 [n, 3] PAR, REL, UNR profile log likelihoods, float64 [n] Morgans) of one component's segments for
-    members (C, S, witnesses...); every segment is fitted independently (segment_models)."""
-    from .junctions import ComponentSchedule  # noqa: F401  (type of ``schedule``)
-
-    ft = parameters.family_transmission
-    m = parameters.material
-    if schedule.classes.shape[1] == 0:
+    members (C, S, witnesses...): segment_unit of every segment, in sequence."""
+    plan = component_plan(schedule, theta, parameters)
+    if plan is None:
         return np.zeros((0, 3)), np.zeros(0)
-    trajectories = _trajectory_classes(schedule)
-    seg, lengths = segments(theta, m.unit_morgans, m.tail_morgans)
-    idx = np.asarray(members, dtype=np.int64)
+    lengths = plan[2]
     out = np.zeros((len(lengths), 3))
     for u in range(len(lengths)):
-        bins = np.flatnonzero(seg == u)
-        lo, hi = int(bins[0]), int(bins[-1]) + 1
-        out[u] = segment_models(
-            np.ascontiguousarray(trajectories[:, lo:hi], dtype=np.int64),
-            np.ascontiguousarray(schedule.classes[idx, lo:hi], dtype=np.int64),
-            np.ascontiguousarray(schedule.known[idx, lo:hi], dtype=np.bool_),
-            np.ascontiguousarray(schedule.pairs[idx[0], lo:hi].T, dtype=np.int64),
-            np.array(theta[lo:hi - 1], dtype=np.float64, order="C", copy=True),
-            float(floor), float(delta), ft, parameters.resampling.bootstrap_seed,
-        )
+        out[u] = segment_unit(schedule, plan, theta, members, u, parameters, delta, floor)
     return out, lengths
 
 

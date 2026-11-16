@@ -131,7 +131,9 @@ publications and computes unclaimed units: discovery and selection blocks,
 selection context refits, founder-completion ranges and their final gather,
 assembly batches, refinement components, painting and founder refit. A small
 founder completion is one whole-product unit. Painting and refit are whole-contig
-units. Each process finishes when the reconstruction cut through refit is complete.
+units. Each process finishes when the reconstruction cut is complete: the final
+assembly before the run's painting calibration exists, painting and refit after it
+(see [workflow mode](workflow.md)).
 Genome-wide stages keep their ordinary workflow; this command launches no nodes.
 
 Each invocation needs the memory of a standalone reconstruction at its declared

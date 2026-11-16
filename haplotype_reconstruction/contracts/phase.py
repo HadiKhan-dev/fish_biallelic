@@ -114,6 +114,7 @@ class PhasePainting:
     )
     robustness_epsilon: float = field(metadata={"role": "state", "axes": (), "units": "1", "dtype": "float64"})
     emission_log_floor: float = field(metadata={"role": "state", "axes": (), "units": "nats", "dtype": "float64"})
+    bins_per_reference_window: int = record_field("state", axes=(), units="bins", dtype="int64")
 
 
 @dataclass(frozen=True)

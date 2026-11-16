@@ -7,6 +7,8 @@ The sections below identify semantic units, not separately configurable pipeline
 <a id="material-units"></a>
 ## Material units and regimes
 
+Pedigree preparation, map-scale frames and projected evidence read painting/reference at the painting’s reference selected-site resolution. When the fine target equals the reference target, this is the fine painting itself. Both resolutions share the fine label-continuity outcome and the estimated contig genotype-outlier mass; reference-resolution copying chains are fitted separately. All pedigree bin constants keep their reference-bin units.
+
 The pedigree decides by the amount of material, never by a count of chromosomes, contigs or components.
 The genome axis is the working-map coordinate of every scored painting bin: contigs in configured order, painting
 components in map order. For a component's selector probabilities theta, each boundary adds the Haldane distance
@@ -295,7 +297,7 @@ Use painting’s tempered emissions and recorded label transitions for the order
 
 Implementation: [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/sources.py](../../haplotype_reconstruction/science/pedigree/sources.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
 
-Parameters by name: `robustness_epsilon`, `emission_log_floor`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `robustness_grid`, `emission_log_floor`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N B S²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -306,7 +308,7 @@ Start from the symmetrised source marginal and propagate selected-homologue orie
 
 Implementation: [science/pedigree/projection.py](../../haplotype_reconstruction/science/pedigree/projection.py).
 
-Parameters by name: `robustness_epsilon`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `robustness_grid`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N M S) for transmitted ALT, plus O(N B S²) posterior propagation; no extra state axis in the ALT calculation.
 

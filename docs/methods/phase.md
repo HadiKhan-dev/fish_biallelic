@@ -7,11 +7,11 @@ The sections below identify semantic units, not separately configurable pipeline
 <a id="fp01"></a>
 ## fp01 Component model inputs: bins, labels and tempered pair emissions (cache or recompute)
 
-Build symmetric pair emissions from the painting record’s own robustness, floor and site-correlation parameters. Use its packed cache or recompute the same binned emissions and design effect, including empty-information bins. Require painting/pedigree sample alignment. Both solves share these immutable pre-refit emissions; later allele refit does not change this ancestry objective.
+Build symmetric pair emissions using the painting record’s estimated robustness_epsilon and its floor and calibrated transition site correlation. Use its packed cache or recompute the same binned emissions and design effect, including empty-information bins. Require painting/pedigree sample alignment. Both solves share these immutable pre-refit emissions; later allele refit does not change this ancestry objective.
 
 Implementation: [contracts/phase.py](../../haplotype_reconstruction/contracts/phase.py), [science/painting/emissions.py](../../haplotype_reconstruction/science/painting/emissions.py), [science/phase/component.py](../../haplotype_reconstruction/science/phase/component.py), [stages/phase/tasks.py](../../haplotype_reconstruction/stages/phase/tasks.py), [science/phase/painting_inputs.py](../../haplotype_reconstruction/science/phase/painting_inputs.py), [stages/phase/records.py](../../haplotype_reconstruction/stages/phase/records.py).
 
-Parameters by name: `SITE_WINDOW`, `robustness_epsilon`, `emission_log_floor`, `emission_site_correlation`, `EMPTY_COMPONENT_BIN_SITES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `SITE_WINDOW`, `robustness_grid`, `emission_log_floor`, `divisor_grid`, `EMPTY_COMPONENT_BIN_SITES`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N S^2 B); O(N S^2 L_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -111,7 +111,9 @@ Find shared identity-junction candidates by distinct switching samples, counting
 
 Implementation: [science/phase/junctions.py](../../haplotype_reconstruction/science/phase/junctions.py), [science/phase/model.py](../../haplotype_reconstruction/science/phase/model.py).
 
-Parameters by name: `junction_min_samples`, `junction_pin_nats`, `junction_pin_bins`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+The pinning flank spans junction_pin_reference_bins reference windows, or that count times the painting’s reference-to-fine bin ratio in fine bins, stopping at parental label changes. Recomputed phase emissions use the same per-sample reference-window divisor as painting.
+
+Parameters by name: `junction_min_samples`, `junction_pin_nats`, `junction_pin_reference_bins`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N B); O(candidates x N); O(window S). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -90,13 +90,15 @@ def windowed_emissions(
     bin_stops: np.ndarray,
     config: PaintingParameters,
     *,
+    robustness_epsilon: float,
+    site_correlation: float,
     parts: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     sample_tile: int = 1,
     window_bytes: int = WINDOW_BYTES,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Gather bounded whole-bin windows and use the one scientific emission formula.
+    """Gather bounded whole-reference windows and use the one scientific emission formula.
 
-    Parts never split the design-effect denominator. Windows preserve every bin's
+    Parts and storage windows never split the reference-window denominator. Windows preserve every bin's
     ascending site accumulation, including its last short bin. Arrays and storage
     readers exercise the same route in forced-route tests.
     """
@@ -112,6 +114,7 @@ def windowed_emissions(
     if not len(bin_starts):
         return raw, flags, informative
     largest = int(np.max(bin_stops - bin_starts))
+    group = config.reference_snps_per_bin // config.snps_per_bin
     part_bins = np.arange(len(bin_starts), dtype=np.int64) if parts is None else np.asarray(parts[2], dtype=np.int64)
     if isinstance(likelihoods, WindowArray):
         # Flags are already a returned output. Fill them once before GL work so
@@ -132,6 +135,7 @@ def windowed_emissions(
     for sample_window in sample_windows:
         first_sample, last_sample = sample_window.start - start, sample_window.stop - start
         width = max(1, window_bytes // max(1, 25 * (last_sample - first_sample) * largest))
+        width = max(group, (width // group) * group)
         for first_bin in range(0, len(bin_starts), width):
             last_bin = min(len(bin_starts), first_bin + width)
             left, right = int(bin_starts[first_bin]), int(bin_stops[last_bin - 1])
@@ -147,7 +151,7 @@ def windowed_emissions(
             else:
                 values, seen = gather_sites(likelihoods, observed, sites[left:right], selection)
             # One kernel tempers the window into the batch's arrays: informative sites, the design
-            # effect of each whole bin and the parts' emissions, with no serial steps between them.
+            # effect of each whole reference window and the parts' emissions, with no serial steps between them.
             tempered_into(
                 values,
                 seen,
@@ -165,6 +169,7 @@ def windowed_emissions(
                 flags,
                 informative,
                 first_sample,
+                robustness_epsilon=robustness_epsilon, site_correlation=site_correlation,
             )
     return raw, flags, informative
 
@@ -205,6 +210,9 @@ def run_contig(
     *,
     evidence_identity: str,
     payload_identity: str,
+    robustness_epsilon: float,
+    site_correlation: float,
+    confidence_correlation: float | None = None,
     evidence: ContigEvidence | None = None,
     ties: TieSettings = _DEFAULT_TIES,
     threads: int = 1,
@@ -254,6 +262,8 @@ def run_contig(
                     census_sink=census_sink if census or ties.census is not None else None,
                     emission_builder=partial(_at_batch_boundary, partial(windowed_emissions, sample_tile=batch), batch),
                     progress=_Progress(file, expected),
+                    robustness_epsilon=robustness_epsilon, site_correlation=site_correlation,
+                    confidence_correlation=confidence_correlation,
                 )
 
             wall, cpu = time.perf_counter(), time.process_time()
@@ -266,6 +276,37 @@ def run_contig(
             diagnostics.update(wall_seconds=time.perf_counter() - wall, cpu_seconds=time.process_time() - cpu)
             publish(file, records.DIAGNOSTICS, expected, diagnostics)
             records.write(file, expected, result, summarise(result), evidence_identity=evidence_identity)
+        if records.reference_key(parameters) == records.REFERENCE:
+            reference_identity = records.reference_derivation(expected)
+            complete.update({key: reference_identity for key in (
+                records.REFERENCE, records.REFERENCE + "/summary", "identity/" + records.REFERENCE
+            )})
+            with claim(file, records.REFERENCE, reference_identity, blocking=False) as needed:
+                if needed:
+                    from functools import partial
+
+                    reference_parameters = replace(parameters, snps_per_bin=parameters.reference_snps_per_bin)
+                    batch = max(1, max(threads, max_threads or threads) if batch_samples is None else batch_samples)
+
+                    def compute_reference(source: ContigEvidence | WindowEvidence) -> Painting:
+                        if source.payload_identity != payload_identity:
+                            raise InvariantError("reference painting evidence payload binding differs")
+                        return paint_chromosome(
+                            materialise(assembly[1], assembly[0]), source, reference_parameters, genetic_map,
+                            batch_samples=batch, reverse=ties.reverse, emission_cache_bytes=emission_cache_bytes,
+                            emission_builder=partial(_at_batch_boundary, partial(windowed_emissions, sample_tile=batch), batch),
+                            progress=_Progress(file, reference_identity), label_continuity=result.label_continuity,
+                            robustness_epsilon=robustness_epsilon, site_correlation=site_correlation,
+                            confidence_correlation=confidence_correlation,
+                        )
+
+                    if evidence is None:
+                        with read_evidence(file, evidence_identity) as source:
+                            reference = compute_reference(source)
+                    else:
+                        reference = compute_reference(evidence)
+                    records.write(file, reference_identity, reference, summarise(reference),
+                                  evidence_identity=evidence_identity, key=records.REFERENCE)
         mark_complete(file, "painting", complete)
         return result
 
@@ -283,7 +324,7 @@ def run(
     *,
     team: int = 1,
     cores: int = 1,
-) -> str:
+) -> dict[RecordKey, str]:
     """Bind assembly's checked final assembly to painting's window-capable contig action."""
     from ..assembly import records as assembly_records
     from ..painting.tasks import run_contig
@@ -298,6 +339,8 @@ def run(
     from ...store.protocol import bound_payload_identity
 
     payload = bound_payload_identity(file)
+    from . import calibration_records
+    calibration = required_product(reader, calibration_records, "calibration", None)
     expected = records.expected(store, reader.manifest, product="painting", contig=contig).identity
     run_contig(
         file,
@@ -307,19 +350,33 @@ def run(
         resolved.parameters.painting,
         evidence_identity=evidence_id,
         payload_identity=payload,
+        robustness_epsilon=calibration["robustness_epsilon"],
+        site_correlation=calibration["path_correlation"],
+        confidence_correlation=calibration["confidence_correlation"],
         ties=ties,
         threads=team,
         max_threads=cores,
         census=ties.census is not None,
     )
-    return expected
+    identities = {RecordKey(contig, key): expected for key in (
+        records.PAINTING, records.SUMMARY, records.IDENTITY
+    )}
+    if records.reference_key(resolved.parameters.painting) == records.REFERENCE:
+        reference = records.expected(store, reader.manifest, product="reference", contig=contig)
+        identities.update({RecordKey(contig, key): reference.identity for key in (
+            records.REFERENCE, records.REFERENCE + "/summary", "identity/" + records.REFERENCE
+        )})
+    return identities
 
 
 def task(key, context: StageRun) -> Task:
     """Declare painting's production window-capable contig action."""
+    outputs = (records.PAINTING, records.SUMMARY, records.IDENTITY)
+    if records.reference_key(context.resolved.parameters.painting) == records.REFERENCE:
+        outputs += (records.REFERENCE, records.REFERENCE + "/summary", "identity/" + records.REFERENCE)
     return Task(
         key, run, (context.root, key.scope, context.resolved, context.maps, context.ties),
         kwargs={"cores": context.cores},
-        outputs=tuple(RecordKey(key.scope, name) for name in ("painting", "painting/summary", "identity/painting")),
+        outputs=tuple(RecordKey(key.scope, name) for name in outputs),
         resources=ResourceRequest(1, context.cores), thread_argument="team",
     )

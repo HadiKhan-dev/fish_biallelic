@@ -76,7 +76,9 @@ def identities(
     Cache the result per process, keyed by every derivation input, so downstream readers do not
     repeatedly traverse thousands of block identities. Shared parts are converted to plain JSON data
     once for the key; ``jsonable`` returns that data unchanged."""
-    from ...core.digest import json_digest, jsonable
+    import hashlib
+
+    from ...core.digest import canonical_json, json_digest, jsonable
 
     code = jsonable(
         code_dependency_identity(("science.discovery", "stages.discovery.tasks", "stages.discovery.records"))
@@ -88,15 +90,28 @@ def identities(
     if cached is not None:
         return dict(cached)
 
-    def derive(unit: tuple[str, int]) -> str:
-        return Derivation(
+    def text(unit: tuple[str, int]) -> str:
+        """The canonical text whose digest is the unit's Derivation(...).identity."""
+        return canonical_json(jsonable(Derivation(
             code,
             dict(discovery=plain, contig=contig, unit=unit),
             policy,
             {"evidence": evidence_identity},
             ties.reverse,
             ties.keep,
-        ).identity
+        )))
+
+    # The units' derivations differ only in the unit: write the canonical text once around a marker unit and
+    # substitute each unit's own text. The digests are those of Derivation(...).identity; converting and
+    # serialising the whole derivation for each of ~10^3 blocks took about a second per contig in every process
+    # that reads any product downstream of discovery (ten seconds and more of a pedigree step on one CPU).
+    marker = ("\0unit\0", -1)
+    head, found, tail = text(marker).partition(canonical_json(list(marker)))
+    if not found or canonical_json(list(marker)) in tail:
+        raise InvariantError("discovery derivation text does not hold its unit exactly once")
+
+    def derive(unit: tuple[str, int]) -> str:
+        return hashlib.sha256((head + canonical_json(list(unit)) + tail).encode()).hexdigest()
 
     result = {PLAN: derive(("plan", blocks)), **{block_key(i): derive(("block", i)) for i in range(blocks)}}
     _IDENTITIES[key] = result

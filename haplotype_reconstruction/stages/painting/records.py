@@ -6,6 +6,8 @@ reconstructed panels and emissions. Raw paths and posteriors are never stored.
 
 from __future__ import annotations
 
+import os
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
@@ -25,6 +27,9 @@ from ...store.store import CheckpointStore
 
 __all__ = [
     "PAINTING",
+    "REFERENCE",
+    "reference_key",
+    "reference_derivation",
     "SUMMARY",
     "CACHE",
     "DIAGNOSTICS",
@@ -35,6 +40,7 @@ __all__ = [
     "load",
 ]
 PAINTING = "painting"
+REFERENCE = "painting/reference"
 SUMMARY = "painting/summary"
 CACHE = "painting/cache"
 DIAGNOSTICS = "painting/diagnostics"
@@ -44,7 +50,7 @@ Assembly = tuple[tuple[PreparedPanel, ...], tuple[FounderComponent, ...]]
 
 
 from ...science.painting.parameters import PaintingParameters
-from ...store.identity import code_dependency_identity
+from ...store.identity import code_dependency_identity, pin_generation
 from ...store.protocol import Derivation
 
 
@@ -57,6 +63,7 @@ def derivation(
     evidence_identity: str,
     payload_identity: str,
     map_identity: str,
+    calibration_identity: str,
     ties: TieSettings = TieSettings(),
     numerical_policy: NumericalPolicy | None = None,
 ) -> str:
@@ -65,9 +72,22 @@ def derivation(
         code_dependency_identity(("science.painting", "stages.painting.tasks", "stages.painting.records")),
         dict(parameters=parameters, contig=contig, sample_ids=sample_ids),
         numerical_policy or NumericalPolicy.current(),
-        dict(assembly_final=assembly_identity, evidence=evidence_identity, payload=payload_identity, map=map_identity),
+        dict(assembly_final=assembly_identity, evidence=evidence_identity, payload=payload_identity, map=map_identity, calibration=calibration_identity),
         tie_reverse=ties.reverse,
         tie_keep=ties.keep,
+    ).identity
+
+
+def reference_key(parameters: PaintingParameters) -> str:
+    """No second product when fine and reference grids coincide."""
+    return PAINTING if parameters.snps_per_bin == parameters.reference_snps_per_bin else REFERENCE
+
+
+def reference_derivation(fine_identity: str, *, numerical_policy: NumericalPolicy | None = None) -> str:
+    """The reference decode shares every fine input and its published label-continuity outcome."""
+    return Derivation(
+        code_dependency_identity(("stages.painting.records", "stages.painting.tasks")),
+        dict(product=REFERENCE), numerical_policy or NumericalPolicy.current(), dict(painting=fine_identity),
     ).identity
 
 
@@ -106,30 +126,32 @@ def write(
     summary: PaintingSummary,
     *,
     evidence_identity: str | None = None,
+    key: str = PAINTING,
 ) -> None:
     """Publish cache and summary first, scientific product last as the commit record."""
     publish(
         file,
-        CACHE,
+        key + "/cache",
         identity,
         {"schema": SCHEMA, "packed_emissions": [component.packed_emissions for component in painting.components]},
     )
-    publish(file, SUMMARY, identity, to_payload(summary))
-    publish(file, IDENTITY, identity, {"schema": SCHEMA, "identity": identity, "evidence_identity": evidence_identity})
-    publish(file, PAINTING, identity, Adapter().encode(painting))
+    publish(file, key + "/summary", identity, to_payload(summary))
+    publish(file, "identity/" + key, identity, {"schema": SCHEMA, "identity": identity, "evidence_identity": evidence_identity})
+    publish(file, key, identity, Adapter().encode(painting))
 
 
 def load(
-    file: CheckpointFile, identity: str, *, assembly: Assembly | None = None, emissions: bool = True
+    file: CheckpointFile, identity: str, *, assembly: Assembly | None = None, emissions: bool = True,
+    key: str = PAINTING,
 ) -> Painting | None:
     """Read a matching product; assembly reconstructs panels, emissions adds the cache."""
-    names = ("schema", "contig", "sample_ids", "parameters", "components", "label_continuity")
-    record = read_items(file, PAINTING, identity, names + (("rows",) if assembly is not None else ()))
+    names = ("schema", "contig", "sample_ids", "parameters", "components", "label_continuity", "robustness_epsilon", "emission_divisor", "path_divisor")
+    record = read_items(file, key, identity, names + (("rows",) if assembly is not None else ()))
     if record is None:
         return None
     payload = dict(record.payload)
     if emissions:
-        cache = resume(file, CACHE, identity)
+        cache = resume(file, key + "/cache", identity)
         if cache is not None:
             require_schema(cache.payload, SCHEMA)
             payload["packed_emissions"] = cache.payload["packed_emissions"]
@@ -177,7 +199,7 @@ class Reader:
     def items(self) -> tuple[str, ...] | None:
         if self.product == "summary":
             return None
-        names = ("schema", "contig", "sample_ids", "parameters", "components", "label_continuity")
+        names = ("schema", "contig", "sample_ids", "parameters", "components", "label_continuity", "robustness_epsilon", "emission_divisor", "path_divisor")
         return names + (("rows",) if self.assembly is not None else ())
 
     def decode(self, payload: Mapping[str, Any]) -> Painting | PaintingSummary | PaintingReport | tuple[TieSource, ...]:
@@ -196,6 +218,45 @@ class Reader:
         return painting
 
 
+# One contig's bound upstream per process: (run directory, contig, record-reuse pin generation) -> (manifest,
+# bound_upstream's value), and the lock its first binding holds. Published records never change, the manifest binds
+# every setting the identities derive from, and the pin generation the code identities (store.identity). Every contig's painting identity includes the run calibration's, which derives from every analysed contig's
+# assembly: unshared, each painting reader bound every contig again (contigs squared bindings, each a chain of header
+# reads back to discovery, in every process that reads paintings: a pedigree step, a report, an evaluation).
+_UPSTREAM: dict[tuple[str, str, int], tuple[Any, tuple[str, str, str, str, str]]] = {}
+_UPSTREAM_LOCKS: dict[tuple[str, str, int], threading.Lock] = {}
+_UPSTREAM_GUARD = threading.Lock()
+
+
+def bound_upstream(
+    store: CheckpointStore, manifest: Mapping[str, Any], contig: str
+) -> tuple[str, str, str, str, str] | None:
+    """(assembly key, assembly identity, evidence key, evidence identity, working-map identity) of one contig, from
+    its checked final-assembly and evidence readers; None while either is unpublished (never remembered).
+
+    A thread binding a contig holds that contig's lock, so concurrent readers of several contigs (threaded_each)
+    bind each contig once: the binding reads only its own contig, hence no thread waits while holding a lock that
+    another needs."""
+    from ..assembly import records as assembly_records
+    from ..evidence import records as evidence_records
+    from ..relatedness.working_map import map_identity
+
+    key = (os.path.realpath(store.root), contig, pin_generation())
+    with _UPSTREAM_GUARD:
+        lock = _UPSTREAM_LOCKS.setdefault(key, threading.Lock())
+    with lock:
+        cached = _UPSTREAM.get(key)
+        if cached is not None and (cached[0] is manifest or cached[0] == manifest):
+            return cached[1]
+        assembled = assembly_records.result_reader(store, manifest, product="assembly", contig=contig)
+        evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
+        if assembled is None or evidence is None:
+            return None
+        bound = (assembled.key, assembled.identity, evidence.key, evidence.identity, map_identity(store, manifest, contig))
+        _UPSTREAM[key] = (manifest, bound)
+        return bound
+
+
 def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
@@ -209,38 +270,47 @@ def expected(
     cache presence is independent of the scientific identity and its schema.
     """
     from ...science.painting.parameters import PaintingParameters
-    from ..assembly import records as assembly_records
-    from ..evidence import records as evidence_records
-    from ..relatedness.working_map import map_identity
 
     if contig is None or contig not in manifest["contigs"]:
         raise InputError("painting reader requires a bound contig")
-    if product not in ("painting", "summary", "tie_sources", "painting_report"):
+    if product not in ("painting", "reference", "summary", "tie_sources", "painting_report"):
         raise InputError(f"unsupported painting reader product {product!r}")
     file = store.contig(contig)
-    assembled = assembly_records.result_reader(store, manifest, product="assembly", contig=contig)
-    evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
-    if assembled is None or evidence is None:
+    bound = bound_upstream(store, manifest, contig)
+    if bound is None:
         raise InvariantError("painting requires published assembly and evidence")
+    assembly_key, assembly_identity, evidence_key, evidence_identity, working_map = bound
     # Identity checks read headers only; the assembly payload is decoded only when panels are wanted.
-    checked_assembly = read_items(file, assembled.key, assembled.identity, ("schema",))
-    checked_evidence = read_items(file, evidence.key, evidence.identity, ("schema",))
+    checked_assembly = read_items(file, assembly_key, assembly_identity, ("schema",))
+    checked_evidence = read_items(file, evidence_key, evidence_identity, ("schema",))
     if checked_assembly is None or checked_evidence is None:
         raise InvariantError("painting upstream publication is incomplete")
     parameters = from_payload(PaintingParameters, manifest["parameters"]["painting"])
     settings = manifest["ties"]
+    from . import calibration_records
+    calibrated = calibration_records.result_reader(store, manifest)
+    if calibrated is None:
+        raise InvariantError("painting requires run calibration; run haplotypes calibrate after all assemblies")
     expected_identity = derivation(
         parameters,
         contig=contig,
         sample_ids=tuple(manifest["sample_ids"]),
-        assembly_identity=assembled.identity,
-        evidence_identity=evidence.identity,
+        assembly_identity=assembly_identity,
+        evidence_identity=evidence_identity,
         payload_identity=bound_payload_identity(file),
-        map_identity=map_identity(store, manifest, contig),
+        map_identity=working_map,
+        calibration_identity=calibrated.identity,
         ties=TieSettings(reverse=bool(settings["reverse"]), keep=tuple(settings["keep"])),
         numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
     )
-    return Reader(expected_identity, product, key=SUMMARY if product == "summary" else PAINTING)
+    key = SUMMARY if product == "summary" else PAINTING
+    if product == "reference":
+        key = reference_key(parameters)
+        if key == REFERENCE:
+            expected_identity = reference_derivation(
+                expected_identity, numerical_policy=NumericalPolicy(**manifest["numerical_policy"])
+            )
+    return Reader(expected_identity, product, key=key)
 
 
 def result_reader(
@@ -261,20 +331,30 @@ def result_reader(
         return None
     request = expected(store, manifest, product=product, contig=contig)
     expected_identity = request.identity
+    if not file.has(request.key):
+        return None
+    if product == "painting":
+        # A fine publication may precede an interrupted reference decode. Workflow
+        # receipts must not skip this contig until both required products exist.
+        reference = expected(store, manifest, product="reference", contig=contig)
+        if reference.key == REFERENCE and read_items(
+            file, reference.key, reference.identity, ("schema",)
+        ) is None:
+            return None
     if product == "summary":
         return request
     assembled = assembly_records.result_reader(store, manifest, product="assembly", contig=contig)
     evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
     assembly = None
-    if (panels and product == "painting") or product == "painting_report":
+    if (panels and product in ("painting", "reference")) or product == "painting_report":
         assembly_record = resume(file, assembled.key, assembled.identity)
         if assembly_record is None:
             raise InvariantError("painting upstream publication is incomplete")
         value = cast(AssemblyProduct, assembled.decode(assembly_record.payload))
         assembly = (tuple(value.prepared), tuple(value.components))
     packed = None
-    if emissions and product == "painting":
-        cache = resume(file, CACHE, expected_identity)
+    if emissions and product in ("painting", "reference"):
+        cache = resume(file, request.key + "/cache", expected_identity)
         if cache is not None:
             require_schema(cache.payload, SCHEMA)
             packed = tuple(cache.payload["packed_emissions"])
@@ -305,7 +385,7 @@ def result_reader(
             searches=histories[0],
             feedback_searches=histories[1] + histories[2],
         )
-    return Reader(expected_identity, product, assembly, packed)
+    return Reader(expected_identity, product, assembly, packed, key=request.key)
 
 
 __all__ += ["Reader", "TieSource", "PaintingReport", "result_reader"]

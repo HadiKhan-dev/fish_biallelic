@@ -1,5 +1,141 @@
 # Changelog
 
+## 4.20.0 (16 November 2026)
+
+This release rebuilds the painting stage on estimated quantities. The painting no longer has a fixed outlier rate or a
+fixed evidence divisor: both are estimated once per run from the data. It paints at a finer resolution, the pedigree
+keeps reading a decode at its own resolution and at the path strength, and the family transmission vote of 4.19 runs
+about five times faster with identical results. Released results change (see "What changes in the results").
+
+**Painting resolution ([PR02](docs/methods/painting.md#pr02)).** `snps_per_bin` is 25 (was 100): a painted switch can
+only sit on a bin edge, and bins next to a switch carried 10 to 40 times the misfit of other bins. Bins nest in
+reference windows of `reference_snps_per_bin` = 100 selected sites: the selected sites are split into
+max(1, L // 100) near-equal windows and each window into 4 near-equal bins.
+
+**The pedigree reads a reference decode.** A second painting product, `painting/reference`, is a decode of the same
+model at `reference_snps_per_bin` with the fine painting's label-continuity outcome. Pedigree preparation, the
+map-scale frames and the family transmission vote read it, so none of the pedigree's constants (75 depend on the bin
+size) changes meaning. Founder refit, family phase, recombination, export and evaluation read the fine painting. With
+equal bin sizes there is no second product.
+
+**The evidence divisor is defined per reference window.** A bin's log emission is divided by 1 + (n_w - 1) r with n_w
+the sample's informative sites of the bin's whole reference window (was: of the bin), so the strength no longer
+depends on the bin size. `[family_phase] junction_pin_bins` becomes `junction_pin_reference_bins` (reference windows).
+
+**Run-level calibration (new stage, new step command `calibrate`).** After the final assembly of every analysed contig
+and before any painting, three quantities are estimated once per run, pooled over the analysed contigs:
+
+- the genotype-outlier rate: the value of `robustness_grid` (default 1e-4 to 3e-2 in half decades) with the largest
+  likelihood of the copying model at weight one. `robustness_epsilon` is no longer a parameter;
+- two evidence strengths from `divisor_grid` (default 1, 2, 4, ..., 256), scored on held-out data: fold f of
+  `calibration_folds` (3) hides the f-th contiguous part of every reference window, so every window is predicted from
+  the rest of its own sites. The PATH divisor maximises the held-out score of the decoded label pairs; it tempers the
+  model fit, the decoding and the pedigree's reading of the painting (preparation, map-scale frames). The CONFIDENCE
+  divisor maximises the held-out posterior predictive density; it tempers the painting's release posteriors and
+  family phase. `emission_site_correlation` is no longer a parameter.
+
+The estimates and both objective tables are published (`painting/calibration.json`, `calibration_robustness.csv`,
+`calibration_divisor.csv`); `painting_model.csv` gains `RobustnessEpsilon`, `EmissionDivisor` (confidence) and
+`PathDivisor`. Single-value grids reproduce fixed settings: `robustness_grid = (0.01,)`, `divisor_grid = (10.9,)` and
+both bin sizes 100 give the 4.19.0 results (checked on the standard simulation: 38 published tables byte-identical,
+the other three differ only in elapsed time and the new `painting_model.csv` columns).
+
+**Workflow.** Painting depends on the calibration, which depends on every analysed contig's final assembly.
+`haplotypes run` schedules this itself. In a step-by-step workflow `reconstruct --contig` is run twice per contig:
+before `calibrate` it stops at the final assembly and writes the marker `assembly.CONTIG.done`; after `calibrate` it
+paints and refits and writes `reconstruct.CONTIG.done`. `docs/examples/Snakefile` and the workflow page show the new
+order (rules `assemble`, `calibrate`, `reconstruct`). A restricted run (`--contigs`, `max_contigs`) that reaches
+painting assembles every analysed contig first; painting and refit stay restricted.
+
+**A stage's records depend only on its own and earlier stages' code.** A stage's records are bound to the sources
+of its code (store.identity). Until now every stage task reached the results reader through the `results` package
+(and, through type-checking imports, the run configuration), so every stage's code list held the whole pipeline
+(discovery: 277 modules, 66 of them pedigree code): an edit to pedigree code made every saved discovery record
+unreadable. The generic input protocol moves to `stages/inputs/protocol.py`, the code-identity walk no longer follows
+`if TYPE_CHECKING:` imports, and the simulation settings mapping moves beside the simulation source; discovery's
+list is now 94 modules with no later stage in it, and a guard test keeps the stages apart. Every record identity changes once with this release (no computed value changes).
+
+**Explicit record reuse after a source edit (`--reuse-records`, `[execution] reuse_records`).** Off by default. After
+an edit judged not to change results, `--reuse-records STAGE ...` or `--reuse-records all` accepts a run folder's
+existing records of those stages: the folder remembers, per stage, the package sources under which its records were
+last read or written (`CHECKPOINTS/code/`), and the named stages' record identities are computed from those sources
+in the coordinator and every worker. It stays in force for the folder until `--reuse-records none`; every use is
+printed, every computing command under it is written to `CHECKPOINTS/code/ledger.json` (reading commands write
+nothing into the checkpoint folder) and `status --json` shows it. Nothing checks the user's
+judgement: such a run is reproducible only as far as it holds. A record mismatch now prints a hint to this option.
+See docs/user/running.md.
+
+**Family transmission vote ([PD29](docs/methods/pedigree.md#pd29)): about five times faster, identical results.** The
+kernels of `science/pedigree/family_transmission.py` reuse the forward pass's emissions in the backward pass, keep a
+per-search table of member log emissions and cache member likelihoods until a latent path they read changes. 5.4 times
+faster on 120 saved real inputs with bit-identical statistics.
+
+**The pedigree stage uses its cores.** Several steps of the stage ran on one or two CPUs of a whole node:
+
+- the family transmission vote spread its threads over parent edges only, and a sibling-rich cross has one edge and
+  two 1-Morgan segments a chromosome (1 of 16 threads busy). Every edge, component and segment is now its own job,
+  and each segment's search fits its independent starts at once (the two witness orders, the single-member fits, the
+  member-seeded starts, each round's starts of one model, and the predictable adopt moves on spare threads), compared
+  in their sequential order: 2.9 times faster per segment on 16 threads, identical results on 82 saved segments;
+- the map-scale fit accumulates its per-cell sums by a sort and `np.add.reduceat` instead of `np.add.at` (1.0 to 1.8
+  times faster; sums may differ in the last bits);
+- resampling: the workers' inputs are read-only shared arrays, and 19 read-only variants of 17 fit kernels were not
+  declared (`science/pedigree/kernels/signatures.py`), so the warm-up did not compile them: one worker compiled them on
+  first use, for about ten seconds, while every other worker of the stage waited. They are declared now
+  (`RESAMPLING_READ_ONLY_ARGUMENTS`); a check of a complete run's kernel cache against the declarations finds no
+  other undeclared variant in any stage;
+- the map-scale estimate and the decision fit spent 18 of their 19 to 20 seconds deriving the identities of their
+  upstream records again. Measured on the standard and half-sib simulations (4.20 candidates before and after, not
+  the same node type): map-scale estimate 16.6 -> 3.9 s and 20.5 -> 6.0 s, the decision fit's binding 14.8 -> 3.7 s
+  and 16.0 -> 3.6 s, resampling 8.9 -> 1.6 s and 9.1 -> 2.3 s. Each discovery block's identity was the digest of its whole
+  derivation, converted and serialised per block (about a second per contig); it is now one canonical text per contig
+  with the block's unit substituted, the same identities. One contig's assembly, evidence and map identities are bound
+  once per process (`stages/painting/records.bound_upstream`): since the calibration every contig's painting identity
+  derives from every contig's assembly, and each painting reader bound all of them again. The map-scale estimate binds
+  its contigs on the threaded map, as the decision fit did.
+
+No released result changes; the map-scale sums may differ in the last bits.
+
+**Calibration cost.** Measured on the standard simulation (40 samples, 8 chromosomes, 330,000 sites each, one
+76-CPU node): the outlier-rate step takes 52 s and the evidence-strength step 231 s (about 14,800 CPU-seconds: 27 model
+fits per chromosome, 3 folds by 9 candidate strengths). Every fit is its own one-CPU task, and the fits of all
+chromosomes share the node's CPUs (`stages/graph.UNPINNED_STAGES`): about 65 of 76 CPUs are busy, 85 % of what the
+amount of work allows. Each fold reads its evidence once and serves every candidate strength from one weight-one
+build (`emissions.SharedEmissions`), and each fit scores all hidden sites of a sample batch at once; the scores do not
+depend on the core count or the sample batch.
+
+**Why the pedigree reads the path strength.** The pedigree asks which painted labels a sample shares with a
+candidate relative, a question about the decoded path. Read at the confidence strength (up to 128 on crosses without
+sequenced parents), the evidence that tells a full sib from a parent was divided away: on a candidate that did so,
+the f3 simulation released two full sibs as parent and child (relatedness places them so in both releases; 4.19 left
+the pair below Tier B support, state margin 0.82; at the confidence strength 6.43), and three simulations lost 2 to
+8 true parent edges. Replays on saved inputs traced both to the strength the pedigree reads, and the low switch
+errors of this release to the strength family phase reads.
+
+**What changes in the results.** Release matrix: 17 cases against 4.19.0 on the same inputs (16 simulations, the
+TroMau cross), all completed.
+
+- TroMau: the pedigree is unchanged (116 rows, none changed); crossovers 907 -> 962. Calibrated: outlier rate
+  0.003, path and confidence divisors 4.
+- Pedigree: no wrong parent call. Unchanged in 13 of the 15 evaluated simulations (the reversal case has no
+  evaluation); f3 one more correct parent state (5 -> 6 of 112); backcross the same 98 of 120 true edges (one sample
+  gains its correct parents, one leaves its two parents unresolved) and two correct zero-observed-parent calls left
+  unresolved (correct states 66 -> 63 of 80).
+- Genotype errors fall in 14 of the 15 evaluated simulations, by 1.1 to 7.5 times (standard 16,768 -> 11,035; f3x8
+  3,096 -> 414); k30 1,303 -> 1,324.
+- Switch errors fall in most simulations (standard 19 -> 4, sibrich 29 -> 4, f3 17 -> 2, f3x8 45 -> 0) and rise in
+  the stress case (103 -> 113, long switches 21 -> 27), the permuted case (long switches 2 -> 4), backcross
+  (2 -> 3, one long) and k30 (28 -> 34).
+- Phase sets: 1.4 to 8.5 times as many (standard 403 -> 555, f3 1,216 -> 9,349, sibrich 5,507 -> 46,863), most in
+  samples without an observed parent; phased share within about one point. Replays of f3 apportion it: the 25-site
+  bins about 2 times, the estimated divisors about 3 to 4 times.
+- Calibrated values: outlier rate 1e-4 in every simulation; path divisor 2 to 32, confidence divisor 1 to 128
+  (64 or 128 in the crosses without sequenced parents).
+
+**Still declared numbers of the painting.** The bin size 25 and the reference window 100 (resolutions), the release
+threshold 0.9 (an error budget), the two grids (ranges and steps), `calibration_folds`, and the label-continuity
+acceptance rules and the 8 estimation updates (measured inert on 9 runs across wide ranges).
+
 ## 4.19.0 (15 November 2026)
 
 This release checks the map's scale before the pedigree chooses its material regime, makes two-parent evidence exact

@@ -425,6 +425,8 @@ def relabel_component(
     genetic_map,
     *,
     model,
+    robustness_epsilon: float,
+    site_correlation: float,
     batch_samples: int = 1,
     reverse: bool,
     census_sink: Callable[[ties.TieCensus], None] | None = None,
@@ -453,11 +455,14 @@ def relabel_component(
         if 0 < first < n_selected and first not in seen:
             seen.add(first)
             links.append((first, span))
-    bins = build_bins(states.positions, config.snps_per_bin)
+    bins = build_bins(states.positions, config.snps_per_bin, config.reference_snps_per_bin)
     n_bins = bins.n_bins
     counts = dict(link_points=len(links), movable_rows=len(movable))
     if len(movable) < 2 or not links or n_bins < 2:
         return panel, _outcome("no_link_or_movable_row", **counts)
+    from functools import partial
+
+    emission_builder = partial(emission_builder, robustness_epsilon=robustness_epsilon, site_correlation=site_correlation)
     return _relabel_linked(
         panel,
         likelihoods,

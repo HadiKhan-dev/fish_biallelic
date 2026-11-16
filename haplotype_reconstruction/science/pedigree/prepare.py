@@ -130,15 +130,27 @@ def _evidence_sites(evidence_positions: np.ndarray, positions: np.ndarray, *, co
     return indices.astype(np.int64)
 
 
+def path_correlation(painting: Painting) -> float:
+    """r of the painting's PATH strength, (path_divisor - 1) / (reference_snps_per_bin - 1), the strength at which the
+    pedigree reads the painting's evidence (painting.calibration.correlation). The pedigree asks which painted labels
+    a sample shares with a candidate relative, a question about the decoded path; the confidence strength (the
+    published site_correlation) weighs the painting's release posteriors and family phase. Read at the confidence
+    strength (up to 128 on crosses without sequenced parents), the evidence that tells a full sib from a parent is
+    divided away: the release matrix of 4.20 released two full sibs as parent and child."""
+    return (float(painting.path_divisor) - 1.0) / (int(painting.parameters.reference_snps_per_bin) - 1)
+
+
 def _source_factors(
     painted: ComponentPainting,
     evidence: ContigEvidence,
     sites: np.ndarray,
     painting_config: PaintingParameters,
+    robustness_epsilon: float,
     transition: HammingTransition,
     available: np.ndarray,
     claim_threads: Callable[[], None],
     component_index: int,
+    site_correlation: float,
 ) -> SourceFactors:
     """Fill the dense factors while keeping only one sample batch's emissions/GL live.
 
@@ -150,12 +162,15 @@ def _source_factors(
     samples, n_states = evidence.n_samples, states.n_states
     initial = np.empty((samples, n_states, n_states), dtype=np.float64)
     right = np.empty((samples, max(0, bins.n_bins - 1), n_states, n_states), dtype=np.float64)
-    alt_probability = states.alt_probability() if painted.packed_emissions is None else None
+    # the painting's packed emissions are at its published (confidence) strength: used only when that is the
+    # requested strength, otherwise rebuilt at ``site_correlation`` (path_correlation)
+    packed = painted.packed_emissions if site_correlation == painted.transitions.site_correlation else None
+    alt_probability = states.alt_probability() if packed is None else None
     for first in range(0, samples, _EMISSION_SAMPLE_BLOCK):
         last = min(samples, first + _EMISSION_SAMPLE_BLOCK)
         claim_threads()
-        if painted.packed_emissions is not None:
-            emissions = painting_hmm.unpack_emissions(painted.packed_emissions[first:last], n_states)
+        if packed is not None:
+            emissions = painting_hmm.unpack_emissions(packed[first:last], n_states)
         else:
             selected_gl, selected_observed = painting_hmm.gather_sites(
                 evidence.likelihoods, evidence.observed, sites, slice(first, last)
@@ -167,11 +182,12 @@ def _source_factors(
                 states.background_frequency,
                 bins.starts,
                 bins.stops,
-                robustness_epsilon=painting_config.robustness_epsilon,
+                robustness_epsilon=robustness_epsilon,
                 log_floor=painting_config.emission_log_floor,
             )
             emissions /= painting_hmm.design_effect(
-                selected_gl, selected_observed, bins.starts, painted.transitions.site_correlation
+                selected_gl, selected_observed, bins.starts, site_correlation,
+                painting_config.reference_snps_per_bin // painting_config.snps_per_bin,
             )[:, None, :]
             del selected_gl, selected_observed
         factors = sources.infer_factors(
@@ -188,11 +204,13 @@ def _prepare_component(
     painted: ComponentPainting,
     evidence: ContigEvidence,
     painting_config: PaintingParameters,
+    robustness_epsilon: float,
     chromosome_map: ChromosomeGeneticMap,
     config: PreparationParameters,
     claim_threads: Callable[[], None],
     *,
     contig: str = "unknown",
+    site_correlation: float,
 ) -> PreparedComponent | None:
     """One component's scoring inputs, or None without observed non-uniform selected evidence."""
     states, bins = painted.states, painted.bins
@@ -222,7 +240,10 @@ def _prepare_component(
             del values, seen
         available = counts >= 1
     transition = HammingTransition(*painted.transitions.probabilities())
-    factors = _source_factors(painted, evidence, sites, painting_config, transition, available, claim_threads, index)
+    factors = _source_factors(
+        painted, evidence, sites, painting_config, robustness_epsilon, transition, available, claim_threads, index,
+        site_correlation,
+    )
     unknown = (painted.status == _BACKGROUND_STATUS) | (painted.status == _UNANCHORED_STATUS)
     state_classes = np.where(unknown, -1, painted.classes).astype(np.int16)
     # Which parental homologue is transmitted changes between adjacent bin centres when an odd number of
@@ -240,7 +261,7 @@ def _prepare_component(
         anchored_states=np.concatenate((np.any(states.named_alleles >= 0, axis=1), [False])),
         transition=transition,
         factors=factors,
-        robustness_epsilon=float(painting_config.robustness_epsilon),
+        robustness_epsilon=float(robustness_epsilon),
         selector_switch_probability=np.ascontiguousarray(theta),
         genotype_likelihoods=gl,
         observed=observed,
@@ -287,6 +308,7 @@ def prepare_chromosome(
     material (configured_morgans: m(L) - m(0) of ChromosomeGeneticMap.cumulative_morgans, L its last evidence
     position: the configured map and its fallback-rate tails, fixed before any genotype is read)."""
     configured = configured_morgans(chromosome_map, evidence.positions)
+    site_correlation = path_correlation(painting)
     prepared = []
     for index, painted in enumerate(painting.components):
         if painted.states.n_sites == 0 or painted.bins.n_bins == 0:
@@ -297,10 +319,12 @@ def prepare_chromosome(
             painted,
             evidence,
             painting.parameters,
+            painting.robustness_epsilon,
             chromosome_map,
             config,
             claim_threads,
             contig=painting.contig,
+            site_correlation=site_correlation,
         )
         if component is not None:
             prepared.append(component)

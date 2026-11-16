@@ -24,6 +24,7 @@ Initialize if needed, then run or resume the graph.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
 | `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
@@ -50,6 +51,7 @@ Validate inputs and initialize the run manifest.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
 | `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
@@ -76,6 +78,7 @@ Record one contig's evidence.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
 | `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
@@ -103,6 +106,7 @@ Gather relatedness from every contig's evidence.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
 | `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
@@ -111,7 +115,7 @@ Gather relatedness from every contig's evidence.
 
 ## reconstruct
 
-Reconstruct and refit one contig; concurrent invocations share unclaimed units.
+Assemble one contig; also paint and refit after run calibration exists.
 
 | Argument | Arity | Default | Choices | Help |
 |---|---|---|---|---|
@@ -129,12 +133,40 @@ Reconstruct and refit one contig; concurrent invocations share unclaimed units.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
 | `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
 | `--set` | 1 | `[]` | — | Override one setting (repeatable), e.g. quality.read_calibration=false. |
 | `--contig` | 1 | `—` | — | Configured contig for this scatter step. |
+
+## calibrate
+
+Calibrate painting across all final assemblies.
+
+| Argument | Arity | Default | Choices | Help |
+|---|---|---|---|---|
+| `-h, --help` | 0 | `—` | — | show this help message and exit |
+| `CONFIG` | ? | `—` | — | TOML configuration (paths relative to the working directory). |
+| `--preset` | 1 | `—` | tromau, generic | Built-in base configuration. |
+| `--vcf` | 1 | `—` | — | Input VCF/BCF with FORMAT/AD ([input] vcf). |
+| `--output` | 1 | `—` | — | Run directory ([run] output). |
+| `--checkpoints` | 1 | `—` | — | Checkpoint directory ([run] checkpoints). |
+| `--cores` | 1 | `—` | — | CPU ceiling ([execution] cores; default: affinity). |
+| `--memory-limit` | 1 | `—` | — | Capacity for measured job memory pressure, e.g. 200G (binary units) ([execution] memory_limit; auto = job cgroup capacity). |
+| `--contigs` | + | `—` | — | Contigs in order ([input] contigs); run selects a subset of a configured list, or supplies the initial list when none is configured. |
+| `--stop-after` | 1 | `—` | relatedness, discovery, painting | [run] stop_after. |
+| `--serial` | 0 | `—` | — | [execution] serial. |
+| `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
+| `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
+| `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
+| `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
+| `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
+| `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
+| `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
+| `--set` | 1 | `[]` | — | Override one setting (repeatable), e.g. quality.read_calibration=false. |
 
 ## pedigree
 
@@ -156,6 +188,7 @@ Gather the genome-wide pedigree.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
 | `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
@@ -182,6 +215,7 @@ Phase, map and export one contig.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
 | `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
@@ -209,6 +243,7 @@ Publish tables from available records.
 | `--max-contigs` | 1 | `—` | — | [execution] max_contigs (implies --serial). |
 | `--contig-lanes` | 1 | `—` | — | Concurrent contig lanes ([execution] contig_lanes). |
 | `--scratch` | 1 | `—` | — | Mapped scratch and kernel cache base ([execution] scratch). |
+| `--reuse-records` | + | `—` | — | Explicit override ([execution] reuse_records): accept this run folder's existing records of these stages, or of all stages, whatever code wrote them (after an edit judged not to change results); stays in force for the run folder until --reuse-records none. |
 | `--rate-estimate` | 1 | `—` | veto, ignore, adopt | What the estimated recombination rates may change ([genetic_map] rate_estimate): veto (default) lets the painting estimate only withhold pedigree calls, ignore keeps the configured map everywhere, adopt uses the estimates where confident. |
 | `--tie-reverse` | 0 | `False` | — | Reverse arbitrary tie conventions (developer). |
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |

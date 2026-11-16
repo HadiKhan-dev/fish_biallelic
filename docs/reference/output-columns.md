@@ -123,8 +123,11 @@ Source: [`MODEL_COLUMNS`](../../haplotype_reconstruction/outputs/reports/paintin
 | 10 | `error_exit` | exit probability of the copying-model error chain (1). |
 | 11 | `error_run_bins_keeping_label` | 1 / ErrorExit; empty when ErrorExit is zero (bins). |
 | 12 | `site_correlation` | fitted within-site emission correlation (1). |
-| 13 | `eligible_samples` | eligible samples (1). |
-| 14 | `continuity_budget_reached` | label continuity's search ended at its per-iteration check budget: |
+| 13 | `robustness_epsilon` | estimated run genotype-outlier mixture mass (probability). |
+| 14 | `emission_divisor` | calibrated confidence divisor per full reference window: the strength of the release |
+| 15 | `path_divisor` | calibrated path divisor per full reference window: the strength the labels were decoded at (1). |
+| 16 | `eligible_samples` | eligible samples (1). |
+| 17 | `continuity_budget_reached` | label continuity's search ended at its per-iteration check budget: |
 
 ## painting/founder_support.csv
 
@@ -218,6 +221,32 @@ Source: [`SAMPLE_SWITCH_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 5 | `painted_switches` | painted switches (1). |
 | 6 | `cohort_median_switches` | cohort median switches (1). |
 | 7 | `switches_over_cohort_median` | painted switches divided by the cohort median; NaN if median is not positive (1). |
+
+## painting/calibration_robustness.csv
+
+Source: [`CALIBRATION_ROBUSTNESS_COLUMNS`](../../haplotype_reconstruction/outputs/reports/painting.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `contig` | contig name or RUN for the pooled objective (text). |
+| 2 | `robustness_epsilon` | candidate genotype-outlier mass (probability). |
+| 3 | `log_likelihood` | weight-one final recorded component likelihood sum (nats). |
+| 4 | `selected` | selected run-level candidate (bool). |
+
+## painting/calibration_divisor.csv
+
+Source: [`CALIBRATION_DIVISOR_COLUMNS`](../../haplotype_reconstruction/outputs/reports/painting.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `contig` | contig name or RUN for the pooled objective (text). |
+| 2 | `divisor` | candidate full-reference-window divisor (1). |
+| 3 | `fold` | zero-based held-out fold, or -1 for the pooled objective (1). |
+| 4 | `log_predictive_density` | held-out posterior predictive density sum: the confidence objective (nats). |
+| 5 | `path_score` | held-out log score of the decoded label pair: the path objective (nats). |
+| 6 | `cells` | observed held-out sample-site cells (1). |
+| 7 | `selected` | selected run-level confidence divisor (bool). |
+| 8 | `selected_path` | selected run-level path divisor (bool). |
 
 ## painting/pair_sharing.csv
 

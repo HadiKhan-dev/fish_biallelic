@@ -27,7 +27,9 @@ the root. Scientific layers cannot import that module.
 The repository's layer tests (the unit-test tier) enforce the exact allowed edges.
 Results may import stage record decoders, including the explicitly separated
 `*_records` modules, and the data-only stage table, but not publication or source-reading orchestration.
-`results/protocol.py` supplies the shared identity/schema receipt and knows no stages or science.
+`stages/inputs/protocol.py` supplies the shared identity/schema receipt and knows no stage orchestration or science;
+the results reader builds on it. It sits below the results package so that a stage's code identity does not include
+the reader and, through it, every later stage.
 Scientific stage actions use that input protocol and open a separate writable store capability.
 The export stage may call the full read-only results facade and output formatters; inference never consumes exports. Output
 formatters receive `FounderRelease`, `ReleasedSites`, `PedigreeViews` and other

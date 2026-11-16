@@ -1500,6 +1500,9 @@ Source: [haplotype_reconstruction/contracts/painting.py](../../haplotype_reconst
 | `components` | `tuple[ComponentPainting, ...]` | call | ('C',) | 1 | ComponentPainting | True | `required` |
 | `label_continuity` | `tuple[LabelContinuity, ...]` | call | ('C',) | 1 | LabelContinuity | True | `required` |
 | `parameters` | `PaintingParameters` | state | () | 1 | PaintingParameters | True | `required` |
+| `robustness_epsilon` | `float` | state | () | probability | float64 | True | `required` |
+| `emission_divisor` | `float` | state | () | 1 | float64 | True | `required` |
+| `path_divisor` | `float` | state | () | 1 | float64 | True | `required` |
 
 ## painting.ComponentShape
 
@@ -1528,6 +1531,9 @@ Source: [haplotype_reconstruction/contracts/painting.py](../../haplotype_reconst
 | `relabel_moves` | `int` | report | () | 1 | int | True | `required` |
 | `switches_before` | `int` | report | () | 1 | int | True | `required` |
 | `switches_after` | `int` | report | () | 1 | int | True | `required` |
+| `robustness_epsilon` | `float` | report | () | probability | float64 | True | `required` |
+| `emission_divisor` | `float` | state | () | 1 | float64 | True | `required` |
+| `path_divisor` | `float` | state | () | 1 | float64 | True | `required` |
 | `switch_intervals` | `int` | report | () | 1 | int | True | `0` |
 | `interval_track_bins` | `int` | report | () | 1 | int | True | `0` |
 
@@ -3126,6 +3132,7 @@ Source: [haplotype_reconstruction/contracts/phase.py](../../haplotype_reconstruc
 | `packed_emissions` | `np.ndarray &#124; None` | evidence | ('N', 'S*(S+1)/2', 'M') | nats | float64? | True | `required` |
 | `robustness_epsilon` | `float` | state | () | 1 | float64 | True | `required` |
 | `emission_log_floor` | `float` | state | () | nats | float64 | True | `required` |
+| `bins_per_reference_window` | `int` | state | () | bins | int64 | True | `required` |
 
 ## phase.PhaseRefit
 

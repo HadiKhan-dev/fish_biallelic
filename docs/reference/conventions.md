@@ -58,7 +58,7 @@ The name identifies a decision. The kind selects its scale rule; a fixed width i
 | `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:298](../../haplotype_reconstruction/science/discovery/search.py) |
 | `'discovery.archive'` | `fixed_policy('discovery.archive', self.quantum, reverse=self.reverse)` | [search.py:318](../../haplotype_reconstruction/science/discovery/search.py) |
 | `'discovery.archive'` | `fixed_policy('discovery.archive', self.quanta.nll, reverse=self.reverse)` | [search.py:607](../../haplotype_reconstruction/science/discovery/search.py) |
-| `'painting.relabel_rank'` | `ties.policy('painting.relabel_rank', kind='nll', reverse=convention_reverse)` | [label_continuity.py:878](../../haplotype_reconstruction/science/painting/label_continuity.py) |
+| `'painting.relabel_rank'` | `ties.policy('painting.relabel_rank', kind='nll', reverse=convention_reverse)` | [label_continuity.py:883](../../haplotype_reconstruction/science/painting/label_continuity.py) |
 | `'pedigree.junction.trace'` | `policy('pedigree.junction.trace', kind='probability', reverse=reverse)` | [junctions.py:326](../../haplotype_reconstruction/science/pedigree/junctions.py) |
 | `'pedigree.screen.rank'` | `tie_rules.policy('pedigree.screen.rank', kind='probability', reverse=reverse)` | [panel.py:154](../../haplotype_reconstruction/science/pedigree/panel.py) |
 | `'pedigree.bridge.hall'` | `policy('pedigree.bridge.hall', kind='probability', reverse=reverse)` | [projection.py:470](../../haplotype_reconstruction/science/pedigree/projection.py) |

@@ -53,6 +53,9 @@ def summarise(painting: Painting) -> PaintingSummary:
     counts = [interval_counts(component) for component in painting.components]
     return PaintingSummary(
         contig=painting.contig,
+        robustness_epsilon=painting.robustness_epsilon,
+        emission_divisor=painting.emission_divisor,
+        path_divisor=painting.path_divisor,
         samples=len(painting.sample_ids),
         components=tuple(
             ComponentShape(

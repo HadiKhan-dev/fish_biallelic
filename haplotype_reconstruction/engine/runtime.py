@@ -294,7 +294,7 @@ def start(
     # From here this process runs one code snapshot (its forkserver keeps the modules imported now): its identities,
     # this closure first, are computed once.
     fix_installed_sources()
-    closure = code_dependency_identity(package_roots) if package_roots else None
+    closure = code_dependency_identity(package_roots, pinned=False) if package_roots else None
     if cache_directory is None and _RUN is not None and (_RUN.code_roots == package_roots):
         cache_directory = _RUN.cache_directory
     if cache_directory is None and package_roots:

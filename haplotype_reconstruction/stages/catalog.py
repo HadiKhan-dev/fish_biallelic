@@ -103,6 +103,30 @@ STAGES = {
         status=True,
         panels=("assembly_l1", "assembly_l2", "assembly_l3", "assembly_l4", "founder_refinement"),
     ),
+    "calibration_robustness": Stage(
+        "stages.painting.calibration_tasks", "stages.painting.calibration_records", "robustness",
+        owners=("stages.painting.calibration_tasks",),
+        kernel_roots=("science.painting", "science.evidence.likelihoods"), kernels=("painting",),
+        steps=("calibrate",), prefix="painting/calibration",
+    ),
+    "calibration_outlier": Stage(
+        "stages.painting.calibration_tasks", "stages.painting.calibration_records", "outlier",
+        owners=("stages.painting.calibration_tasks",),
+        kernel_roots=("science.painting", "science.evidence.likelihoods"), kernels=("painting",),
+        steps=("calibrate",), prefix="painting/calibration",
+    ),
+    "calibration_divisor": Stage(
+        "stages.painting.calibration_tasks", "stages.painting.calibration_records", "divisor",
+        owners=("stages.painting.calibration_tasks",),
+        kernel_roots=("science.painting", "science.evidence.likelihoods"), kernels=("painting",),
+        steps=("calibrate",), prefix="painting/calibration",
+    ),
+    "calibration": Stage(
+        "stages.painting.calibration_tasks", "stages.painting.calibration_records", "calibration",
+        owners=("stages.painting.calibration_tasks",),
+        kernel_roots=("science.painting", "science.evidence.likelihoods"), kernels=("painting",),
+        steps=("calibrate",), prefix="painting/calibration",
+    ),
     "painting": Stage(
         "stages.painting.tasks",
         "stages.painting.records",

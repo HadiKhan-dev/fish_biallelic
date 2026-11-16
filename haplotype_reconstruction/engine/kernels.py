@@ -128,7 +128,7 @@ def cache_key(roots: Iterable[str], *, package_root: Path = PACKAGE_ROOT) -> str
     Missing roots raise ValueError. Thread counts/layer/cache path are operational
     and do not affect this key; every other NUMBA_* setting does.
     """
-    code = code_dependency_identity(roots, package_root=package_root)
+    code = code_dependency_identity(roots, package_root=package_root, pinned=False)
     digest = hashlib.sha256()
 
     def add(*values):
@@ -181,7 +181,7 @@ def check_closure(roots: Iterable[str], key_closure: CodeIdentity | Iterable[str
     from ..core.kernels import declarations
 
     modules = set(key_closure.modules if isinstance(key_closure, CodeIdentity) else key_closure)
-    if not set(code_dependency_identity(roots).modules) <= modules:
+    if not set(code_dependency_identity(roots, pinned=False).modules) <= modules:
         raise InvariantError("kernel roots exceed the cache key's dependency closure")
     missing = sorted({entry.module for entry in declarations() if entry.cache and entry.module not in modules})
     if missing:
@@ -567,7 +567,7 @@ def plan_warm_up(
     from ..core.kernels import declarations, enable_caches
 
     roots = tuple(roots)
-    closure = code_dependency_identity(roots) if key_closure is None else key_closure
+    closure = code_dependency_identity(roots, pinned=False) if key_closure is None else key_closure
     check_closure(roots, closure)
     install_signature_guard()
     install_compile_lock()

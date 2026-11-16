@@ -187,7 +187,7 @@ base column, position, meaning and unit, including all 17 pedigree tables.
 | `painting/assembly_search.csv`, `founder_counts.csv`, `assembly_search_shadow_alternatives.csv` | Recorded final assembly join searches; components in order |
 | `painting/sample_switches.csv` | Input sample order |
 | `painting/sample_segments.csv` | Input sample, component, track, maximal run of one status/label/member set |
-| `painting/label_continuity.csv`, `painting_model.csv` | Accepted relabellings in recorded order; model rows by component |
+| `painting/label_continuity.csv`, `painting_model.csv` | Accepted relabellings in recorded order; model rows by component, including the contig genotype-outlier estimate |
 | `painting/pair_sharing.csv`, `pair_sharing_chromosomes.csv` | Written only with `[painting] pair_sharing`; sample pairs in input order (the first sample is the earlier one); the chromosome table repeats the pairs for each contig in configuration order |
 | `relatedness/families.csv` | Input sample order; each member repeats its family's parent slots and support |
 | `relatedness/half_sib_links.csv` | Recorded sorted family-pair order |
@@ -544,7 +544,7 @@ and identity columns are listed in their own sections.
 | `quality/segments.csv` | `contig`, `sample`, `partner`, `start`, `end`, `events`, `cells`, `minor_read_fraction`, `partner_minor_read_fraction` |
 | `painting/sample_segments.csv` | `contig`, `sample`, `component`, `track`, `start`, `end`, `status`, `label`, `rows` |
 | `painting/label_continuity.csv` | `contig`, `component`, `atomic_span`, `position`, `row_a`, `row_b`, `score_gain_switches`, `painted_switch_change`, `winners`, `losers`, `winners_ato_b`, `winners_bto_a`, `identity` |
-| `painting/painting_model.csv` | `contig`, `component`, `first_variant_1based`, `last_variant_1based`, `bins`, `states`, `error_capable_classes`, `switch_rate_per_morgan`, `error_entry`, `error_exit`, `error_run_bins_keeping_label`, `site_correlation`, `eligible_samples` |
+| `painting/painting_model.csv` | `contig`, `component`, `first_variant_1based`, `last_variant_1based`, `bins`, `states`, `error_capable_classes`, `switch_rate_per_morgan`, `error_entry`, `error_exit`, `error_run_bins_keeping_label`, `site_correlation`, `robustness_epsilon`, `eligible_samples` |
 | `painting/founder_support.csv` | `contig`, `component`, `founder`, `first_variant_1based`, `last_variant_1based`, `break_before`, `break_after`, `marker_count`, `called_alleles`, `missing_alleles`, `observed_carrier_samples`, `called_sites_without_observed_named_carrier`, `minimum_observed_carriers`, `mean_observed_carriers`, `observed_pooled_candidate_samples`, `mean_observed_pooled_candidates`, `called_sites_without_observed_named_or_pooled_candidate`, `support_basis` |
 | `painting/founder_support_windows.csv` | `contig`, `component`, `founder`, `first_variant_1based`, `last_variant_1based`, `marker_count`, `called_alleles`, `missing_alleles`, `called_sites_without_observed_named_carrier`, `mean_observed_carriers`, `mean_observed_pooled_candidates`, `called_sites_without_observed_named_or_pooled_candidate` |
 | `painting/assembly_search.csv (prefix)` | `contig`, `level`, `first_variant_1based`, `last_variant_1based` |
@@ -879,3 +879,14 @@ Collection-file schemas are generated alongside the parent columns:
 `painting/assembly_search_shadow_alternatives.csv`, `painting/assembly_search_items.csv`,
 `pedigree/cell_items.csv`
 and `recombination/junction_members.csv`. Each has its header even with no items.
+
+### Painting calibration
+
+`painting/calibration.json` contains the run's `robustness_epsilon`, `divisor`, and
+`site_correlation`, the per-contig and pooled objectives, and task durations in seconds.
+`painting/calibration_robustness.csv` has `contig`, `robustness_epsilon`, `log_likelihood`,
+and `selected`. `painting/calibration_divisor.csv` has `contig`, `divisor`, `fold`,
+`log_predictive_density`, `cells`, and `selected`. The pooled rows use `contig=RUN`
+and `fold=-1`. Single-value grids skip fitting and have empty objective tables;
+the specified values still appear in the JSON and `painting_model.csv`.
+`painting_model.csv` also includes `EmissionDivisor`, the run's full-reference-window divisor.
