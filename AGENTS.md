@@ -47,6 +47,15 @@ These override cost, speed and convenience. Each is detailed in the section cite
 14. **Never stall on an unanswered question.** Keep independent work moving while a question is open. After 15
     minutes without an answer, proceed with the recommended option and report it. Approvals this file requires are
     never assumed (§4.1).
+15. **What the owner asked for in a release stays in that release.** Never drop, defer or shrink a requested item
+    because it turned out harder than expected. Only the owner takes an item out (§4.1).
+16. **The owner's question comes first.** When the owner asks a question, drop what you are doing and answer it at
+    once, in a reply that holds only the answer. Then pick everything back up where it stopped (§4.1).
+17. **Work from one ordered queue.** An agent working without delegated agents keeps a queue file and works on its
+    first item only, moving on when that item is resolved. New items go in at the position they belong (§4.10).
+18. **Parallel by default.** New or changed computation uses every core it is given. A single-threaded section is
+    allowed only when a recorded test shows that parallelising it does not work. A serial bottleneck in recently
+    added code is fixed there and then; older ones wait for the owner's pipeline-wide pass (§4.6).
 
 ## 2. Science
 
@@ -132,6 +141,18 @@ More elaborate software never substitutes for missing biological or mathematical
      - Implement the change and replay it on saved inputs. Compare the released decisions, and report any flip at a
        threshold with its count and margins (rule 3).
      - Test fixtures that pin exact bits are not a reason to keep the slower code. Update them, and say so.
+   - **A measured speedup with the same results is kept** (owner, 16 November 2026: "Why are we reverting this,
+     it's a speedup and last bits of the sums doesn't matter ... add something to agents.md requiring that stuff like
+     this doesn't get reverted").
+     - The incident: an agent replaced two `np.add.at` accumulations with a sort and `np.add.reduceat`, measured it
+       faster at every size it tried (1.0 to 1.8 times), then reverted it because the gain was small and the last
+       bits of the sums changed.
+     - Never revert, drop or decline a change that is measured faster and keeps the results scientifically identical
+       (§2.3) because the gain is small, because the bits differ, or because the original bottleneck turned out to
+       be elsewhere. Keep it and report the measured gain.
+     - Revert a speedup only for a reason that would also block a new change: it is slower or uses more memory on
+       the realistic workload, it changes a released decision beyond §2.3, it breaks a supported path, or it adds
+       complexity out of proportion to its gain. State the reason and the measurement.
 3. A small numerical difference is still a behavioural change, to be reported, if it changes any of: a threshold
    comparison, a branch, convergence, a selected haplotype, a pedigree, phase, a metric or another scientific result.
 4. An improved headline metric does not prove correctness. When unsure whether behaviour changed, say so and
@@ -371,6 +392,19 @@ At the start of non-trivial work, identify:
 
 Then:
 - **Ask** a focused question when a request is materially ambiguous.
+- **The owner's question comes first** (owner, 15 November 2026: "when I ask a question you drop everything to answer
+  my question, and then pick everything back up").
+  - The incident: on 15 November 2026 the owner asked why a change made some work serial. The agent answered in a few
+    lines between tool calls and carried on working. The owner did not see the answer and had to ask again.
+  - When a question from the owner arrives, make no further tool call first. The next thing you write is the answer:
+    complete and direct, on its own, starting with the answer itself and quoting the question it answers.
+  - Running tasks keep running. Only your own next step waits for the answer.
+  - Answering does not end the work. Once the answer is given, pick everything back up exactly where it stopped:
+    edits in progress, launches, start checks and waiters.
+  - If the answer was written while work continues, repeat it at the top of your next final reply. Text between tool
+    calls is easily missed.
+  - A question is not an instruction to change course. If the answer shows that the owner would want something done
+    differently, say what you will change, then change it.
 - **Never stall waiting for an answer** (owner, 31 October 2026).
   - The incident: on 31 October an agent asked the owner a blocking question at about 02:00, while the owner slept.
     It did nothing more until the answer at 08:10, and ten paid nodes sat idle for up to six hours.
@@ -379,11 +413,29 @@ Then:
   - After 15 minutes without an answer, proceed with the recommended option. Record the decision and its reasons
     in the progress file, and tell the owner they can override it.
   - Never assume an approval this file requires: Git history, deletion, overwriting accepted results, non-SL4
-    allocations, installs, AulStu, or a full pipeline the request did not authorize. Leave those pending, and keep
-    everything else moving.
+    allocations, installs, AulStu, a full pipeline the request did not authorize, or taking a requested item out of
+    a release (below). Leave those pending, and keep everything else moving.
   - Prefer reversible defaults, and work that a later answer would not waste.
+- **A requested release item stays in the release** (owner, 15 November 2026: "I ask for a certain thing to be done
+  for a release, then you prototype it and figure out that it's more complex than you thought and so you decide to
+  defer it and say it won't go into that release and I have to come back and tell you to put it back in. I don't want
+  this to ever happen again").
+  - The incident: on 15 November 2026 the owner asked for the painting's fixed evidence divisor (10.9) to be replaced
+    by a principled method in 4.20. When the first estimators proved unsound, the agent recommended keeping the
+    constant for 4.20 and set a 15-minute default to proceed that way. The owner had to put the item back.
+  - Difficulty found while prototyping changes the plan and the time needed, never the scope. Keep working towards
+    what was asked: try the next design, measure more, add agents or compute.
+  - Only the owner removes, defers or shrinks an item. Never do it yourself, never recommend it as the default
+    option, and never let a default (the 15-minute rule above) do it.
+  - If you believe an item cannot be done soundly, or not by the deadline, say so at once with the evidence, what
+    has been tried, what it would take and when it could be ready. Then continue on it while the owner decides.
+  - When the item and the deadline conflict, the item wins and the date moves. Do not ship the release without it,
+    and do not split it into a later release, unless the owner says so.
+  - Every status and completion report lists each requested item with its state (done, in progress, blocked and
+    why). An item is never dropped by leaving it out of a report.
 - **Stay in scope.** Never widen a task into an audit, redesign, security review, provenance overhaul or cleanup.
   Report an unrelated concern briefly. Pursue it only if it invalidates the requested work or the owner agrees.
+  One exception: a serial bottleneck in code added in release 4.19 or later is fixed when you find it (§4.6).
 - **Match the process to the change** (owner, 5 October 2026).
   - Changes to the scientific model or decision rules (likelihoods, priors, counting or novelty criteria), and
     algorithm redesigns, get the full process: diagnosis, then a design with prototype runs, then one adversarial
@@ -488,6 +540,46 @@ Process-level parallelism and Numba kernels are deliberate; do not change them c
 
 Optimize measured or analytically established bottlenecks, not hypothetical micro-costs, and validate that the
 results are unchanged (§2.3).
+- **Parallel by default** (owner, 15 November 2026: "We need to parallelize everything by default, only make it
+  single core if there's been testing that shows parallelisation doesn't work").
+  - The incident: the run calibration of release 4.20 gave each chromosome task 19 threads and ran its 27 fits in
+    sequence. The scoring of hidden sites, the path labelling and the evidence rescaling between the kernels were
+    plain Python and NumPy: 71 seconds of one-thread work per chromosome, about half of the threads idle. It was
+    measured only after the owner asked why the step was slow.
+  - Write every computation over independent units to run in parallel from its first version. Units are samples,
+    sites, windows, bins, components, folds, grid values, replicates, chromosomes. Use a parallel kernel, the
+    package's budgeted thread map, or independent tasks for the scheduler (§4.5, §5.4).
+  - Plain Python or NumPy over large arrays inside a task that holds several threads is single-threaded work. So is
+    a loop over independent fits inside one task.
+  - **Serial needs evidence.** A section stays single-threaded only when one of these is recorded, with its numbers,
+    in the progress file and in a comment at the code:
+    - a test in which the parallel version was not faster on a realistic unit;
+    - a dependence that makes the section sequential (say which quantity depends on which);
+    - a parallel version that changes results beyond §2.3.
+  - **Check core use before calling the work done.** For every new or changed stage or task, measure on a realistic
+    unit, from its task records: CPU time divided by wall time and by the threads granted. Report the number. Below
+    about 0.8, profile the task, find what idles and fix it, or record the evidence above. This check is part of the
+    change's validation (§2.6), not a later optimisation.
+  - Results stay the same on any thread count and any batch size (§2.3). Sum over independent units in an order
+    that does not depend on how they were grouped.
+  - **Fix a serial bottleneck in recently added code when you find it** (owner, 15 November 2026: "if you find
+    serial bottlenecks in code fix them there and then for the upcoming release", then, the same evening: "Fix only
+    serial bottlenecks for stuff introduced in 4.19 onwards for now. For the future when you create something make
+    sure it doesn't cause a serial bottleneck. We'll do a pipeline wide parallelisation pass later").
+    - **In scope, at once:** a serial bottleneck in anything introduced in release 4.19 or later, and in anything
+      you are adding now. Examples from 4.19 and 4.20: the run calibration, the family transmission vote, the
+      pedigree's map-scale estimate. Put it in the work queue (§4.10) before the release candidate, fix it, show
+      the same results (§2.3), and measure core use before and after on a realistic unit.
+    - **Not in scope:** serial bottlenecks in older code (in November 2026: family phase, assembly refinement,
+      painting, discovery, kernel compilation, refit, release, export, reports, pedigree exclusion). Record each
+      with its measured core use in the list for the pipeline-wide parallelisation pass, which the owner
+      schedules. Never start that pass, or any part of it, on your own (§4.1, stay in scope).
+    - If an in-scope fix is large, tell the owner at once what it is, what it costs and when it can be ready, and
+      keep working on it. Only the owner moves it out of the release.
+    - The release's completion report lists the serial bottlenecks fixed, with core use before and after, and the
+      ones recorded for the later pass.
+  - The bullets below say which tool fits which bottleneck. None of them is a reason to leave independent units in
+    a serial loop.
 - **Classify the bottleneck before non-trivial computation:**
   - CPU-bound numerics;
   - compression or decompression;
@@ -580,6 +672,41 @@ At the end of a task, report:
 10. out-of-scope concerns deliberately not pursued.
 
 Do not propose further hardening unless asked.
+
+### 4.10 The work queue
+
+An agent that works without delegated agents keeps one ordered queue of what it has to do, in a file, and works from
+its front (owner, 15 November 2026: "it works on the first thing in the stack/queue etc. and then when the thing is
+resolved it moves on to the next thing and only then to the next thing").
+
+The incident: on 15 November 2026 an agent working alone moved between five fronts every few minutes (calibration
+speed, pedigree speed, a failing test, a run hand-over and an early test pass). It launched and cancelled runs on
+assumptions it had not checked, left finished results unread, and the owner asked "Why are you thrashing around so
+much and dropping stuff you were supposed to do?"
+
+- **The file.** Keep `QUEUE.md` beside the progress file (§5.6). It is an ordered list. Each item states what is to be
+  done and what "resolved" means for it: the check that will show it is finished.
+- **Work on the first item only.** Do not start the second item while the first is unresolved. An item is resolved
+  when it is done and its check has passed, or when it cannot proceed and the file records why and what will unblock
+  it.
+- **Then the next, and only then the one after.** When the first item is resolved, record its outcome, remove it from
+  the queue and take the new first item.
+- **Insert new items where they belong.** A new item goes at the position its urgency and its dependencies give it,
+  which need not be the front or the back: before the items that need its result, after the items it needs. Write one
+  line saying why it sits there. An instruction from the owner is inserted the same way, at the front when the owner
+  says it is urgent. A question from the owner is not a queue item: answer it at once (§4.1).
+- **Waiting is not working.** When the first item's only remaining step is to wait for a running task, mark it
+  `waiting` with the signal that will wake it (and the waiter's deadline, §5.3), and take the next item meanwhile.
+  When the signal arrives, finish the step in hand and return to the waiting item before anything else. This is how
+  the queue and "never wait idle for a batch" (§5.4) fit together.
+- **Read results before moving on.** A finished run, test or check belongs to the item that launched it. That item is
+  not resolved until its result has been read and recorded.
+- **Keep the file current.** Update it when an item is started, resolved, inserted, reordered or set waiting. Read it
+  at the start of every turn and after every interruption or context summary, and act on its first item.
+- **Reordering is deliberate.** Change the order only for a stated reason (a new dependency, a failure that blocks
+  later items, the owner's word), and write the reason in the file.
+- **With delegated agents** the coordinator keeps the same queue, each item naming its owner. Every delegated agent
+  works from its own queue in the same way.
 
 ## 5. Running computations
 
@@ -745,6 +872,19 @@ The owner pays for every core of a paid allocation, the hosting node included. O
     4. release non-SL4 allocations under §6.7.
   - Record the cause and the action. If more concurrency would not help, keep the allocation as it is and state the
     limiting factor.
+- **Spread a whole run over idle nodes when its wall time is not what is measured** (owner, 16 November 2026: "Why do
+  we have so many idle nodes that we aren't doing anything with ... why aren't we fanning out the chrs for that onto
+  different nodes because we're not really measuring overall time here, no?").
+  - The incident: on 15-16 November 2026 an agent ran each correctness run (a real cross and several simulations)
+    as one job on one node, chromosomes queued behind each other, while about 20 paid nodes sat idle for hours.
+  - When a run checks results rather than measuring the elapsed time of one node, start its per-chromosome steps on
+    idle nodes as well, from the start: `haplotypes evidence --contig`, `reconstruct --contig` (twice, around
+    `calibrate`) and `phase --contig` on the same run folder and configuration (docs/user/workflow.md, "Several
+    nodes, one checkpoint root"). Joining invocations claim units atomically, so they never duplicate work.
+  - Plan it when the run is launched, not when someone notices idle nodes: a joining step is useful only while its
+    stage is still running, and a run-wide step (relatedness, calibrate, pedigree) cannot be split this way.
+  - Keep a run on one node only when its elapsed time is the measurement (timing, core-use checks, the release's
+    end-to-end timings), and say so in the progress file.
 - **Reallocate as tasks finish;** never keep an early, conservative worker count. Where the validated path supports
   it, schedule dependency-ready batches rather than whole chromosomes. Keep batch boundaries, stable ordering,
   single-writer checkpoints and resource limits. `docs/performance.md` documents where each stage stands.

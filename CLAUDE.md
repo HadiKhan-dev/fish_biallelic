@@ -7,6 +7,19 @@ specific to Claude Code. Shared rules go in `AGENTS.md`, never here.
 
 - **Answer the owner's questions in a reply of their own.** When the owner asks a question during a task, answer it
   fully in its own reply, then continue the work. Text written between tool calls is easily missed.
+- **A final reply ends the turn, and nothing happens until something wakes the session** (owner, 15 November 2026).
+  - The incident: on 15 November a session launched 48 replays and ended its turn to wait. 40 finished within the
+    hour; the session was woken only when the last straggler ended, 4 hours 45 minutes later, with 40 nodes idle.
+    Later the same day it twice answered a question with "starting X now" as a final reply, and started nothing.
+  - While campaign work remains, never end a turn on a wait or on an answer. Answer a mid-task question as text,
+    then keep issuing tool calls in the same turn. Send a final reply only at a real stopping point: the work is
+    done, or it needs a decision only the owner can make.
+  - Never write "starting X now" or "next I will" in a final reply. Start X first, then report that it is running.
+  - Never wait idle for a batch. Work on the next independent item while it runs, collect results as they arrive,
+    and decide on partial results. A straggler never holds up the rest.
+  - Every wait has a wake-up that does not depend on the slowest task: a background waiter with a deadline and a
+    partial-completion condition (for example "40 of 48 done, or 30 minutes"), plus a heartbeat. If a turn must end
+    with work running, state in the reply what will wake the session and when.
 - **Never stall on an unanswered question** (owner, 31 October 2026: "the tool is fine. Stalling over unanswered
   questions isn't"; shared rule in `AGENTS.md` §1 item 14 and §4.1).
   - AskUserQuestion pauses this session until the owner answers, and it has no timeout. On 31 October one such
