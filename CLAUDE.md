@@ -2,54 +2,27 @@
 
 @AGENTS.md
 
-`AGENTS.md` is the single source of shared policy for every agent, Claude Code included. This file adds only what is
-specific to Claude Code. Shared rules go in `AGENTS.md`, never here.
+`AGENTS.md` holds every shared rule; this file adds only what is specific to Claude Code. Date tags refer to
+`AGENTS_HISTORY.md`.
 
-- **Answer the owner's questions in a reply of their own.** When the owner asks a question during a task, answer it
-  fully in its own reply, then continue the work. Text written between tool calls is easily missed.
-- **A final reply ends the turn, and nothing happens until something wakes the session** (owner, 15 November 2026).
-  - The incident: on 15 November a session launched 48 replays and ended its turn to wait. 40 finished within the
-    hour; the session was woken only when the last straggler ended, 4 hours 45 minutes later, with 40 nodes idle.
-    Later the same day it twice answered a question with "starting X now" as a final reply, and started nothing.
-  - While campaign work remains, never end a turn on a wait or on an answer. Answer a mid-task question as text,
-    then keep issuing tool calls in the same turn. Send a final reply only at a real stopping point: the work is
-    done, or it needs a decision only the owner can make.
-  - Never write "starting X now" or "next I will" in a final reply. Start X first, then report that it is running.
-  - Never wait idle for a batch. Work on the next independent item while it runs, collect results as they arrive,
-    and decide on partial results. A straggler never holds up the rest.
-  - Every wait has a wake-up that does not depend on the slowest task: a background waiter with a deadline and a
-    partial-completion condition (for example "40 of 48 done, or 30 minutes"), plus a heartbeat. If a turn must end
-    with work running, state in the reply what will wake the session and when.
-- **Never stall on an unanswered question** (owner, 31 October 2026: "the tool is fine. Stalling over unanswered
-  questions isn't"; shared rule in `AGENTS.md` §1 item 14 and §4.1).
-  - AskUserQuestion pauses this session until the owner answers, and it has no timeout. On 31 October one such
-    question stalled the campaign for six hours overnight.
-  - Before asking, launch everything that can proceed. Use the tool only when the owner is evidently present (they
-    replied within the last few minutes) and no running work will need you before they can answer.
-  - Otherwise ask in a normal reply. Give your recommended option and the 15-minute default.
-  - Then start a background timer (Bash with `run_in_background`, for example `sleep 900`), so that the session wakes
-    up and applies the default even if no other notification arrives. Keep working meanwhile.
-  - When the 15 minutes pass with no answer, proceed with the recommended option and say so. Approvals `AGENTS.md`
-    requires are never assumed.
-- **Claude subagents run at xhigh effort, not max** (owner, 22 October 2026). Set the effort explicitly on every
-  subagent you create.
-- **Asking a reviewer never replaces your own work on the problem** (owner, 26 October 2026).
-  - When Astra or another agent reviews or investigates something, work on the same problem yourself, in parallel:
-    analyse it, test hypotheses and try to solve it.
-  - Then compare conclusions. A review checks your reasoning; it never substitutes for it.
-  - Never wait idle for a reviewer's verdict on a question you could be investigating.
-- **Act on the idle-node reminder** (owner, 29 October 2026).
-  - A user-level hook (`~/.claude/settings.json`, running `claude_lab/nodeq/hook.sh`) adds an `[idle nodes]` line to
-    the context. It fires once worker nodes have been idle for 10 minutes or more.
-  - Act on it in the same turn (`AGENTS.md` §5.4): queue useful authorized work through `nodeq`, or say why none is
-    ready.
-  - It also fires while your own tasks run. If they loop over independent units (chromosomes, samples, variants) or
-    use few of their declared cores, they are the cause. Fan them out per unit and parallelise inside each task
-    (`AGENTS.md` §5.4) instead of reporting that nothing is ready.
-  - Before ending a turn with work queued, check `nodeq status` once: busy cores should be close to what your tasks
-    declared, with no idle nodes that per-unit tasks could fill.
-- **No end-to-end runs to check a fix** (owner, 26 October 2026; shared rule in `AGENTS.md` §2.6 and §5.5).
-  - Validate each fix where it acts: its fixture, replays of the affected blocks or components on saved inputs, and
-    competing outputs scored on common inputs.
-  - The single end-to-end run is for the final integrated release candidate. A downstream issue can make a correct
-    fix look worse end to end, and those runs are slow.
+- **Answers are text, not a turn's end.** Answer an owner's question as text before any further tool call (AGENTS
+  §4.1), then keep calling tools in the same turn. Text written between tool calls is easily missed: repeat the answer
+  at the top of the final reply.
+- **A final reply ends the turn; nothing happens until something wakes the session** [15 Nov]. While work remains,
+  never end a turn on a wait or an answer. End it only when the work is done or needs a decision only the owner can
+  make. Never write "starting X now" or "next I will" in a final reply: start X, then report it running.
+- **Never wait idle for a batch.** Work on the item's own other steps while it runs (never another item: the cardinal
+  rule in AGENTS.md), collect results as they arrive and decide on partial results. Every wait has a wake-up that does
+  not depend on the slowest task: a background waiter with a deadline and a partial-completion condition ("40 of 48
+  done, or 30 minutes") plus a heartbeat. If a turn must end with work running, say what will wake the session and
+  when.
+- **AskUserQuestion blocks the session with no timeout** [31 Oct]. Use it only after launching everything that can
+  proceed, when the owner is evidently present (replied within minutes) and no running work will need you before they
+  can answer. Otherwise ask in a normal reply with the recommended option and the 15-minute default, start a background
+  timer (Bash `sleep 900` with `run_in_background`), keep working, and apply the default when it fires.
+- **Subagents run at effort xhigh, not max** [22 Oct], set explicitly on every subagent.
+- **Act on the idle-node reminder** [29 Oct]. A user-level hook (`~/.claude/settings.json` running
+  `claude_lab/nodeq/hook.sh`) adds an `[idle nodes]` line once workers have idled 10 minutes. Act on it in the same turn
+  (AGENTS §5.4): queue useful authorized work or say why none is ready. If your own tasks cause it (serial loops over
+  units, few of their declared cores busy), fan them out. Before ending a turn with work queued, check `nodeq status`
+  once: busy cores near what your tasks declared, no idle nodes that per-unit tasks could fill.
