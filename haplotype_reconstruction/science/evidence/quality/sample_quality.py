@@ -14,9 +14,10 @@ with K ~ Binomial(d, e), e the contig's clean wrong-allele rate (r3's eps0) and 
 (library, site) is eligible when the library is observed there and no other library carries the minor allele; every
 eligible cell enters, k = 0 included.
 
-**Composite weights.** Cells of a library closer than one sequenced fragment share reads. Each eligible cell weighs
-1 / (the library's eligible cells in its ``fragment_bp`` window); windows are counted from the contig's first passing
-site, so translating every coordinate changes nothing.
+**Composite weights.** Nearby cells of a library share reads. Each eligible cell weighs 1 / (1 + the sum of phi over
+the library's other eligible cells within the contig's read-sharing range), phi(d) the contig's estimated read sharing
+at distance d (science.evidence.read_sharing; 4.21, replacing a fixed 1,000 bp window): a working weight for this
+selected mixture score, not its covariance. Without measured sharing every weight is 1.
 
 **Cell model.** a_min = ``minimum_foreign_fraction`` / 2 is a working foreign-allele amplitude. An eligible cell in
 depth class j (the library's eligible-cell depth quantiles, ``heterozygote_depth_classes`` of them) has minor reads k
@@ -85,12 +86,12 @@ import math
 from collections.abc import Mapping
 
 import numpy as np
-from numba import prange, types
+from numba import get_num_threads, prange, types
 from scipy.stats import binom, chi2
 
 from haplotype_reconstruction.contracts.evidence import InheritedSegment, SampleQualityDecision
 from haplotype_reconstruction.core import ties
-from haplotype_reconstruction.core.kernels import kernel
+from haplotype_reconstruction.core.kernels import bounded_team, kernel, sample_team
 from haplotype_reconstruction.core.ties import TieCount, TieCounts
 
 from .parameters import (
@@ -187,16 +188,76 @@ def carrier_thresholds(max_depth: int, error_rate: float, level: float) -> np.nd
     return low
 
 
-def _region_bounds(passing_positions, regions, fragment_bp):
-    """Fragment-window indices (counted from the first passing site) cutting the passing sites into ``regions`` runs
-    of about equal site counts; a cell's region is the number of cuts at or below its window. Cuts that coincide, or
-    fall in the first window, are dropped, so a fragment window never spans two regions."""
+def _region_bounds(passing_positions, regions):
+    """Positions cutting the passing sites into ``regions`` runs of about equal site counts; a cell's region is the
+    number of cuts at or below its position. Cuts that coincide, or fall at the first passing site, are dropped."""
     n = len(passing_positions)
     if n == 0 or regions <= 1:
         return np.zeros(0, np.int64)
     indices = (np.arange(1, regions) * n) // regions
-    windows = (passing_positions[indices] - passing_positions[0]) // fragment_bp
-    return np.unique(windows[windows > 0]).astype(np.int64)
+    cuts = passing_positions[indices]
+    return np.unique(cuts[cuts > passing_positions[0]]).astype(np.int64)
+
+
+@kernel(
+    overloads=(
+        (
+            types.Array(types.int64, 1, "C", readonly=True), types.Array(types.int64, 1, "C", readonly=True),
+            types.Array(types.int64, 1, "C", readonly=True), types.Array(types.float64, 1, "C", readonly=True),
+            types.int64, types.Array(types.float64, 1, "C"),
+        ),
+    ),
+    cache=True,
+    parallel=True,
+    nogil=True,
+)
+def _shared_sums(sample, position, edges, phi, reach, out):
+    """out[c] = sum of phi(|x_c - x_c'|) over the other cells c' of c's sample within ``reach`` bp; cells sorted by
+    (sample, position), phi per bin of ``edges``. Every cell's sum is independent (parallel over cells)."""
+    n = sample.shape[0]
+    for c in prange(n):
+        total = 0.0
+        for side in (-1, 1):
+            o = c + side
+            while 0 <= o < n and sample[o] == sample[c]:
+                distance = abs(position[o] - position[c])
+                if distance >= reach:
+                    break
+                k = 0
+                while edges[k + 1] <= distance:
+                    k += 1
+                total += phi[k]
+                o += side
+        out[c] = total
+
+
+@kernel(
+    overloads=((types.Array(types.int64, 1, "C", readonly=True), types.int64[::1],
+                types.int64[::1], types.int64[::1], types.float64[::1], types.float64[::1]),),
+    cache=True, parallel=True, nogil=True,
+)
+def _add_tail_sums(position, sample_edges, lower, upper, weights, out):
+    """Add the sparse tail with two moving endpoints on each side of a cell.
+
+    Cells are sorted by sample and position. For each nonzero tail bin, every endpoint traverses the sample once,
+    so time depends on the cell count and the number of positive tail bins and is independent of the width in bp.
+    """
+    for s in prange(len(sample_edges) - 1):
+        first, stop = sample_edges[s], sample_edges[s + 1]
+        for b in range(len(weights)):
+            left_low = left_high = right_low = right_high = first
+            low, high, weight = lower[b], upper[b], weights[b]
+            for i in range(first, stop):
+                x = position[i]
+                while left_low < stop and position[left_low] <= x - high:
+                    left_low += 1
+                while left_high < stop and position[left_high] <= x - low:
+                    left_high += 1
+                while right_low < stop and position[right_low] < x + low:
+                    right_low += 1
+                while right_high < stop and position[right_high] < x + high:
+                    right_high += 1
+                out[i] += (left_high - left_low + right_high - right_low) * weight
 
 
 class _Collector:
@@ -206,21 +267,31 @@ class _Collector:
     cells are weighted."""
 
     def __init__(
-        self, n_samples, error_rate, level, heterozygote_balance, fragment_bp, region_bounds, origin, *, reverse=False
+        self, n_samples, error_rate, level, heterozygote_balance, read_sharing, region_bounds, *, reverse=False
     ):
         self.reverse = ties.reverse_conventions(reverse)
         self.n = n_samples
         self.error_rate, self.level = error_rate, level
-        self.balance, self.fragment_bp = heterozygote_balance, fragment_bp
+        self.balance = heterozygote_balance
+        edges, bins, reach = read_sharing.consumer_curve()
+        self.edges = np.ascontiguousarray(edges, dtype=np.int64)
+        self.phi = np.ascontiguousarray(bins, dtype=np.float64)
+        self.reach = int(reach)
+        self.molecular_reach = self.reach
+        self.tail = None
+        if read_sharing.applied_tail is not None:
+            positive = np.flatnonzero(read_sharing.applied_tail)
+            self.molecular_reach = int(read_sharing.range_bp)
+            self.tail = (edges[positive], edges[positive + 1], bins[positive])
         self.bounds = region_bounds
         self.regions = len(region_bounds) + 1
-        self.origin = origin
+        self.context = (np.zeros(0, np.int64), np.zeros(0, np.int64))  # (sample, position) of cells weighed last
         self.table = carrier_thresholds(255, error_rate, level)
         self.observed = np.zeros(n_samples, np.int64)
         self.eligible = np.zeros(n_samples, np.int64)
         self.minor_cells = np.zeros(n_samples, np.int64)
         self.codes, self.weights, self.entries = [], [], 0
-        self.open = tuple(np.zeros(0, np.int64) for _ in range(5))  # (sample, window, orientation, depth, k)
+        self.open = tuple(np.zeros(0, np.int64) for _ in range(5))  # (sample, position, orientation, depth, k)
         self.columns = [[] for _ in range(8)]
         self.passing_sites = self.contributing = self.tied = 0
 
@@ -231,18 +302,35 @@ class _Collector:
             self.codes, self.weights = [unique], [np.bincount(inverse, weights=weight)]
         self.entries = sum(len(code) for code in self.codes)
 
-    def _weigh(self, sample, window, orientation, d, k):
-        """Histogram the eligible cells of complete windows, each weighing 1 / (its library's cells in the window)."""
+    def _weigh(self, sample, position, orientation, d, k, neighbours):
+        """Histogram eligible cells, each weighing 1 / (1 + sum of phi over its library's other cells within reach),
+        the other cells being ``neighbours`` (sample, position: every eligible cell within reach of these)."""
         if not len(sample):
             return
-        region = np.searchsorted(self.bounds, window, side="right").astype(np.int64)
-        local = window - window.min()
-        key = sample * (int(local.max()) + 1) + local
-        _, inverse, size = np.unique(key, return_inverse=True, return_counts=True)
+        region = np.searchsorted(self.bounds, position, side="right").astype(np.int64)
+        if self.reach > 0:
+            all_sample = np.concatenate((neighbours[0], sample))
+            all_position = np.concatenate((neighbours[1], position))
+            order = np.lexsort((all_position, all_sample))
+            sums = np.zeros(len(order))
+            frozen = [np.ascontiguousarray(a) for a in (all_sample[order], all_position[order], self.edges, self.phi)]
+            for a in frozen:
+                a.flags.writeable = False
+            _shared_sums(*frozen, self.molecular_reach, sums)
+            if self.tail is not None:
+                sample_edges = frozen[0].searchsorted(np.arange(self.n + 1))
+                threads = sample_team(self.n, get_num_threads(), len(order) // self.n)
+                with bounded_team(threads):
+                    _add_tail_sums(frozen[1], sample_edges, *self.tail, sums)
+            shared = np.empty(len(order))
+            shared[order] = sums
+            weight = 1.0 / (1.0 + shared[len(neighbours[0]):])
+        else:
+            weight = np.ones(len(sample))
         code = (((sample * self.regions + region) * 2 + orientation) * _CODE + d) * _CODE + k
         unique, where = np.unique(code, return_inverse=True)
         self.codes.append(unique)
-        self.weights.append(np.bincount(where, weights=1.0 / size[inverse]))
+        self.weights.append(np.bincount(where, weights=weight))
         self.entries += len(unique)
         if self.entries > _REDUCE_ENTRIES:
             self._reduce()
@@ -270,18 +358,18 @@ class _Collector:
         d, k = dep[site, sample], minor[site, sample]
         self.eligible += np.bincount(sample, minlength=n)
         self.minor_cells += np.bincount(sample[k > 0], minlength=n)
-        # Composite weights need every cell of a window: the tile's last window stays open until the next tile.
-        window = (positions - self.origin) // self.fragment_bp
+        # Composite weights need every cell within reach on both sides: cells within reach of the tile's last site
+        # stay open until the next tile, and the last weighed cells within reach are kept as left context.
         cells = (
             sample.astype(np.int64),
-            window[site],
+            positions[site].astype(np.int64),
             minor_is_alt[site].astype(np.int64),
             d.astype(np.int64),
             k.astype(np.int64),
         )
         cells = tuple(np.concatenate((held, new)) for held, new in zip(self.open, cells, strict=False))
-        complete = cells[1] < window[-1]
-        self._weigh(*(column[complete] for column in cells))
+        complete = cells[1] < int(positions[-1]) - self.reach if self.reach > 0 else np.ones(len(cells[0]), bool)
+        self._weigh(*(column[complete] for column in cells), self._neighbours(cells, complete))
         self.open = tuple(column[~complete] for column in cells)
 
         # Near-private carriers (at most two per site) for the inherited-segment report.
@@ -319,8 +407,27 @@ class _Collector:
         for column, value in zip(self.columns, values, strict=False):
             column.append(value)
 
+    def _neighbours(self, cells, complete):
+        """The other cells a complete cell can reach: the left context and the open (not yet complete) cells. The next
+        context is every weighed cell (old context and these complete cells) still within reach of a cell that is yet
+        to be weighed: the open cells, and the later tiles' cells, which lie beyond this tile (Sol review 2, 28)."""
+        open_cells = ~complete
+        neighbours = (
+            np.concatenate((self.context[0], cells[0][open_cells])),
+            np.concatenate((self.context[1], cells[1][open_cells])),
+        )
+        if self.reach > 0 and complete.any():
+            merged = (
+                np.concatenate((self.context[0], cells[0][complete])),
+                np.concatenate((self.context[1], cells[1][complete])),
+            )
+            earliest = int(cells[1][open_cells].min()) if open_cells.any() else int(cells[1][complete].max())
+            keep = merged[1] >= earliest - self.reach
+            self.context = (merged[0][keep], merged[1][keep])
+        return neighbours
+
     def finish(self):
-        self._weigh(*self.open)
+        self._weigh(*self.open, self.context)
         self._reduce()
         code = self.codes[0] if self.codes else np.zeros(0, np.int64)
         weight = self.weights[0] if self.weights else np.zeros(0)
@@ -587,6 +694,7 @@ def _weights(F, FA, n, cls, classes, with_c, y, iterations):
     direction = np.empty(P + 1)
     trial = np.empty(len(y))
     index = np.empty(size, np.int64)
+    density = np.empty(len(n))
     value = _objective(F, FA, n, cls, Q, contamination, with_c, y)
     damping = WEIGHT_DAMPING_FLOOR
     for _ in range(iterations):
@@ -598,17 +706,34 @@ def _weights(F, FA, n, cls, classes, with_c, y, iterations):
             pivot[j] = best
         gradient[:] = 0.0
         hessian[:, :] = 0.0
+        # The mixture density of every weighted bin, and the unit the sums below are formed in. A bin that no weighted
+        # component explains has a density far below the others (the components are scaled per bin, so a class whose
+        # weights sit on low error rates gives a clear heterozygote 1e-160 and less); its curvature weight n / m^2 then
+        # leaves the float range (m * m underflowed to 0 and the division raised: TroMau chr7, item RS). The Newton
+        # system is homogeneous in the densities: with m' = m / scale, g' = scale g and H' = scale^2 H, so the step of
+        # the damped system (-H + damping x largest curvature) s = g is scale times the step of the primed one. scale
+        # is the smallest density when its square would fall below POSITIVE_WEIGHT_FLOOR and 1 otherwise (then the
+        # arithmetic is the unscaled one, bit for bit).
+        smallest = np.inf
         for b in range(len(n)):
             if n[b] == 0.0:
                 continue
-            j = cls[b]
-            base = j * Q
+            base = cls[b] * Q
             m = 0.0
             for p in range(Q):
                 m += y[base + p] * F[p, b]
             if with_c:
                 m += y[contamination] * FA[b]
             m = max(m, POSITIVE_WEIGHT_FLOOR)
+            density[b] = m
+            smallest = min(smallest, m)
+        scale = smallest if smallest * smallest < POSITIVE_WEIGHT_FLOOR else 1.0
+        for b in range(len(n)):
+            if n[b] == 0.0:
+                continue
+            j = cls[b]
+            base = j * Q
+            m = density[b] / scale
             weight = n[b] / (m * m)
             f0 = F[pivot[j], b]
             for p in range(P):
@@ -667,12 +792,12 @@ def _weights(F, FA, n, cls, classes, with_c, y, iterations):
                 for i in range(free):
                     t = index[i]
                     if with_c and t == c_index:
-                        trial[contamination] = max(y[contamination] + solved[i], 0.0)
+                        trial[contamination] = max(y[contamination] + scale * solved[i], 0.0)
                     else:
                         j = t // P
                         p = t % P
                         q = j * Q + (p if p < pivot[j] else p + 1)
-                        trial[q] = max(y[q] + solved[i], 0.0)
+                        trial[q] = max(y[q] + scale * solved[i], 0.0)
                 feasible = True
                 share = trial[contamination] if with_c else 0.0
                 for j in range(classes):
@@ -1103,20 +1228,21 @@ def _low_log_ratio(k, d, het):
     return _truncated_binomial(k, d, 0.5 * het) - _truncated_binomial(k, d, het)
 
 
-def _event_weights(group, position, fragment_bp):
-    """1 / size of each cell's event; cells are sorted by (group, position)."""
+def _event_weights(group, position, reach_bp):
+    """1 / size of each cell's event (cells closer than ``reach_bp``, the read-sharing range, share reads); cells are
+    sorted by (group, position)."""
     new = np.ones(len(position), bool)
-    new[1:] = (group[1:] != group[:-1]) | (np.diff(position) >= fragment_bp)
+    new[1:] = (group[1:] != group[:-1]) | (np.diff(position) >= reach_bp)
     event = np.cumsum(new) - 1
     return 1.0 / np.bincount(event)[event]
 
 
-def _segments(n_samples, cells, flagged, config):
+def _segments(n_samples, cells, flagged, config, reach_bp):
     k, d, het, position, sample, partner, partner_k, partner_d = cells
     hetlike = np.flatnonzero(_low_log_ratio(k, d, het) <= 0)
     hetlike = hetlike[np.lexsort((position[hetlike], partner[hetlike], sample[hetlike]))]
     pair = sample[hetlike] * (n_samples + 1) + partner[hetlike] + 1
-    weight = _event_weights(pair, position[hetlike], config.fragment_bp)
+    weight = _event_weights(pair, position[hetlike], reach_bp)
     region = np.ones(len(hetlike), bool)
     region[1:] = (pair[1:] != pair[:-1]) | (np.diff(position[hetlike]) >= config.segment_gap_bp)
     bounds = np.flatnonzero(np.r_[region, True])
@@ -1162,6 +1288,7 @@ def assess_counts(
     error_rate,
     config: SampleQualityParameters,
     *,
+    read_sharing,
     balance_interval=None,
     balance_reason=None,
     chunk_sites: int = _CHUNK_SITES,
@@ -1195,6 +1322,7 @@ def assess_counts(
         config,
         balance_interval,
         balance_reason,
+        read_sharing=read_sharing,
         reverse=reverse,
     )
 
@@ -1233,6 +1361,7 @@ def _assess(
     balance_interval,
     balance_reason,
     *,
+    read_sharing,
     reverse=False,
 ):
     interval = (
@@ -1241,10 +1370,9 @@ def _assess(
         else (float(heterozygote_balance), float(heterozygote_balance))
     )
     level = config.carrier_tail_level / max(n_samples - 1, 1)
-    bounds = _region_bounds(passing_positions, config.artefact_regions, config.fragment_bp)
-    origin = int(passing_positions[0]) if len(passing_positions) else 0
+    bounds = _region_bounds(passing_positions, config.artefact_regions)
     collector = _Collector(
-        n_samples, error_rate, level, heterozygote_balance, config.fragment_bp, bounds, origin, reverse=reverse
+        n_samples, error_rate, level, heterozygote_balance, read_sharing, bounds, reverse=reverse
     )
     for alt, dep, positions in tiles:
         collector.add(alt, dep, positions)
@@ -1319,7 +1447,7 @@ def _assess(
         fraction_ceiling=ceiling,
         carrier_level=float(level),
         artefact_regions=int(collector.regions),
-        segments=_segments(n_samples, cells, flagged, config),
+        segments=_segments(n_samples, cells, flagged, config, max(int(read_sharing.range_bp), 1)),
         config=config,
         tie_events=TieCounts(tuple(TieCount(kind, **values) for kind, values in minor_allele.items())),
     )

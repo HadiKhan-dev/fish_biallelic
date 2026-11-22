@@ -147,6 +147,7 @@ class ExclusionEvidence:
     log_e:          float64 [D] exact log E, or a certified lower endpoint.
     log_e_upper:    optional float64 [D] upper endpoint; None means exact evidence without a separate upper endpoint.
     observed_sites: int64 [D] sites observed in both samples.
+    certifiable:    bool [D], true when neither sample belongs to a fitted sharing library.
     markers:        markers of the contig; pattern_fallback_samples: samples scored without the
                     exact repeated-pattern cache (more than its cap of distinct GL triples).
     """
@@ -161,7 +162,8 @@ class ExclusionEvidence:
     # The contig's fixed weight in the genome e-value (DESIGN_417 D9): its configured working-map Morgans over the
     # run's; the genome e-value is sum_k w_k E_k and a certificate proves log E_k >= threshold - log w_k.
     log_weight: float = record_field("state", axes=(), units="1", dtype="float", default=float("nan"), kw_only=True)
-    schema: int = schema_field(2)
+    certifiable: np.ndarray | None = record_field("state", axes=("D",), dtype="bool", default=None, kw_only=True)
+    schema: int = schema_field(3)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -611,6 +613,7 @@ class CountExclusion:
     log_e: np.ndarray = record_field("state", axes=("D",), units="nats", dtype="float64")
     observed_sites: np.ndarray = record_field("obs", axes=("D",), units="count", dtype="int64")
     log_e_upper: np.ndarray | None = record_field("state", axes=("D",), units="nats", dtype="float64", default=None)
+    certifiable: np.ndarray | None = record_field("state", axes=("D",), dtype="bool", default=None)
 
 
 @dataclass(frozen=True)
@@ -652,6 +655,7 @@ class CountRelease:
     log_e: np.ndarray = record_field("call", axes=("D",), units="nats", dtype="float64")
     observed_sites: np.ndarray = record_field("obs", axes=("D",), units="1", dtype="int64")
     log_e_upper: np.ndarray | None = record_field("call", axes=("D",), units="nats", dtype="float64", default=None)
+    certifiable: np.ndarray | None = record_field("call", axes=("D",), dtype="bool", default=None)
 
 
 @dataclass(frozen=True)
@@ -1322,6 +1326,7 @@ class ExclusionEvidenceView:
     log_e_lower: np.ndarray | None = record_field("report", axes=("D",), units="nats", dtype="float64", default=None)
     log_e_upper: np.ndarray | None = record_field("report", axes=("D",), units="nats", dtype="float64", default=None)
     log_e_exact: np.ndarray | None = record_field("report", axes=("D",), dtype="bool", default=None)
+    certifiable: np.ndarray | None = record_field("report", axes=("D",), dtype="bool", default=None)
 
     def __len__(self) -> int:
         return len(self.sample)
@@ -1637,18 +1642,55 @@ class HammingTransition:
 
 
 @dataclass(frozen=True)
-class SourceFactors:
-    """Exact source-posterior chain of every sample as a candidate parent (pedigree's reduced source model).
+class SourceLaws:
+    """Every sample's source chain as a candidate parent, class-free (science.pedigree.read_sources): the chain over
+    ordered diplotypes and the painting's read classes at its path strength, and its transmission-oriented propagation
+    (one parental homologue transmitted per bin, the selector switching with the meiotic switch probability).
 
-    initial:      float64 [N, S, S] normalised ordered-diplotype law of bin 0 (homologue-symmetrised).
-    right_weight: float64 [N, B-1, S, S] backward factors r_b(v), max-normalised per boundary, so that
-                  K_b(u, v) = A_b(u, v) r_b(v) / sum_w A_b(u, w) r_b(w) is the posterior chain kernel.
-    available:    bool [N] samples with at least one informative painting site; others keep a uniform
-                  initial law and unit right weights."""
+    pair_mass:     float64 [N, B, S (S + 1) / 2] unordered pair masses p(a, b) + p(b, a) (p(a, a) on the diagonal) of
+                   the per-bin posterior, upper-triangle order; the oriented law is their homologue-symmetric split.
+    pi:            float64 [N, B, S] transmitted-state marginal.
+    diagonal_flow, outgoing_flow, incoming_flow: float64 [N, B-1, S] transmitted state kept, left and entered across
+                   each boundary (the oriented propagation's adjacent joint law).
+    background_alt: float64 [N, M] BACKGROUND's transmitted ALT probability at each marker conditioned on the
+                   sample's own reads (its frequency where that is 0 or 1).
+    available:     bool [N] samples with at least one informative painting site; the others keep the uniform chain."""
 
-    initial: np.ndarray = record_field("state", axes=("N", "S", "S"), units="1", dtype="float64")
-    right_weight: np.ndarray = record_field("state", axes=("N", "B-1", "S", "S"), units="1", dtype="float64")
+    pair_mass: np.ndarray = record_field("state", axes=("N", "B", "F"), units="probability", dtype="float64")
+    pi: np.ndarray = record_field("state", axes=("N", "B", "S"), units="probability", dtype="float64")
+    diagonal_flow: np.ndarray = record_field("state", axes=("N", "B-1", "S"), units="probability", dtype="float64")
+    outgoing_flow: np.ndarray = record_field("state", axes=("N", "B-1", "S"), units="probability", dtype="float64")
+    incoming_flow: np.ndarray = record_field("state", axes=("N", "B-1", "S"), units="probability", dtype="float64")
+    background_alt: np.ndarray = record_field("state", axes=("N", "M"), units="probability", dtype="float64")
     available: np.ndarray = record_field("state", axes=("N",), units="1", dtype="bool")
+
+    def __post_init__(self) -> None:
+        freeze_record_arrays(self)
+
+
+@dataclass(frozen=True)
+class ChildReads:
+    """Every sample's read state as a child at its observed selected markers (science.pedigree.child_reads): the
+    class chain the child's configuration chains carry (science.pedigree.read_forward).
+
+    offsets:  int64 [N + 1] each sample's slots, child-major and in marker order over its observed markers (the order
+              of forward.observed_sites); a sample without read state (deep at every site) has none.
+    initial:  float64 [N, C] the class law at the component's first selected marker.
+    operator: float32 [K, C, C] the class operator into each slot from the sample's previous observed marker (from the
+              first selected marker for its first slot), composed over the selected markers between (rows: the class
+              at the earlier marker).
+    ratio:    float32 [K, 4, C] the GL-anchored read ratio R_c(g1, g2) of each class and ordered allele configuration
+              00, 01, 10, 11 (homologue 1's allele first; painting.read_factor's factor at full strength):
+              [(1 - eps) L_g kappa_c(g) + eps B] / [(1 - eps) L_g + eps B], sum_c pi(c) R_c(g) = 1."""
+
+    offsets: np.ndarray = record_field("state", axes=("N+1",), units="1", dtype="int64")
+    initial: np.ndarray = record_field("state", axes=("N", "C"), units="probability", dtype="float64")
+    operator: np.ndarray = record_field("state", axes=("K", "C", "C"), units="probability", dtype="float32")
+    ratio: np.ndarray = record_field("state", axes=("K", "4", "C"), units="1", dtype="float32")
+
+    @property
+    def n_classes(self) -> int:
+        return int(self.initial.shape[1])
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -1663,7 +1705,7 @@ class PreparedComponent:
     bin_sizes:         int64 [B] selected markers per painting bin (>= 1), markers bin-major.
     anchored_states:   bool [S] classes called somewhere in the component (BACKGROUND last, False).
     transition:        the painting's source transition (HammingTransition).
-    factors:           exact source-posterior factors (SourceFactors).
+    sources:           every sample's source laws as a candidate parent (SourceLaws).
     robustness_epsilon: painting emission robustness weight (uniform genotype mixture).
     selector_switch_probability: float64 [B-1] meiotic switch probability per boundary (pedigree map); its
                        per-bin Haldane coordinates are the component's material (DESIGN_417 D1).
@@ -1674,14 +1716,20 @@ class PreparedComponent:
     information_exponent: float64 [N, B] tempered-view emission exponent of each child and bin.
     selector_fallback_bp: float64 [B-1] the part of each boundary's bin-centre interval (bp) that the working map
                        measures at its fallback rate (all of it on a map-free contig, the stretches beyond a map
-                       file's knots otherwise): the material under an estimated fallback rate (DESIGN_RELEASE)."""
+                       file's knots otherwise): the material under an estimated fallback rate (DESIGN_RELEASE).
+    label_error:       float32 [N, B, 3] the reference painting's (u, v_0, v_1) per sample and bin (ComponentPainting.
+                       label_error, ADVICE2 11.1): u the probability that the released pair of local classes is wrong,
+                       v_t that track t's label is wrong; NaN where nothing is released; None for fixtures without it
+                       (every allowance then sits at its floor).
+    child_reads:       every sample's read state as a child (ChildReads); None when the painting carries no read state
+                       (one read class)."""
 
     component_index: int = record_field("state", axes=(), units="1", dtype="int64")
     named_alleles: np.ndarray = record_field("state", axes=("S-1", "M"), units="1", dtype="int8")
     bin_sizes: np.ndarray = record_field("state", axes=("B",), units="1", dtype="int64")
     anchored_states: np.ndarray = record_field("state", axes=("S",), units="1", dtype="bool")
     transition: HammingTransition = record_field("state", axes=(), units="1", dtype="HammingTransition")
-    factors: SourceFactors = record_field("state", axes=(), units="1", dtype="SourceFactors")
+    sources: SourceLaws = record_field("state", axes=(), units="1", dtype="SourceLaws")
     robustness_epsilon: float = record_field("state", axes=(), units="1", dtype="float64")
     selector_switch_probability: np.ndarray = record_field("state", axes=("B-1",), units="1", dtype="float64")
     genotype_likelihoods: np.ndarray = record_field("state", axes=("N", "M", "3"), units="probability", dtype="float64")
@@ -1690,6 +1738,12 @@ class PreparedComponent:
     information_exponent: np.ndarray = record_field("state", axes=("N", "B"), units="1", dtype="float64")
     selector_fallback_bp: np.ndarray | None = record_field(
         "state", axes=("B-1",), units="bp", dtype="float64", default=None, kw_only=True
+    )
+    label_error: np.ndarray | None = record_field(
+        "state", axes=("N", "B", "3"), units="probability", dtype="float32", default=None, kw_only=True
+    )
+    child_reads: ChildReads | None = record_field(
+        "state", axes=(), units="1", dtype="ChildReads | None", default=None, kw_only=True
     )
 
     @property
@@ -1726,12 +1780,17 @@ class PreparedChromosome:
     )
     omitted_reason: str | None = record_field("state", axes=(), units="1", dtype="str | None", default=None)
     configured_morgans: float = record_field("state", axes=(), units="Morgans", dtype="float64", default=float("nan"))
+    # 4.21 B2: sum over the chromosome's information groups of n_g / (1 + (n_g - 1) r_T), n_g its selected markers,
+    # r_T the transferred working temperature of B1; NaN under the 4.20 rule (information_temperature = fixed)
+    effective_units: float = record_field(
+        "state", axes=(), units="1", dtype="float64", default=float("nan"), kw_only=True
+    )
 
     @property
     def informative_markers(self) -> int:
         return sum(component.informative_markers for component in self.components)
 
-    schema: int = schema_field(4)
+    schema: int = schema_field(6)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -1824,6 +1883,9 @@ class CompactM1:
     floors: np.ndarray = record_field("state", axes=("C", "N"), units="nats", dtype="float64")
     markers: np.ndarray = record_field("obs", axes=("C",), dtype="float64")
     eligible_counts: np.ndarray = record_field("state", axes=("N",), dtype="int64")
+    # 4.21 B2: per chromosome the effective information units of the retention temperature (m1.temperature); None
+    # under the 4.20 rule (information_temperature = fixed)
+    units: np.ndarray | None = record_field("state", axes=("C",), dtype="float64", default=None, kw_only=True)
 
     @property
     def n_samples(self) -> int:

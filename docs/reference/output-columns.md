@@ -610,8 +610,9 @@ Source: [`EXCLUSION_EVIDENCE_COLUMNS`](../../haplotype_reconstruction/outputs/re
 |---|---|---|
 | 1 | `sample` | sample identifier (text). |
 | 2 | `candidate_parent` | candidate parent (1). |
-| 3 | `log_e` | exclusion log-evidence (nats). |
+| 3 | `log_e` | scalar exclusion log score (nats). |
 | 4 | `observed_sites` | observed sites (1). |
+| 5 | `certifiable` | whether the score can certify exclusion (1). |
 
 Interval-bearing products append `log_e_lower`, `log_e_upper`, `log_e_exact`, in that order. `log_e` is empty when the interval is not exact.
 

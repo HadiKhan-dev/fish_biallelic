@@ -47,6 +47,37 @@ class FounderRefit:
     sample_ids: tuple[str, ...] = record_field("obs", axes=("N",), units="1", dtype="str")
     components: tuple[ComponentRefit, ...] = record_field("call", axes=("C",), units="1", dtype="ComponentRefit")
     excluded_samples: tuple[str, ...] = record_field("state", axes=(), units="1", dtype="str")
+    # 4.21 acceptance rule (ADVICE2 sections 12 and 15.1), per carrier class (science.refit.parameters.CARRIER_CLASS_EDGES:
+    # one carrier, 2, 3-4, 5-8, 9-16, 17-32, 33+): start-state called cells and those with a positive gain, the pooled
+    # class's discordance coefficient (a working coefficient, not a probability of error) and penalty (+inf / NaN where
+    # nothing can depart), whether the coefficient sits at a bound, changed and filled cells; and the residual
+    # certificate: sites cut off by the coordinate-sweep guard, single-row moves still eligible and supported after the
+    # sweeps, moves refused by support alone (the discarded repairs) and moves eligible after the fills.
+    class_cells: np.ndarray | None = record_field(
+        "report", axes=("7",), units="1", dtype="int64", default=None, kw_only=True
+    )
+    class_positive: np.ndarray | None = record_field(
+        "report", axes=("7",), units="1", dtype="int64", default=None, kw_only=True
+    )
+    class_discordance: np.ndarray | None = record_field(
+        "report", axes=("7",), units="1", dtype="float64", default=None, kw_only=True
+    )
+    class_penalty: np.ndarray | None = record_field(
+        "report", axes=("7",), units="nats", dtype="float64", default=None, kw_only=True
+    )
+    class_bound: np.ndarray | None = record_field(
+        "report", axes=("7",), units="1", dtype="bool", default=None, kw_only=True
+    )
+    class_changed: np.ndarray | None = record_field(
+        "report", axes=("7",), units="1", dtype="int64", default=None, kw_only=True
+    )
+    class_filled: np.ndarray | None = record_field(
+        "report", axes=("7",), units="1", dtype="int64", default=None, kw_only=True
+    )
+    guard_sites: int = record_field("report", axes=(), units="1", dtype="int64", default=0, kw_only=True)
+    eligible_remaining: int = record_field("report", axes=(), units="1", dtype="int64", default=0, kw_only=True)
+    refused_by_support: int = record_field("report", axes=(), units="1", dtype="int64", default=0, kw_only=True)
+    eligible_after_fills: int = record_field("report", axes=(), units="1", dtype="int64", default=0, kw_only=True)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)

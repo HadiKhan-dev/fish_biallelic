@@ -10,7 +10,7 @@ haplotypes status example/run
 haplotypes evaluate example/run --cores 4
 ```
 
-`example` writes a complete coalescent configuration with an exact site count, three diploid founders and three contigs by default. Its source effective size is an explicit generating assumption.
+`example` writes a complete coalescent configuration with an exact site count, three diploid founders and three contigs by default. Its source effective size is an explicit generating assumption. Its reads are short paired-end reads (150 bp mates of about 375 bp fragments, 1% of reads at a homozygous site showing the other allele); at the default density of one site per 10 kb a fragment rarely covers two sites.
 
 `run` initialises a new run automatically: it resolves and binds the configuration,
 contig/sample order and simulation seed, then materialises the observations and
@@ -118,8 +118,9 @@ compensates the surviving depth in expectation. The settings reference lists
 
 ## Run one chromosome on multiple nodes
 
-Initialize the run and prepare the contig's evidence as usual. On each allocated
-node, start the same command using the same fixed source tree, configuration,
+Initialize the run, prepare every contig's evidence and run `haplotypes relatedness`
+to publish the observation pilot. On each allocated node, start the same command
+using the same fixed source tree, configuration,
 output directory and checkpoint root:
 
 ```bash
@@ -129,10 +130,10 @@ haplotypes reconstruct CONFIG --contig chr3 --cores 76 --memory-limit 240G
 Additional invocations may join later. Each recreates the graph from checked
 publications and computes unclaimed units: discovery and selection blocks,
 selection context refits, founder-completion ranges and their final gather,
-assembly batches, refinement components, painting and founder refit. A small
-founder completion is one whole-product unit. Painting and refit are whole-contig
+assembly batches, refinement components, painting and the founder-refit histogram. A small
+founder completion is one whole-product unit. Painting and refit histograms are whole-contig
 units. Each process finishes when the reconstruction cut is complete: the final
-assembly before the run's painting calibration exists, painting and refit after it
+assembly before calibration, or painting and the refit histogram afterwards
 (see [workflow mode](workflow.md)).
 Genome-wide stages keep their ordinary workflow; this command launches no nodes.
 

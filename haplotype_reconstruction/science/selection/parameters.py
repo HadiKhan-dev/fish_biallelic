@@ -299,7 +299,8 @@ class ContextRefitParameters:
 
     posterior_threshold: a refitted allele is released at this site-posterior probability.
     min_support: and with this carrier support (count or mass).
-    emission_mix: mixing weight of a uniform genotype in the bin-level carrier emission.
+    The carrier emissions score the component's mixed likelihoods (the run's outlier rate against the cohort law,
+    science.shared.observation): no mixing weight of their own.
     """
 
     posterior_threshold: float = field(
@@ -314,13 +315,6 @@ class ContextRefitParameters:
         metadata={
             "units": "samples or expected carrier mass",
             "provenance": "Require context carrier count or mass support of 2.",
-        },
-    )
-    emission_mix: float = field(
-        default=0.01,
-        metadata={
-            "units": "probability",
-            "provenance": "Uniform genotype mixture weight 0.01 in bin-level carrier emissions.",
         },
     )
 

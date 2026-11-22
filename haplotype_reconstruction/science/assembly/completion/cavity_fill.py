@@ -52,8 +52,9 @@ from haplotype_reconstruction.contracts.roles import record_field
 from ..alleles import site_posterior
 from ..alleles.polynomials import shared_sample_likelihoods
 from . import support
-from .observation import UNIFORM_TOLERANCE, carrier_probability, normalised_evidence, unordered_pairs
-from .parameters import CAVITY_LOG_FLOOR, CavityFillParameters
+from .observation import UNIFORM_TOLERANCE, carrier_probability, centred_evidence, unordered_pairs
+from ...shared.emissions import CENTRED_FLOOR
+from .parameters import CavityFillParameters
 
 
 @dataclass(frozen=True)
@@ -87,8 +88,8 @@ class _SitePosterior:
 
 
 def _informative_cells(evidence, observed, tolerance):
-    """(normalised evidence, observed & non-uniform cells)."""
-    evidence = normalised_evidence(evidence)
+    """(centred evidence, observed & non-uniform cells)."""
+    evidence = centred_evidence(evidence)
     nonuniform = np.ptp(evidence, axis=2) > tolerance
     return evidence, observed & nonuniform
 
@@ -114,20 +115,14 @@ def diploid_genotype_distributions(q: np.ndarray) -> np.ndarray:
     return distribution
 
 
-def site_log_emissions(evidence, distribution, *, uniform_mix, log_floor=CAVITY_LOG_FLOOR):
-    """float64[N, K, K, L]: robust log emissions relative to uninformative evidence.
-
-    The robust likelihood (1 - mix) sum_g P(g) E(g) + mix/3 (evidence normalised here) is floored
-    on the log scale, then log(1/3) is subtracted: an additive state-independent centring that makes
-    every uniform sample/site row exactly zero.
-    """
-    likelihood = np.einsum("nlg,ijlg->nijl", normalised_evidence(evidence), distribution, optimize=True)
-    probability = (1.0 - uniform_mix) * likelihood + uniform_mix / 3.0
-    with np.errstate(divide="ignore"):
-        log_emission = np.log(probability)
-    np.maximum(log_emission, log_floor, out=log_emission)
-    uniform_log = max(float(np.log(1.0 / 3.0)), float(log_floor))
-    return log_emission - uniform_log
+def site_log_emissions(evidence, distribution):
+    """float64[N, K, K, L]: robust log emissions of the centred view, max(log sum_g P(g) L~(g), CENTRED_FLOOR): the
+    log Bayes factor of the pair against the cohort law (science.shared.emissions), so every sample/site row
+    without evidence is exactly zero."""
+    likelihood = np.einsum("nlg,ijlg->nijl", centred_evidence(evidence), distribution, optimize=True)
+    log_emission = np.log(likelihood)
+    np.maximum(log_emission, CENTRED_FLOOR, out=log_emission)
+    return log_emission
 
 
 def _whole_bin_statistics(q, called, evidence, observed, rule, uniform_tolerance, informative_focal):
@@ -153,7 +148,7 @@ def _whole_bin_statistics(q, called, evidence, observed, rule, uniform_tolerance
         # (N, K, K, bin sites) float64 at once: N K^2 x 50 x 8 bytes per bin (bounded by the bin width;
         # chunking over samples would change the einsum's kernel choice and so the last bits).
         emissions = site_log_emissions(
-            evidence[:, start:stop], diploid_genotype_distributions(bin_q), uniform_mix=rule.uniform_mix
+            evidence[:, start:stop], diploid_genotype_distributions(bin_q)
         )
         mask = informative[:, start:stop]
         emissions *= mask[:, None, None, :]
@@ -179,7 +174,7 @@ def _whole_bin_statistics(q, called, evidence, observed, rule, uniform_tolerance
 
 
 def _site_posterior(
-    q_site, called_site, focal, observed, pairs, weights, *, uniform_mix, uniform_tolerance, tie_tolerance, settings
+    q_site, called_site, focal, observed, pairs, weights, *, uniform_tolerance, tie_tolerance, settings
 ) -> _SitePosterior:
     """Marginalise the shared unresolved alleles at one founder site.
 
@@ -192,7 +187,7 @@ def _site_posterior(
     the enumeration (``_core_site_posterior``).
     """
     n_founders = len(q_site)
-    evidence = normalised_evidence(focal[:, None, :])[:, 0, :]
+    evidence = centred_evidence(focal[:, None, :])[:, 0, :]
     informative = observed & (np.ptp(evidence, axis=1) > uniform_tolerance)
     unresolved = np.flatnonzero(~called_site)
     n_unresolved = int(unresolved.size)
@@ -204,7 +199,6 @@ def _site_posterior(
             pairs,
             weights,
             unresolved,
-            uniform_mix=uniform_mix,
             tie_tolerance=tie_tolerance,
             settings=settings,
         )
@@ -212,9 +206,8 @@ def _site_posterior(
     bit_positions: np.ndarray = np.arange(n_unresolved, dtype=np.uint64)
     assignments = ((assignment_codes[:, None] >> bit_positions[None, :]) & 1).astype(np.int8)
 
-    robust_evidence = (1.0 - uniform_mix) * evidence + uniform_mix / 3.0
     sample_likelihood = shared_sample_likelihoods(
-        robust_evidence, weights, pairs, (q_site > 0.5).astype(np.int8), unresolved
+        evidence, weights, pairs, (q_site > 0.5).astype(np.int8), unresolved
     )
     with np.errstate(divide="ignore", invalid="ignore"):
         log_sample = np.log(sample_likelihood)
@@ -234,7 +227,7 @@ def _site_posterior(
     if finite_joint_mass:
         assignment_probability = np.exp(log_joint - log_marginal)
     else:
-        # A zero robust mixture can make every assignment impossible.
+        # Every assignment impossible (not expected: the centred view is at least eps at every genotype).
         # Report the normalized prior and let the caller abstain.
         assignment_probability = np.exp(log_prior - float(logsumexp(log_prior)))
 
@@ -265,7 +258,7 @@ def _site_posterior(
 
 
 def _core_site_posterior(
-    q_site, evidence, informative, pairs, weights, unresolved, *, uniform_mix, tie_tolerance, settings
+    q_site, evidence, informative, pairs, weights, unresolved, *, tie_tolerance, settings
 ) -> _SitePosterior:
     """``_site_posterior`` above MAX_EXACT_BITS unresolved founders.
 
@@ -274,7 +267,6 @@ def _core_site_posterior(
     whose likelihood changes with the target allele somewhere on that support.
     """
     n_founders = len(q_site)
-    robust_evidence = (1.0 - uniform_mix) * evidence + uniform_mix / 3.0
     unresolved_q = q_site[unresolved]
     with np.errstate(divide="ignore"):
         log_alt_prior = np.log(unresolved_q)
@@ -282,7 +274,7 @@ def _core_site_posterior(
     with np.errstate(invalid="ignore"):
         prior_log_odds = log_alt_prior - log_ref_prior
     b, core, flips, sizes, log_likelihood, info, sensitive = site_posterior.completion_site(
-        np.ascontiguousarray(robust_evidence),
+        np.ascontiguousarray(evidence),
         np.ascontiguousarray(informative),
         weights,
         pairs,
@@ -378,7 +370,6 @@ def cavity_fill(
                 observed[:, site],
                 pairs,
                 weights,
-                uniform_mix=rule.uniform_mix,
                 uniform_tolerance=uniform_tolerance,
                 tie_tolerance=rule.tie_tolerance,
                 settings=settings,

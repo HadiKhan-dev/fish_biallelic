@@ -2,14 +2,17 @@
 
 For each relatedness family of at least two members and each painting component, everything about the parents comes
 from the OTHER carriers (members, plus the family's sequenced slot samples): a bin is a frame of target member i when
-the others show four parental classes with a unique 2 + 2 split (map_scale_kernels.sib_frames); the frame's emission
-is the painting's own pair emission of the target for the four full-sib configurations (power 1), with the misfit
-column the mean over all packed state pairs. A relationship guard removes members whose evidence is not full-sib
-like before the final frames are built:
+the others show four parental classes with a unique 2 + 2 split (map_scale_kernels.sib_frames). The frame's emission
+(map_scale_reads) is the painting's own pair emission of the target for the four full-sib configurations (power 1,
+at the path strength) carrying the target's read state: a transfer matrix of its read class per configuration, the
+misfit matrix the mean over all unordered label pairs; without read state these are today's scalar ratios. The
+chains (map_scale_chains) carry the read class across frames. A relationship guard removes members whose evidence is
+not full-sib like before the final frames are built:
 
 - pair test: the full-sib IBD-count chain of a member pair must beat the half-sib and parent-offspring chains by
   ``guard_nats`` (each at its own best rate and error, summed over contigs); a member is kept when it passes with at
-  least half of the others it was tested with (and at least one);
+  least half of the others it was tested with (and at least one). It reads the painted classes only (shared keys of
+  the pair's tracks), no emission;
 - target test (iterative): a target whose homologue tracks may leave its parents' classes (entry e_in, exit e_out)
   improves on the full-sib chain at the family's full-sib (r, delta) by more than ``guard_nats`` with a posterior
   non-full-sib frame share of at least ``target_share``: the largest such member of each family is removed (as
@@ -24,21 +27,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import partial
 
 import numpy as np
 
 from ..painting import api as painting_hmm
+from .map_scale_chains import frame_loglik, target_loglik, target_posterior
 from .map_scale_kernels import (
-    frame_loglik,
     pair_alternative_loglik,
     pair_fullsib_loglik,
     pair_observations,
     sib_frames,
     switch_candidates,
-    target_loglik,
-    target_posterior,
 )
-from .parameters import MapScaleParameters
+from .map_scale_parameters import MapScaleParameters
 
 __all__ = ["ComponentInput", "Families", "Frames", "component_input", "families_of", "relevant_samples", "guard",
            "build_frames", "argmax_refined", "packed_emissions", "file_frames"]
@@ -46,8 +48,7 @@ __all__ = ["ComponentInput", "Families", "Frames", "component_input", "families_
 # painting.TrackStatus values (contracts.painting).
 _NAMED, _POOLED, _LOCAL = 2, 3, 6
 # The four full-sib configurations of the 25 track-symbol pairs (5 s1 + s2: s1 = h0, s2 = 2 + h1), then misfit.
-_FULL_SIB_COLUMNS = (2, 3, 7, 8, 25)
-_CHUNK = 4000  # frames per block of the 25-symbol emissions (execution grain only)
+FULL_SIB_COLUMNS = (2, 3, 7, 8, 25)
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,8 @@ class ComponentInput:
     centers float64 [B] bin centres (bp); cls / key int32 [R, 2, B] firm (named or pooled) classes and their bin keys,
     -1 elsewhere; keys int32 [R, 2, B] bin-local keys (firm or local-allele equivalence), -1 when missing; cand1 /
     cand2 int32 [R, 2, B] switch-interval flank keys; packed float64 [R, S (S + 1) / 2, B] the painting's binned log
-    emissions (upper triangle); n_states S."""
+    emissions (upper triangle) at the path strength, None when the painting carries the read state (the frames'
+    emissions are then rebuilt with it: map_scale_reads.ReadFrames); n_states S."""
 
     contig: int
     centers: np.ndarray
@@ -66,7 +68,7 @@ class ComponentInput:
     keys: np.ndarray
     cand1: np.ndarray
     cand2: np.ndarray
-    packed: np.ndarray
+    packed: np.ndarray | None
     n_states: int
 
 
@@ -82,29 +84,33 @@ class Families:
 @dataclass
 class Frames:
     """Frame sequences (one per target and linked parental chain within a component): contig, family, target row,
-    positions (bp) and emissions em [n, 5]."""
+    positions (bp), emissions em [n, 5, C, C] (the four full-sib configurations' transfer matrices of the read class,
+    then misfit; C = 1 without read state) and entry [n, C] (the class law at each frame's gap start, read where a
+    sequence starts)."""
 
     contig: list[int] = field(default_factory=list)
     family: list[int] = field(default_factory=list)
     target: list[int] = field(default_factory=list)
     positions: list[np.ndarray] = field(default_factory=list)
     emissions: list[np.ndarray] = field(default_factory=list)
+    entry: list[np.ndarray] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.positions)
 
-    def stacked(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def stacked(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         offsets = np.zeros(len(self.positions) + 1, np.int64)
         offsets[1:] = np.cumsum([len(p) for p in self.positions])
         pos = np.ascontiguousarray(np.concatenate(self.positions), dtype=np.float64)
         em = np.ascontiguousarray(np.concatenate(self.emissions), dtype=np.float64)
-        return offsets, pos, em
+        entry = np.ascontiguousarray(np.concatenate(self.entry), dtype=np.float64)
+        return offsets, pos, em, entry
 
     def subset(self, keep: np.ndarray) -> "Frames":
         index = np.flatnonzero(keep)
         return Frames([self.contig[k] for k in index], [self.family[k] for k in index],
                       [self.target[k] for k in index], [self.positions[k] for k in index],
-                      [self.emissions[k] for k in index])
+                      [self.emissions[k] for k in index], [self.entry[k] for k in index])
 
 
 def families_of(family: np.ndarray, parents: np.ndarray, relevant: np.ndarray) -> Families:
@@ -157,33 +163,37 @@ def component_input(contig: int, centers, local_keys, eligible, classes, status,
     keys[keys >= n_classes] = -1
     keys[~eligible] = -1
     cand1, cand2 = switch_candidates(status, classes, table, int(n_classes), eligible)
+    if packed is not None:
+        packed = np.array(np.asarray(packed)[rows if packed_rows is None else packed_rows], dtype=np.float64, order="C")
     return ComponentInput(contig, np.array(centers, dtype=np.float64, order="C"), np.ascontiguousarray(cls),
-                          np.ascontiguousarray(key), np.ascontiguousarray(keys), cand1, cand2,
-                          np.array(np.asarray(packed)[rows if packed_rows is None else packed_rows],
-                                   dtype=np.float64, order="C"), int(n_states))
+                          np.ascontiguousarray(key), np.ascontiguousarray(keys), cand1, cand2, packed, int(n_states))
 
 
 def packed_emissions(
-    component, painting_parameters, robustness_epsilon, evidence, rows: np.ndarray, site_correlation: float
+    component, painting_parameters, robustness_epsilon, evidence, rows: np.ndarray, site_correlation: float,
+    map_work=map,
 ) -> np.ndarray:
     """Packed binned log emissions [len(rows), S (S + 1) / 2, B] of ``rows`` at ``site_correlation``, recomputed from
     the contig evidence as painting computes them (binned emissions over the component's selected sites, divided by
-    the design effect), when the painting's own cache is absent or at another strength (prepare.path_correlation)."""
+    the design effect), when the painting's own cache is absent or at another strength (prepare.path_correlation).
+    Each row is an independent item of ``map_work`` (the caller's ordered map; each row writes its own slice)."""
     states, bins = component.states, component.bins
     S = int(states.n_states)
     indices = np.searchsorted(evidence.positions, states.positions)
-    if np.any(indices >= len(evidence.positions)) or np.any(evidence.positions[np.minimum(indices, len(evidence.positions) - 1)] != states.positions):
+    clipped = np.minimum(indices, len(evidence.positions) - 1)
+    if np.any(indices >= len(evidence.positions)) or np.any(evidence.positions[clipped] != states.positions):
         raise ValueError("painted sites are missing from the evidence record")
     sites = indices.astype(np.int64)
     alt = states.alt_probability()
     pair = _pair_index(np.arange(S)[:, None], np.arange(S)[None, :], S)
     upper = np.triu_indices(S)
     out = np.empty((len(rows), S * (S + 1) // 2, bins.n_bins))
-    for k, row in enumerate(rows):
-        gl, observed = painting_hmm.gather_sites(evidence.likelihoods, evidence.observed, sites,
-                                                 slice(int(row), int(row) + 1))
+
+    def row_emissions(k):
+        row = int(rows[k])
+        gl, observed = painting_hmm.gather_sites(evidence.likelihoods, evidence.observed, sites, slice(row, row + 1))
+        gl = painting_hmm.mix_window(gl, evidence.cohort_frequencies[sites], robustness_epsilon)
         em = painting_hmm.binned_emissions(gl, observed, alt, states.background_frequency, bins.starts, bins.stops,
-                                           robustness_epsilon=robustness_epsilon,
                                            log_floor=painting_parameters.emission_log_floor)
         em /= painting_hmm.design_effect(
             gl, observed, bins.starts, site_correlation,
@@ -191,6 +201,8 @@ def packed_emissions(
         )[:, None, :]
         full = em.reshape(1, S, S, -1)[0]
         out[k, pair[upper]] = full[upper]
+
+    list(map_work(row_emissions, range(len(rows))))
     return out
 
 
@@ -198,11 +210,12 @@ def file_frames(frames: Frames, maps, free: set[int]) -> Frames:
     """Frames of the map-file contigs inside their files' knots, with positions on the file map as pseudo-bp
     (cM x 1e6), so that the chain's rate in cM/Mb reads the ratio of the painted crossover rate to the file map's."""
     out = Frames()
-    for c, f, t_, pos, em in zip(frames.contig, frames.family, frames.target, frames.positions, frames.emissions,
-                                 strict=True):
+    for c, f, t_, pos, em, entry in zip(frames.contig, frames.family, frames.target, frames.positions,
+                                        frames.emissions, frames.entry, strict=True):
         if c in free:
             continue
         chromosome = maps[c]
+        # a contiguous run of the sequence (positions ascend): a cut leading frame leaves the next frame's entry law
         inside = (pos >= chromosome.positions_bp[0]) & (pos <= chromosome.positions_bp[-1])
         if inside.sum() < 2:
             continue
@@ -211,6 +224,7 @@ def file_frames(frames: Frames, maps, free: set[int]) -> Frames:
         out.target.append(t_)
         out.positions.append(np.asarray(chromosome.cumulative_morgans(pos[inside]), dtype=np.float64) * 100.0 * 1e6)
         out.emissions.append(em[inside])
+        out.entry.append(entry[inside])
     return out
 
 
@@ -237,81 +251,71 @@ def _pair_index(s1, s2, S):
     return lo * S - lo * (lo - 1) // 2 + (hi - lo)
 
 
-def _emission_columns(packed: np.ndarray, rows: np.ndarray, fb: np.ndarray, flab: np.ndarray, S: int, want25: bool):
-    """Per frame: em5 [n, 5] (the four full-sib configurations as ratios to their maximum, misfit = mean over all
-    packed pairs) and, when want25, em25 [n, 26] (the 25 track-symbol pairs including 'other class', + misfit)."""
-    n = len(rows)
-    em4 = np.empty((n, 4))
-    for k, (u, v) in enumerate(((0, 2), (0, 3), (1, 2), (1, 3))):
-        em4[:, k] = packed[rows, _pair_index(flab[:, u], flab[:, v], S), fb]
-    mx = em4.max(axis=1, keepdims=True)
-    full = packed[rows, :, fb]
-    other = np.exp(np.minimum(full - mx, 300.0)).mean(axis=1)
-    em5 = np.concatenate([np.exp(em4 - mx), other[:, None]], axis=1)
-    if not want25:
-        return em5, None
-    em25 = np.empty((n, 26))
-    em25[:, 25] = other
-    states = np.arange(S)
-    out_mask = np.ones((n, S), bool)
-    for j in range(4):
-        out_mask[np.arange(n), flab[:, j]] = False
-    nout = out_mask.sum(axis=1)
-    pair = _pair_index(states[:, None], states[None, :], S)
-    for c0 in range(0, n, _CHUNK):
-        sl = slice(c0, min(n, c0 + _CHUNK))
-        mat = np.exp(np.minimum(full[sl][:, pair] - mx[sl][:, :, None], 300.0))
-        om = out_mask[sl]
-        no = np.maximum(nout[sl], 1)
-        lab = flab[sl]
-        rr = np.arange(mat.shape[0])
-        for s1 in range(5):
-            for s2 in range(5):
-                if s1 < 4 and s2 < 4:
-                    em25[sl, 5 * s1 + s2] = mat[rr, lab[:, s1], lab[:, s2]]
-                elif s1 < 4:
-                    em25[sl, 5 * s1 + s2] = (mat[rr, lab[:, s1], :] * om).sum(axis=1) / no
-                elif s2 < 4:
-                    em25[sl, 5 * s1 + s2] = (mat[rr, lab[:, s2], :] * om).sum(axis=1) / no
-                else:
-                    em25[sl, 24] = ((mat * om[:, :, None] * om[:, None, :]).sum(axis=(1, 2))) / (no * no)
-        zero = np.flatnonzero(nout[sl] == 0) + c0
-        if len(zero):
-            for s1 in range(5):
-                em25[zero, 5 * s1 + 4] = 0.0
-                em25[zero, 5 * 4 + s1] = 0.0
-    return em5, em25
+def _piece(unit, components, families, active):
+    """One (component, family)'s frames in chain order, sequences of at least two frames, or None."""
+    index, f = unit
+    comp = components[index]
+    mem = sorted(active[f])
+    members = np.asarray(mem, dtype=np.int64)
+    slots = _slots_of(families, f, set(mem))
+    ft, fc, fb, flab = sib_frames(comp.cls, comp.key, members, slots, comp.centers)
+    if not len(ft):
+        return None
+    order = np.lexsort((fb, fc))
+    ft, fc, fb, flab = ft[order], fc[order], fb[order], flab[order]
+    # sequences (one per chain id) of at least two frames
+    starts = np.r_[0, np.flatnonzero(np.diff(fc)) + 1, len(fc)]
+    keep = np.zeros(len(fc), dtype=bool)
+    for a, z in zip(starts[:-1], starts[1:]):
+        keep[a:z] = z - a >= 2
+    if not keep.any():
+        return None
+    return index, int(f), members[ft[keep]], fc[keep], fb[keep], np.ascontiguousarray(flab[keep])
+
+
+def frame_pieces(components, families, active, map_work=map):
+    """Requests of active families, ordered by component and smallest active family member."""
+    # families in the order of their smallest active member (the painting's sample order)
+    family_order = sorted((f for f in families.members if len(active.get(f, ())) >= 2), key=lambda f: min(active[f]))
+    units = [(index, f) for index in range(len(components)) for f in family_order]
+    return [x for x in map_work(partial(_piece, components=components, families=families, active=active), units)
+              if x is not None]
+
+
+def piece_emissions(piece, source, classes):
+    """Transfer matrices, entry laws and chain boundaries in one component and family."""
+    index, _, rows, fc, bins, labels = piece
+    starts = np.r_[0, np.flatnonzero(np.diff(fc)) + 1, len(fc)]
+    first = np.zeros(len(fc), dtype=bool)
+    first[starts[:-1]] = True
+    symbols, entry = source.emissions(index, rows, bins, labels, first, classes)
+    return symbols, entry, starts
 
 
 def build_frames(components: Sequence[ComponentInput], families: Families, active: Mapping[int, set[int]],
-                 want25: bool) -> tuple[Frames, list[np.ndarray]]:
-    """Frame sequences of the active members (and their 25-symbol emissions when ``want25``), components in order."""
+                 want25: bool, source, map_work=map) -> tuple[Frames, list[np.ndarray]]:
+    """Frame sequences of the active members (and their 25-symbol emissions [n, 26, C, C] when ``want25``),
+    components in order. ``source`` serves the frames' emissions (map_scale_reads.ScalarFrames or ReadFrames): every
+    component's frames are requested at once (a read source rebuilds what it lacks contig by contig), then each
+    component's sequences are assembled. Each (component, family)'s frames are an independent item of ``map_work``
+    (the caller's ordered map), taken in component, then family order."""
+    pieces = frame_pieces(components, families, active, map_work)
+    classes = source.prepare([(index, rows, fb, flab) for index, _, rows, _, fb, flab in pieces])
     frames = Frames()
     em25s: list[np.ndarray] = []
-    # families in the order of their smallest active member (the painting's sample order)
-    family_order = sorted((f for f in families.members if len(active.get(f, ())) >= 2), key=lambda f: min(active[f]))
-    for comp in components:
-        for f in family_order:
-            mem = sorted(active[f])
-            members = np.asarray(mem, dtype=np.int64)
-            slots = _slots_of(families, f, set(mem))
-            ft, fc, fb, flab = sib_frames(comp.cls, comp.key, members, slots, comp.centers)
-            if not len(ft):
-                continue
-            order = np.lexsort((fb, fc))
-            ft, fc, fb, flab = ft[order], fc[order], fb[order], flab[order]
-            em5, em25 = _emission_columns(comp.packed, members[ft], fb, flab, comp.n_states, want25)
-            starts = np.r_[0, np.flatnonzero(np.diff(fc)) + 1, len(fc)]
-            for a, z in zip(starts[:-1], starts[1:]):
-                if z - a < 2:
-                    continue
-                frames.contig.append(comp.contig)
-                frames.family.append(int(f))
-                frames.target.append(int(members[ft[a]]))
-                frames.positions.append(comp.centers[fb[a:z]])
-                frames.emissions.append(em5[a:z])
-                if want25:
-                    em25s.append(em25[a:z])
+    for piece in pieces:
+        index, f, rows, _, fb, _ = piece
+        comp = components[index]
+        em25, entry, starts = piece_emissions(piece, source, classes)
+        for a, z in zip(starts[:-1], starts[1:]):
+            frames.contig.append(comp.contig)
+            frames.family.append(f)
+            frames.target.append(int(rows[a]))
+            frames.positions.append(comp.centers[fb[a:z]])
+            frames.emissions.append(np.ascontiguousarray(em25[a:z][:, list(FULL_SIB_COLUMNS)]))
+            frames.entry.append(entry[a:z])
+            if want25:
+                em25s.append(em25[a:z])
     return frames, em25s
 
 
@@ -326,37 +330,48 @@ class GuardResult:
     pair_tests: dict[int, tuple[int, int]]  # row -> (passed, tested)
 
 
-def _pair_test(components: Sequence[ComponentInput], families: Families, p: MapScaleParameters):
-    """Summed full-sib, half-sib and parent-offspring pair tables over components; the per-member pass counts."""
+def _pair_tables(unit, components, families, r_coarse, eps):
+    """One (component, family)'s pair chains: [(pair, full-sib [R, E], half-sib [R, E], parent-offspring [E])]."""
+    index, f = unit
+    comp = components[index]
+    mem = families.members[f]
+    B = len(comp.centers)
+    members = np.asarray(mem, dtype=np.int64)
+    slots = _slots_of(families, f, set(mem))
+    pos, obs, lens = pair_observations(comp.keys, comp.cand1, comp.cand2, members, slots, comp.centers)
+    sel = []
+    q = 0
+    for a in range(len(members)):
+        for c in range(a + 1, len(members)):
+            if lens[q] >= 2:
+                sel.append(((int(members[a]), int(members[c])), q * B, int(lens[q])))
+            q += 1
+    if not sel:
+        return []
+    offsets = np.zeros(len(sel) + 1, np.int64)
+    offsets[1:] = np.cumsum([n for _, _, n in sel])
+    P_ = np.ascontiguousarray(np.concatenate([pos[st:st + n] for _, st, n in sel]))
+    O_ = np.ascontiguousarray(np.concatenate([obs[st:st + n] for _, st, n in sel]).astype(np.int64))
+    fs = pair_fullsib_loglik(offsets, P_, O_, r_coarse, eps)
+    hs, po = pair_alternative_loglik(offsets, P_, O_, r_coarse, eps)
+    return [(pair, fs[k], hs[k], po[k]) for k, (pair, _, _) in enumerate(sel)]
+
+
+def _pair_test(components: Sequence[ComponentInput], families: Families, p: MapScaleParameters, map_work=map):
+    """Summed full-sib, half-sib and parent-offspring pair tables over components; the per-member pass counts. Each
+    (component, family) is an independent item of ``map_work``; the tables are summed in component, then family
+    order, whatever the map."""
     r_coarse = np.asarray(p.coarse_rate_grid(), dtype=np.float64)
     eps = np.asarray(p.pair_error_rates, dtype=np.float64)
     tables: dict[tuple[int, int], list[np.ndarray]] = {}
-    for comp in components:
-        B = len(comp.centers)
-        for f, mem in families.members.items():
-            members = np.asarray(mem, dtype=np.int64)
-            slots = _slots_of(families, f, set(mem))
-            pos, obs, lens = pair_observations(comp.keys, comp.cand1, comp.cand2, members, slots, comp.centers)
-            sel = []
-            q = 0
-            for a in range(len(members)):
-                for c in range(a + 1, len(members)):
-                    if lens[q] >= 2:
-                        sel.append(((int(members[a]), int(members[c])), q * B, int(lens[q])))
-                    q += 1
-            if not sel:
-                continue
-            offsets = np.zeros(len(sel) + 1, np.int64)
-            offsets[1:] = np.cumsum([n for _, _, n in sel])
-            P_ = np.ascontiguousarray(np.concatenate([pos[st:st + n] for _, st, n in sel]))
-            O_ = np.ascontiguousarray(np.concatenate([obs[st:st + n] for _, st, n in sel]).astype(np.int64))
-            fs = pair_fullsib_loglik(offsets, P_, O_, r_coarse, eps)
-            hs, po = pair_alternative_loglik(offsets, P_, O_, r_coarse, eps)
-            for k, (pair, _, _) in enumerate(sel):
-                acc = tables.setdefault(pair, [np.zeros(fs.shape[1:]), np.zeros(hs.shape[1:]), np.zeros(po.shape[1:])])
-                acc[0] += fs[k]
-                acc[1] += hs[k]
-                acc[2] += po[k]
+    units = [(index, f) for index in range(len(components)) for f in families.members]
+    work = partial(_pair_tables, components=components, families=families, r_coarse=r_coarse, eps=eps)
+    for rows in map_work(work, units):
+        for pair, fs, hs, po in rows:
+            acc = tables.setdefault(pair, [np.zeros(fs.shape), np.zeros(hs.shape), np.zeros(po.shape)])
+            acc[0] += fs
+            acc[1] += hs
+            acc[2] += po
     lr = {pair: float(t[0].max() - max(t[1].max(), t[2].max())) for pair, t in tables.items()}
     excluded, counts = set(), {}
     for f, mem in families.members.items():
@@ -375,59 +390,78 @@ def _pair_test(components: Sequence[ComponentInput], families: Families, p: MapS
     return excluded, counts
 
 
-def guard(components: Sequence[ComponentInput], families: Families, p: MapScaleParameters) -> GuardResult:
-    """The relationship guard: pair test, then the iterative target test (module docstring)."""
-    excluded_pair, counts = _pair_test(components, families, p)
-    active = {f: set(x for x in mem if x not in excluded_pair) for f, mem in families.members.items()}
+def pair_guard(components: Sequence[ComponentInput], families: Families, p: MapScaleParameters,
+               map_work=map) -> GuardResult:
+    """The genome-wide pair test. Its active members determine the first target-frame requests."""
+    excluded, counts = _pair_test(components, families, p, map_work)
+    active = {f: set(mem).difference(excluded) for f, mem in families.members.items()}
+    return GuardResult(active, tuple(sorted(excluded)), (), (), counts)
+
+
+def target_guard(frames: Frames, em25s, prev: GuardResult, iteration: int, p: MapScaleParameters) -> GuardResult:
+    """One target test on frames of the current members, in original component and family order."""
+    if not len(frames):
+        return prev
+    active = {f: set(mem) for f, mem in prev.active.items()}
+    removed, log = list(prev.excluded_target), list(prev.target_log)
     r_coarse = np.asarray(p.coarse_rate_grid(), dtype=np.float64)
     deltas = np.asarray(p.misfit_weights, dtype=np.float64)
     ein = np.asarray(p.target_entry_rates, dtype=np.float64)
     eout = np.asarray(p.target_exit_rates, dtype=np.float64)
-    removed, log = [], []
+    offsets = np.zeros(len(frames) + 1, np.int64)
+    offsets[1:] = np.cumsum([len(x) for x in frames.positions])
+    pos = np.ascontiguousarray(np.concatenate(frames.positions))
+    entry = np.ascontiguousarray(np.concatenate(frames.entry))
+    # the 25-symbol matrices are joined one family at a time (memory: 26 C^2 values per frame)
+    em5 = np.ascontiguousarray(np.concatenate(frames.emissions))
+    ll4 = frame_loglik(offsets, pos, em5, entry, r_coarse, deltas)
+    del em5
+    famk = np.asarray(frames.family)
+    names = np.asarray(frames.target)
+    for f in sorted(set(famk.tolist())):
+        mf = famk == f
+        rf, di, _ = argmax_refined(ll4[mf].sum(axis=0), r_coarse)
+        idx = np.flatnonzero(mf)
+        sub_off = np.zeros(len(idx) + 1, np.int64)
+        sub_off[1:] = np.cumsum([offsets[k + 1] - offsets[k] for k in idx])
+        sel = np.concatenate([np.arange(offsets[k], offsets[k + 1]) for k in idx])
+        em25 = np.ascontiguousarray(np.concatenate([em25s[k] for k in idx]))      # rows: sel's frames
+        rl = target_loglik(sub_off, np.ascontiguousarray(pos[sel]), em25, np.ascontiguousarray(entry[sel]),
+                           float(rf), float(deltas[di]), ein, eout)
+        tn = names[idx]
+        best = (None, -np.inf, 0.0)
+        for nm in sorted(set(tn.tolist())):
+            m = tn == nm
+            tab = rl[m].sum(axis=0)
+            lr = float(tab.max() - tab[0, 0])
+            ii, jj = np.unravel_index(int(np.argmax(tab)), tab.shape)
+            share = 0.0
+            if lr > p.guard_nats:
+                sel_t = np.concatenate([np.arange(offsets[k], offsets[k + 1]) for k in idx[m]])
+                local_t = np.concatenate([np.arange(sub_off[j], sub_off[j + 1]) for j in np.flatnonzero(m)])
+                so = np.zeros(int(m.sum()) + 1, np.int64)
+                so[1:] = np.cumsum([offsets[k + 1] - offsets[k] for k in idx[m]])
+                share = float(np.mean(target_posterior(so, np.ascontiguousarray(pos[sel_t]),
+                                                       np.ascontiguousarray(em25[local_t]),
+                                                       np.ascontiguousarray(entry[sel_t]), float(rf),
+                                                       float(deltas[di]), float(ein[ii]), float(eout[jj]))))
+            if lr > best[1] and share >= p.target_share:
+                best = (nm, lr, share)
+        if best[0] is not None and best[1] > p.guard_nats and len(active[f]) > 2:
+            active[f].discard(best[0])
+            removed.append(int(best[0]))
+            log.append((iteration, int(f), int(best[0]), round(best[1], 1), round(best[2], 4)))
+    return GuardResult(active, prev.excluded_pair, tuple(sorted(removed)), tuple(log), prev.pair_tests)
+
+
+def guard(components: Sequence[ComponentInput], families: Families, p: MapScaleParameters, source,
+          map_work=map) -> GuardResult:
+    """Run the pair test and successive target tests on the current active families."""
+    state = pair_guard(components, families, p, map_work)
     for iteration in range(p.target_iterations):
-        frames, em25s = build_frames(components, families, active, True)
-        if not len(frames):
+        frames, em25s = build_frames(components, families, state.active, True, source, map_work)
+        updated = target_guard(frames, em25s, state, iteration, p)
+        if updated.active == state.active:
             break
-        offsets = np.zeros(len(frames) + 1, np.int64)
-        offsets[1:] = np.cumsum([len(x) for x in frames.positions])
-        pos = np.ascontiguousarray(np.concatenate(frames.positions))
-        em25 = np.ascontiguousarray(np.concatenate(em25s))
-        em5 = np.ascontiguousarray(em25[:, list(_FULL_SIB_COLUMNS)])
-        ll4 = frame_loglik(offsets, pos, em5, r_coarse, deltas)
-        famk = np.asarray(frames.family)
-        names = np.asarray(frames.target)
-        changed = False
-        for f in sorted(set(famk.tolist())):
-            mf = famk == f
-            rf, di, _ = argmax_refined(ll4[mf].sum(axis=0), r_coarse)
-            idx = np.flatnonzero(mf)
-            sub_off = np.zeros(len(idx) + 1, np.int64)
-            sub_off[1:] = np.cumsum([offsets[k + 1] - offsets[k] for k in idx])
-            sel = np.concatenate([np.arange(offsets[k], offsets[k + 1]) for k in idx])
-            rl = target_loglik(sub_off, np.ascontiguousarray(pos[sel]), np.ascontiguousarray(em25[sel]), float(rf),
-                               float(deltas[di]), ein, eout)
-            tn = names[idx]
-            best = (None, -np.inf, 0.0)
-            for nm in sorted(set(tn.tolist())):
-                m = tn == nm
-                tab = rl[m].sum(axis=0)
-                lr = float(tab.max() - tab[0, 0])
-                ii, jj = np.unravel_index(int(np.argmax(tab)), tab.shape)
-                share = 0.0
-                if lr > p.guard_nats:
-                    sel_t = np.concatenate([np.arange(offsets[k], offsets[k + 1]) for k in idx[m]])
-                    so = np.zeros(int(m.sum()) + 1, np.int64)
-                    so[1:] = np.cumsum([offsets[k + 1] - offsets[k] for k in idx[m]])
-                    share = float(np.mean(target_posterior(so, np.ascontiguousarray(pos[sel_t]),
-                                                           np.ascontiguousarray(em25[sel_t]), float(rf),
-                                                           float(deltas[di]), float(ein[ii]), float(eout[jj]))))
-                if lr > best[1] and share >= p.target_share:
-                    best = (nm, lr, share)
-            if best[0] is not None and best[1] > p.guard_nats and len(active[f]) > 2:
-                active[f].discard(best[0])
-                removed.append(int(best[0]))
-                log.append((iteration, int(f), int(best[0]), round(best[1], 1), round(best[2], 4)))
-                changed = True
-        if not changed:
-            break
-    return GuardResult(active, tuple(sorted(excluded_pair)), tuple(sorted(removed)), tuple(log), counts)
+        state = updated
+    return state

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ...contracts.pedigree import PreparedComponent
-from . import forward, projection, sources
+from . import forward, projection
 from .parameters import PedigreeParameters
 
 
@@ -31,24 +31,20 @@ def resident(
     reverse: bool | None = None,
     include_pair_masses: bool = True,
 ) -> ResidentComponent:
-    """Exact source pair masses, projection and child terms of one component."""
+    """Source pair masses, projection and child terms of one component; the source laws are the prepared ones
+    (PreparedComponent.sources), the bridges and child terms are built here."""
     reverse = config.reverse_conventions if reverse is None else reverse
     claim_threads()
-    marginals = sources.marginals(component.factors, component.transition)
-    claim_threads()
-    # Exposure needs only the unordered pair masses (half the size of the ordered marginals); the
-    # projection then consumes the marginals in place.
-    masses = sources.pair_masses(marginals) if include_pair_masses else None
+    # a writable copy (the stored laws are read-only views; exposure's kernels take writable masses)
+    masses = np.array(component.sources.pair_mass, dtype=np.float64) if include_pair_masses else None
     claim_threads()
     projected = projection.project(
         component,
-        marginals,
         source_gap_support_sites=config.scoring.source_gap_support_sites,
         bridge_tolerance=config.scoring.bridge_postcheck_tolerance,
         bridge_max_iterations=config.scoring.bridge_max_iterations,
         reverse=reverse,
     )
-    del marginals
     transition = component.transition
     terms = forward.ChildTerms(
         projected,
@@ -59,7 +55,7 @@ def resident(
         transition.same,
         transition.one_change,
         transition.two_changes,
-        config.scoring.mismatch_probability,
         config.scoring.null_prior_samples,
+        reads=component.child_reads,
     )
     return ResidentComponent(masses, projected, terms)

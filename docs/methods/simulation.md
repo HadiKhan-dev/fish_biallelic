@@ -85,12 +85,15 @@ From the contig's read stream, draw optional normalised sample factors, then opt
 by all samples), then one seed for the per-sample streams. Each sample then draws, from its own stream
 `simulation.sample_reads` (that seed and its index): optional gamma factors over its sites, its Poisson depths,
 its optional dropout start and its genotype-class binomial ALT counts in class order. Skip a genotype-class draw
-when its mask is empty. Emit REF/ALT counts after dropout. Because no sample's draws depend on another's, blocks of
-samples are simulated in parallel with the same counts at any worker count.
+when its mask is empty. The independent-site and paired-end samplers use `[simulation.reads] uncalled_base_probability`
+to drop each covered base independently. Draw binomial losses for each REF and ALT count at the end of the sample's
+stream, after any structural corrections. A rate of zero consumes no draws. At probability p the expected called
+depth is (1 − p) times expected covering depth, with the same allele probabilities conditional on a call. Sample
+blocks give the same counts at any worker count.
 
 Implementation: [simulation/reads.py](../../haplotype_reconstruction/simulation/reads.py).
 
-Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+Parameters by name: `UNCALLED_BASE_PROBABILITY`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 The opt-in `[simulation.reads] preset = "realistic"` is expanded by the settings loader before mapping
 to ReadModel. Explicit TOML/CLI read keys win, including explicit zero values. The resolved config
@@ -328,3 +331,26 @@ Implementation: [structure.py](../../haplotype_reconstruction/simulation/structu
 
 Cost and scope: one extra genealogy traversal per contig with a coalescent source; meiosis O(segments x crossovers)
 per gamete; read arrays grow by two int8 and two bool copies of the sample-site axis.
+
+## Injected outliers (gate G1i)
+
+A validation option (`injected_outlier_rate`, `injected_outlier_pattern`; 4.21, ADVICE2 11.4): for sample n and site
+s, with probability r, the ORDERED genotype of the sample at the site is replaced by a draw from the ordered cohort law
+(q0; q1/2, q1/2; q2) of the simulated cohort at the site, before any read is drawn. The independent-site sampler draws
+its counts from the replaced genotype; the fragment sampler keeps its fragments, their homologue assignment and
+depths, and every fragment covering the site reads the replaced allele of its own homologue (cross-site allele noise
+preserved). A redraw that returns the same genotype is part of the model. Patterns at the setting r: uniform;
+heterogeneous (each sample heavy with probability about one in ten, by a hash of the sample identifier, not a fixed
+quota; heavy samples at 10 r_low and the rest at r_low, r_low = r / 1.9, so the cohort mean is r only when exactly a
+tenth is heavy: with H heavy of N it is r (1 + 9 H / N) / 1.9; r at most 0.19); clustered (runs of five consecutive
+sites starting with probability r / 5 per sample and site, each site of a run replaced by its own draw; away from the
+ends a site is replaced with probability 1 - (1 - r / 5)^5, slightly below r); misspecified (half of the replacements
+forced heterozygous). Each sample draws from its own stream (`simulation.injected_outliers`) and the law is the whole
+analysed cohort's, so the cohort is injected in one call; a rate of zero draws nothing. With the independent-site
+sampler a replaced genotype also changes the random assignment of other cells' allele counts (their depths stay), so
+two runs of one seed differ outside the mask as well; the fragment sampler keeps the other cells' observations. Truth keeps the original alleles (ancestry), the replaced alleles and the mask. Two readings,
+never pooled: (R) the replacement is a read artefact, every evaluation against the original alleles; (M) it is a real
+deviation, founders and ancestry against the original, released genotypes and phase against the replaced alleles.
+
+Implementation: [simulation/injection.py](../../haplotype_reconstruction/simulation/injection.py),
+[simulation/source.py](../../haplotype_reconstruction/simulation/source.py).

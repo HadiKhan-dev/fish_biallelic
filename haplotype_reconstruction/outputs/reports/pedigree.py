@@ -422,7 +422,7 @@ def _count_row(value, names):
 
 def _exclusion_frame(view: records.ExclusionEvidenceView, names: Sequence[str], intervals: bool) -> pd.DataFrame:
     """The exclusion evidence table, column by column from its columnar view (same columns and dtypes as row-wise:
-    names as text, LogE and the interval floats as float64, ObservedSites int64, LogEExact bool)."""
+    names as text, LogE and the interval floats as float64, ObservedSites int64, flags bool)."""
     table = "exclusion_evidence"
     columns: dict[str, object] = dict(
         Sample=[_value("Sample", i, names, table) for i in view.sample.tolist()],
@@ -430,6 +430,8 @@ def _exclusion_frame(view: records.ExclusionEvidenceView, names: Sequence[str], 
         LogE=np.asarray(view.log_e, dtype=np.float64),
         ObservedSites=np.asarray(view.observed_sites, dtype=np.int64),
     )
+    if view.certifiable is not None:
+        columns["Certifiable"] = np.asarray(view.certifiable, dtype=np.bool_)
     if intervals:
         columns.update(
             LogELower=np.asarray(view.log_e_lower, dtype=np.float64),
@@ -541,6 +543,7 @@ EXCLUSION_SUMMARY_FIELDS = (
     "contigs",
     "status",
     "chromosomes",
+    "score_note",
     "released",
 )
 
@@ -592,6 +595,9 @@ def write_pedigree(
              else _painted_junction_rates(product.retained.decision.scores))
     frames = render(product.views, product.sample_ids, painted_junctions_per_morgan=rates)
     exclusion = record_mapping(product.exclusion)
+    certifiable = product.views.exclusion_evidence.certifiable
+    if certifiable is not None and not np.all(certifiable):
+        exclusion["score_note"] = "working score: cannot certify under detected read sharing."
     directory = Path(output) / "pedigree"
     items = separate_collections(frames, product.views, product.sample_ids, input_ids)
 
@@ -1151,13 +1157,14 @@ SEARCH_DIAGNOSTICS_COLUMNS = (
     M2PanelCapped: the child's admitted M2 pairs exceeded the per-child cap, so its panel is incomplete (1).
 """
 
-EXCLUSION_EVIDENCE_COLUMNS = ("Sample", "CandidateParent", "LogE", "ObservedSites")
+EXCLUSION_EVIDENCE_COLUMNS = ("Sample", "CandidateParent", "LogE", "ObservedSites", "Certifiable")
 """Columns in published order.
 
     Sample: sample identifier (text).
     CandidateParent: candidate parent (1).
-    LogE: exclusion log-evidence (nats).
+    LogE: scalar exclusion log score (nats).
     ObservedSites: observed sites (1).
+    Certifiable: whether the score can certify exclusion (1).
 """
 
 EXCLUSION_DIAGNOSTICS_COLUMNS = (

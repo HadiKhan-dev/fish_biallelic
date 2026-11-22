@@ -136,6 +136,16 @@ class RelatednessFamilies:
     support_units: int = record_field("diagnostic", axes=(), units="1", dtype="int", default=0)
     search: str = record_field("state", axes=(), units="1", dtype="str", default="")
     search_margin: float = record_field("diagnostic", axes=(), units="nats", dtype="float", default=float("nan"))
+    # B3 per contig (ADVICE2 17.3): the stride is a named compute exception, spaced by the read-sharing range only when
+    # resolved; beside the status, the reach of the curve the consumers read and the strided sites' median spacing,
+    # so a reader sees whether the stride covers it (empty for records built outside the relatedness stage)
+    read_sharing_status: tuple[str, ...] = record_field("diagnostic", axes=("C",), units="1", dtype="str", default=())
+    read_sharing_reach_bp: tuple[int, ...] = record_field(
+        "diagnostic", axes=("C",), units="bp", dtype="tuple[int, ...]", default=()
+    )
+    site_spacing_bp: tuple[float, ...] = record_field(
+        "diagnostic", axes=("C",), units="bp", dtype="tuple[float, ...]", default=()
+    )
     rate: RecombinationRateEstimate | None = record_field(
         "diagnostic", axes=(), units="1", dtype="RecombinationRateEstimate", default=None
     )

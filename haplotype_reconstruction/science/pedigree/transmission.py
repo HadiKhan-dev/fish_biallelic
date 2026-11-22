@@ -3,6 +3,9 @@
 One child homologue is a meiotic copy of the parent's two; the other three homologues
 are founder mosaics. Minimum-switch homologue alignments are averaged at each boundary.
 Unknown painted labels suppress the bin's copy emission. Components have independent phase.
+The probability that two truly copied homologues' painted classes differ is, per bin and state,
+m = min(1/2, max(m_floor, v_child + v_parent)) (ADVICE2 11.1): the union bound on either painted label being wrong,
+from the reference painting's per-track label errors v, never below the 4.20 constant m_floor and never above 1/2.
 
 Method: docs/methods/pedigree.md#finite-continuous-direction
 """
@@ -16,8 +19,8 @@ from numba import prange
 
 from ...core.kernels import kernel
 from .junctions import ComponentSchedule
-from .kernels.signatures import OVERLOADS
-from .parameters import TRANSMISSION_SWITCH_FLOOR
+from .kernels.block_scores import OVERLOADS
+from .numerical_parameters import TRANSMISSION_SWITCH_FLOOR
 
 
 @kernel(overloads=OVERLOADS["transmission._log_likelihood"], cache=True, parallel=True, nogil=True)
@@ -32,6 +35,7 @@ def _log_likelihood(
     component_switch_start,
     trajectory_count,
     mismatch_probability,
+    homologue_error,
 ):
     """float64 [D] log joint likelihoods (nats), dyads int64 [D, 2] = (child, parent).
 
@@ -40,7 +44,8 @@ def _log_likelihood(
     both painted labels. component_bin_start/stop int64 [K] delimit components;
     selector_switch_probability float64 [sum(B_k - 1)] and component_switch_start
     int64 [K] delimit selector probabilities; trajectory_count int64 [K] is T.
-    mismatch_probability is the dimensionless bin mismatch probability.
+    mismatch_probability is the floor m_floor of the bin mismatch probability; homologue_error float64 [N, B, 2]
+    the probability that each scheduled homologue's painted label is wrong (ComponentSchedule.homologue_error).
 
     Four states (child homologue, parental selector) suffice. Time O(dyads x bins),
     constant workspace per dyad, independent of T once schedules are constructed.
@@ -63,11 +68,14 @@ def _log_likelihood(
                 for parent_homologue in range(2):
                     emission = 1.0
                     if informative:
+                        mismatch = min(0.5, max(mismatch_probability,
+                                                homologue_error[child, component_first_bin, child_homologue]
+                                                + homologue_error[parent, component_first_bin, parent_homologue]))
                         emission = (
-                            1.0 - mismatch_probability
+                            1.0 - mismatch
                             if local_classes[child, component_first_bin, child_homologue]
                             == local_classes[parent, component_first_bin, parent_homologue]
-                            else mismatch_probability
+                            else mismatch
                         )
                     mass[child_homologue, parent_homologue] = 0.25 * emission
                     normalization += mass[child_homologue, parent_homologue]
@@ -167,11 +175,14 @@ def _log_likelihood(
                                     )
                                     emission = 1.0
                                     if informative:
+                                        mismatch = min(0.5, max(mismatch_probability,
+                                                                homologue_error[child, right_bin, next_child_homologue]
+                                                                + homologue_error[parent, right_bin, next_parent_homologue]))
                                         emission = (
-                                            1.0 - mismatch_probability
+                                            1.0 - mismatch
                                             if local_classes[child, right_bin, next_child_homologue]
                                             == local_classes[parent, right_bin, next_parent_homologue]
-                                            else mismatch_probability
+                                            else mismatch
                                         )
                                     next_mass[next_child_homologue, next_parent_homologue] += (
                                         path_mass * weight * emission
@@ -217,13 +228,22 @@ def log_likelihood(
         theta_start,
         np.asarray([part.n_trajectories for part in components], dtype=np.int64),
         float(mismatch_probability),
+        np.ascontiguousarray(np.concatenate([homologue_errors(part) for part in components], axis=1), dtype=np.float64),
     )
 
 
+def homologue_errors(schedule: ComponentSchedule) -> np.ndarray:
+    """float64 [N, B, 2] the schedule's homologue label errors (zeros when it carries none: allowance at its floor)."""
+    if schedule.homologue_error is None:
+        return np.zeros(schedule.classes.shape, dtype=np.float64)
+    return np.asarray(schedule.homologue_error, dtype=np.float64)
+
+
 @kernel(overloads=OVERLOADS["transmission.blocks"], cache=True, parallel=True, nogil=True)
-def blocks(dyads, trajectories, classes, known, switch, trajectory_count, mismatch, block_of_bin, n_blocks):
+def blocks(dyads, trajectories, classes, known, switch, trajectory_count, floor, errors, block_of_bin, n_blocks):
     """float64 [D, blocks]: per-block sums of the joint transmission log likelihood of ordered dyads (child, parent)
-    on ONE component (science.pedigree.transmission._log_likelihood, same arithmetic)."""
+    on ONE component (science.pedigree.transmission._log_likelihood, same arithmetic; ``floor`` m_floor and
+    ``errors`` float64 [N, B, 2] the homologue label errors)."""
     bins = trajectories.shape[1]
     output = np.zeros((len(dyads), n_blocks))
     alternative = 1.0 / max(1, trajectory_count - 1)
@@ -238,6 +258,7 @@ def blocks(dyads, trajectories, classes, known, switch, trajectory_count, mismat
             for ph in range(2):
                 emission = 1.0
                 if informative:
+                    mismatch = min(0.5, max(floor, errors[child, 0, ch] + errors[parent, 0, ph]))
                     emission = 1.0 - mismatch if classes[child, 0, ch] == classes[parent, 0, ph] else mismatch
                 mass[ch, ph] = 0.25 * emission
                 normalization += mass[ch, ph]
@@ -285,6 +306,7 @@ def blocks(dyads, trajectories, classes, known, switch, trajectory_count, mismat
                                 weight = c_weight * (sp if s == 1 else 1.0 - sp) / p_count
                                 emission = 1.0
                                 if informative:
+                                    mismatch = min(0.5, max(floor, errors[child, right, n_ch] + errors[parent, right, n_ph]))
                                     emission = 1.0 - mismatch if classes[child, right, n_ch] == classes[parent, right, n_ph] else mismatch
                                 nxt[n_ch, n_ph] += path * weight * emission
             normalization = nxt[0, 0] + nxt[0, 1] + nxt[1, 0] + nxt[1, 1]

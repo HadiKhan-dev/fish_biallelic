@@ -76,8 +76,6 @@ from numba import types
 from haplotype_reconstruction.core.kernels import kernel
 
 from .parameters import (
-    FEEDBACK_EVIDENCE_KEEP,
-    FEEDBACK_EVIDENCE_MIX,
     FEEDBACK_UNIFORM_TOLERANCE,
     MAX_EXACT_BITS,
     SITE_ASCENT_BACKSTOP,
@@ -155,13 +153,14 @@ def settings(parameters: SitePosteriorParameters | None = None, *, reverse: bool
     nogil=True,
 )
 def _feedback_evidence(gl, e):
-    """e = .99 gl / sum(gl) + .01 / 3 (in place); False when the sample is uninformative
-    (no likelihood mass, or flat evidence after the mixture)."""
+    """e = gl / sum(gl) (in place); False when the sample is uninformative (no likelihood mass, or flat evidence).
+    ``gl`` are the caller's mixed likelihoods (the run's outlier rate against the cohort law,
+    science.shared.observation): the outlier mixture is already in them."""
     total = gl.sum()
     if total <= 0:
         return False
     for genotype in range(3):
-        e[genotype] = FEEDBACK_EVIDENCE_KEEP * gl[genotype] / total + FEEDBACK_EVIDENCE_MIX / 3
+        e[genotype] = gl[genotype] / total
     return not np.max(e) - np.min(e) < FEEDBACK_UNIFORM_TOLERANCE
 
 
@@ -1543,8 +1542,6 @@ def summarize_sites(
 
 
 __all__ = [
-    "FEEDBACK_EVIDENCE_KEEP",
-    "FEEDBACK_EVIDENCE_MIX",
     "FEEDBACK_UNIFORM_TOLERANCE",
     "INFO_ASCENT_BACKSTOP",
     "INFO_ASCENT_STEPS",

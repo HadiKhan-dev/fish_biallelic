@@ -91,9 +91,9 @@ def build_parser() -> argparse.ArgumentParser:
         ("init", "Validate inputs and initialize the run manifest."),
         ("evidence", "Record one contig's evidence."),
         ("relatedness", "Gather relatedness from every contig's evidence."),
-        ("reconstruct", "Assemble one contig; also paint and refit after run calibration exists."),
+        ("reconstruct", "Assemble one contig; also paint it (and record its refit histogram) after run calibration."),
         ("calibrate", "Calibrate painting across all final assemblies."),
-        ("pedigree", "Gather the genome-wide pedigree."),
+        ("pedigree", "Refit every contig under the run's class priors, then gather the genome-wide pedigree."),
         ("phase", "Phase, map and export one contig."),
         ("report", "Publish tables from available records."),
     ):

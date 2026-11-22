@@ -14,8 +14,8 @@ import numpy as np
 from numba import prange
 
 from ...core.kernels import kernel
-from .kernels.signatures import OVERLOADS
-from .parameters import RelationshipParameters
+from .kernels.decision import OVERLOADS
+from .relationship_parameters import RelationshipParameters
 
 
 @kernel(overloads=OVERLOADS["relationship._pair_chance"], cache=True, parallel=True, nogil=True)
@@ -152,7 +152,7 @@ def _process_log_likelihoods(x, distances, start, stop, q, persistence, rates, i
                         else:
                             p1 = min(1.0 - 1e-6, (1.0 - q[t]) * (1.0 - s) / q[t])
                             en = p1 if v == 1 else 1.0 - p1
-                    error = isolated_error * (1.0 - q[t])
+                    error = isolated_error[i, t] * (1.0 - q[t])
                     fs *= error if v == 1 else 1.0 - error
                     fn *= en
                     norm = fs + fn
@@ -231,11 +231,23 @@ def haldane_distances(theta):
         return np.concatenate(([0.0], -0.5 * np.log1p(-2.0 * theta)))
 
 
+def unit_isolated_errors(pair_error, rows, floor):
+    """float64 [R, B]: per unit (rows int64 [R, 2] pairs or [R, 3] trios) and bin, the probability that some label of
+    the unit is wrong, min(1/2, max(floor, sum of the members' u)) (ADVICE2 11.1; ``pair_error`` float64 [N, B] the
+    schedule's u; None gives the scalar ``floor``, the 4.20 constant)."""
+    rows = np.asarray(rows, dtype=np.int64)
+    if pair_error is None:
+        return float(floor)
+    total = np.asarray(pair_error, dtype=np.float64)[rows].sum(axis=1)
+    return np.minimum(0.5, np.maximum(float(floor), total))
+
+
 def process_log_likelihoods(x, distances, q, s, rates=None, *, starts=None, stops=None, isolated_error=1e-3):
     """float64 [sequences,4], sums of independent component likelihoods.
 
     distances[B] holds the entering-boundary Haldane distance (zero at each
     component start). q[B] is bin-specific; s is scalar or [components].
+    isolated_error is a scalar, or float64 [sequences, B] per sequence and bin (unit_isolated_errors).
     """
     if starts is None:
         starts = [0]
@@ -253,8 +265,18 @@ def process_log_likelihoods(x, distances, q, s, rates=None, *, starts=None, stop
         process_rates(RelationshipParameters())
         if rates is None
         else np.array(rates, dtype=np.float64, order="C", copy=True),
-        float(isolated_error),
+        _isolated(isolated_error, np.shape(x)),
     )
+
+
+def _isolated(isolated_error, shape):
+    """float64 [sequences, B] from a scalar or a per-sequence, per-bin array."""
+    if np.ndim(isolated_error) == 0:
+        return np.full(shape, float(isolated_error))
+    values = np.asarray(isolated_error, dtype=np.float64)
+    if values.shape != tuple(shape):
+        raise ValueError("relationship isolated errors differ from the sequence axes")
+    return np.array(values, dtype=np.float64, order="C", copy=True)
 
 
 def evidence(log_likelihoods):

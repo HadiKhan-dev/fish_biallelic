@@ -27,7 +27,7 @@ from ...contracts.painting import ComponentPainting
 from ...contracts.panels import ComponentPanel
 from ...contracts.roles import freeze_record_arrays, record_field
 from ...core import ties
-from ...core.errors import InvariantError
+from ...core.errors import InputError, InvariantError
 from . import emissions, fidelity, hmm
 from .emissions import ArraySource, EmissionBuilder
 from .parameters import MAXIMUM_MASK_STATES, PaintingParameters
@@ -83,6 +83,10 @@ class ComponentDecoding:
     qf: np.ndarray = record_field("state", axes=("N", "B"), dtype="float64", units="probability")
     qaf: np.ndarray = record_field("state", axes=("N", "B"), dtype="float64", units="probability")
     model: fidelity.ChainModel | None = record_field("state", axes=(), dtype="fidelity.ChainModel | None", units="1")
+    label_error: np.ndarray | None = record_field(
+        "state", axes=("N", "B", "3"), dtype="float32", units="probability", default=None, kw_only=True
+    )
+    """(u, v_0, v_1) per sample and bin (fidelity.label_errors) of the decoded labels; None unless requested."""
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -90,6 +94,10 @@ class ComponentDecoding:
 
 def _raw_batches(states, bins, likelihoods, observed, sites, config, size, emission_builder, robustness_epsilon, site_correlation, skip=()):
     """Yield emissions, eligibility and observed masks for the requested contiguous sample batches."""
+    if emission_builder is None:
+        raise InputError(
+            "painting emissions need the cohort law: pass emission_builder=functools.partial(tempered_emissions, cohort=...)"
+        )
     alt_probability = states.alt_probability()
     n_samples = likelihoods.shape[0]
 
@@ -138,7 +146,8 @@ def component_model(
     site_correlation: float,
     batch_samples: int = 1,
     cache_emissions: bool = True,
-    emission_builder: EmissionBuilder = emissions.tempered_emissions,
+    emission_builder: EmissionBuilder | None = None,
+    final_likelihood: bool = False,
 ) -> fidelity.ChainModel | None:
     """The component's copying model (rho, a, b; painting.fidelity.estimate_chain), estimated from all its samples on
     the assembled panel, or None without bins. Label continuity then uses it unchanged: a relabelling renames states
@@ -161,14 +170,21 @@ def component_model(
     if cache_emissions:
         packed = np.empty((n_samples, n_packed, bins.n_bins))
         spans = []
+        held = {}
         for raw, eligible, start, stop, *_ in batches():
-            emissions.pack_emissions(raw, packed, start, n_states)
+            if hasattr(raw, "read"):          # read state: keep the batch object (its matrices cannot be packed)
+                held[start] = raw.path_only()     # the fits never read the confidence strength
+            else:
+                emissions.pack_emissions(raw, packed, start, n_states)
             spans.append((eligible, start, stop))
             del raw
 
         def source():
             for eligible, start, stop in spans:
-                yield emissions.unpack_emissions(packed[start:stop], n_states), eligible
+                if start in held:
+                    yield held[start], eligible
+                else:
+                    yield emissions.unpack_emissions(packed[start:stop], n_states), eligible
 
     else:
 
@@ -179,7 +195,7 @@ def component_model(
         source,
         error_capable(states),
         edge_morgans(bins.centers, genetic_map),
-        config, site_correlation=site_correlation,
+        config, site_correlation=site_correlation, final_likelihood=final_likelihood,
     )
 
 
@@ -229,6 +245,14 @@ def release_component(
     )
     switch_counts = decoding.switch_counts.copy()
     switch_counts[~decoding.eligible] = 0
+    label_error = None
+    if decoding.label_error is not None:
+        # released bins only (ADVICE2 11.1): u where both tracks are released, v_t where track t is
+        released = classes >= 0
+        label_error = np.array(decoding.label_error, dtype=np.float32, copy=True)
+        label_error[..., 0][~(released[:, 0, :] & released[:, 1, :])] = np.nan
+        label_error[..., 1][~released[:, 0, :]] = np.nan
+        label_error[..., 2][~released[:, 1, :]] = np.nan
     return ComponentPainting(
         panel=panel,
         states=states,
@@ -244,6 +268,7 @@ def release_component(
         member_sets=member_sets,
         switch_counts=switch_counts,
         packed_emissions=decoding.packed_emissions,
+        label_error=label_error,
     )
 
 
@@ -275,16 +300,29 @@ def decoding_model(states, bins, evidence_sites, genetic_map, model):
     return capable, transitions, local_keys, public_ids, sites
 
 
+def read_decoder_for(raw):
+    """painting.read_decode for a batch carrying the read state, else painting.fidelity."""
+    if hasattr(raw, "read"):
+        from . import read_decode
+        return read_decode
+    return fidelity
+
+
 def decode_batch(raw, batch_eligible, batch_observed, informative, states, bins, model, capable,
-                 local_keys, public_ids, config, *, reverse, confidence=None):
+                 local_keys, public_ids, config, *, reverse, confidence=None, errors=False):
     """Compute one batch's candidate paths, release masses and direct support.
 
     ``raw`` and ``model``: emissions and copying model at the path strength (they decode). ``confidence``: None when
     the run's two strengths are equal, else (confidence model, emissions at the confidence strength): the release
-    masses are then the confidence chain's posteriors of the decoded labels."""
+    masses are then the confidence chain's posteriors of the decoded labels. With ``errors`` the label-error statistic
+    (u, v) of the decoded labels comes from the same pass (fidelity.release_posteriors) and is returned last."""
     # Combine switch intervals from both traceback conventions, canonical track order and faithful-copy
     # release masses of the chain's Viterbi labels.
-    batch_paths, batch_masks, batch_switches, other_paths = fidelity.decode_candidates(
+    if hasattr(raw, "read"):                  # read state carried (painting.read_decode)
+        from . import read_decode as decoder
+    else:
+        decoder = fidelity
+    batch_paths, batch_masks, batch_switches, other_paths = decoder.decode_candidates(
         raw,
         model,
         capable,
@@ -297,17 +335,16 @@ def decode_batch(raw, batch_eligible, batch_observed, informative, states, bins,
         reverse=reverse,
         tie=config.viterbi_tie,
     )
-    if confidence is None:
-        batch_qf, batch_qaf = fidelity.release_posteriors(
-            raw, model, capable, batch_paths, other_paths, public_ids, local_keys
-        )
-    else:
-        batch_qf, batch_qaf = fidelity.release_posteriors(
-            confidence[1], confidence[0], capable, batch_paths, other_paths, public_ids, local_keys
-        )
+    chain_raw, chain_model = (raw, model) if confidence is None else (confidence[1], confidence[0])
+    released = (read_decoder_for(chain_raw)).release_posteriors(
+        chain_raw, chain_model, capable, batch_paths, other_paths, public_ids, local_keys, errors=errors
+    )
+    batch_qf, batch_qaf = released[:2]
     del raw
     batch_support = hmm.direct_support(
         batch_paths, states.named_alleles, informative, bins.starts, bins.stops, states.n_classes
     )
     batch_support[~batch_eligible] = False
+    if errors:
+        return batch_paths, batch_masks, batch_switches, batch_qf, batch_qaf, batch_support, released[2], released[3]
     return batch_paths, batch_masks, batch_switches, batch_qf, batch_qaf, batch_support

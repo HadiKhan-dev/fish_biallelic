@@ -32,8 +32,9 @@ from ...contracts.pedigree import (
 )
 from ...core import ties as tie_rules
 from .alternatives import Alternatives, softmax_finite
+from .decision_parameters import TierThresholds
 from .eligibility import ParentEligibility
-from .parameters import PedigreeParameters, TierThresholds
+from .parameters import PedigreeParameters
 from .resampling import Resampling
 from .selection import Selection
 

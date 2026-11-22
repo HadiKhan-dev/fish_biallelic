@@ -25,7 +25,7 @@ from ...core.kernels import kernel
 from ...core.random import bootstrap_multiplicities
 from . import selection
 from .family import FamilyMessageNonConvergence
-from .kernels.signatures import OVERLOADS
+from .kernels.decision import OVERLOADS
 from .parameters import PedigreeParameters
 from .selection import DecisionInputs
 

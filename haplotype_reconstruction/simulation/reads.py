@@ -17,6 +17,11 @@ Two samplers, chosen by ``ReadModel.read_length_bp``:
   disfavoured allele reports the other one with probability |2p - 1|); the error rate acts on
   homozygous cells only.
 
+Both short-read samplers independently leave each covered base uncalled with probability
+uncalled_base_probability. Configured depth is before this loss. Binomial thinning of the
+REF/ALT counts is equivalent to tossing a separate coin for each hit, including hits sharing
+one fragment. The loss is drawn at the end of each sample's stream, after all other draws.
+
 Optional site factors multiply shared mean-one lognormal draws by a uniform retained
 share in a Bernoulli-impaired fraction of sites/windows. Loss is not renormalised:
 depth means unimpaired depth, with expected sample mean
@@ -59,6 +64,15 @@ and one seed come from the contig's stream; each sample's own draws (cell factor
 fragments, dropout tract, alleles) come from its own stream, simulation.sample_reads(seed, sample
 index). Blocks of samples are therefore simulated in parallel with the same result at any worker
 count, because each sample stream is indexed independently of its execution block.
+
+Batches (both read samplers): a sample's reads are drawn in batches of consecutive reads, at most READ_BATCH_READS
+and, in expectation, READ_BATCH_INCIDENCES read-site incidences each, so the working memory is bounded at any depth.
+The read count (or the per-window counts) comes first from the sample's stream; each read's start (within its window),
+length, homologue, quality, foreign donor and thinning mark, and each incidence's draws, are independent across reads
+and incidences, so batching changes no law. The first batch draws from the sample's stream in the order above, so a
+sample whose reads fit in one batch draws exactly as unbatched; later batches draw from simulation.read_batch(seed,
+sample index, batch); the dropout tract is drawn from the sample's stream after the first batch. The batch size is
+fixed by the read model and the contig, so the counts are the same at any worker count.
 """
 
 from __future__ import annotations
@@ -80,6 +94,8 @@ from .parameters import (
     LONG_READ_MIN_BP,
     LONG_READ_SIGMA_LIMIT,
     MINIMUM_FRAGMENT_BP,
+    READ_BATCH_INCIDENCES,
+    READ_BATCH_READS,
     READ_QUALITY_MAX,
     READ_QUALITY_MIN,
 )
@@ -108,6 +124,10 @@ class ReadInputs:
     context_strength: NDArray[np.float64] | None = None
     # Structural variants of the analysed haplotypes (simulation/structure.py), or None.
     structure: StructureReads | None = None
+    # Gate G1i (simulation/injection.py): the haplotypes before replacement and the replaced cells; None when clean.
+    original0: NDArray[np.int8] | None = None
+    original1: NDArray[np.int8] | None = None
+    injected: NDArray[np.bool_] | None = None
 
 
 def read_inputs(
@@ -172,7 +192,9 @@ def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer
         if model.long_read_mean_bp:
             present = None if structure is None else structure.present[i]
             context = None if inputs.context is None else (inputs.context, inputs.context_strength)
-            counts = sample(*args, target, rng, context, present, (inputs.hap0, inputs.hap1, i))
+            counts = sample(*args, target, rng, context, present, (inputs.hap0, inputs.hap1, i), batch_key=(inputs.seed, i))
+        elif model.read_length_bp:
+            counts = sample(*args, target, rng, batch_key=(inputs.seed, i))
         else:
             counts = sample(*args, target, rng)
         if structure is not None and (not structure.present[i].all() or (structure.copies[i] >= 0).any()):
@@ -191,6 +213,8 @@ def read_rows(inputs: ReadInputs, first: int, stop: int, out: NDArray[np.integer
                 sv_stream("simulation.sv.reads", inputs.seed, i),
                 thin=not model.long_read_mean_bp,
             )
+        if model.uncalled_base_probability:
+            counts -= rng.binomial(counts, model.uncalled_base_probability)
         out[row] = counts
     return out
 
@@ -315,8 +339,32 @@ def _site_sample(hap0, hap1, positions, depth, model, factor, site_factor, rng):
     return np.stack((counts - alt, alt), axis=-1).astype(np.int64, copy=False)
 
 
-def _fragment_sample(hap0, hap1, positions, depth, model, factor, site_factor, rng):
-    """REF/ALT counts int64[L, 2] of one sample under the paired-end fragment sampler, from its own stream."""
+def _batch_size(bases_per_read, sites, span):
+    """Reads per batch of one sample (module docstring, Batches): at most READ_BATCH_READS, and READ_BATCH_INCIDENCES
+    read-site incidences at the expected sites per read (covered bases per read x the contig's site density). Fixed by
+    the read model and the contig, never by depth or the sample's draws."""
+    per_read = max(float(bases_per_read) * sites / max(span, 1), 1.0)
+    return int(max(1, min(READ_BATCH_READS, READ_BATCH_INCIDENCES // per_read)))
+
+
+def _batches(rng, n, size, batch_key, edges=None, widths=None, local=None, window_ends=None):
+    """Yield (generator, reads, start, envelope) per batch of a sample's n reads: the sample's stream for the first
+    batch, simulation.read_batch(seed, sample index, batch) after it. Starts are uniform over the contig span (lo is
+    added by the caller via edges=None) or, with target windows, uniform within each read's window (window_ends: the
+    cumulative per-window read counts), with that window's envelope."""
+    for b, a in enumerate(range(0, n, size)):
+        g = rng if b == 0 else stream("simulation.read_batch", seed=batch_key[0], index=batch_key[1], key=b)
+        m = min(n, a + size) - a
+        if window_ends is None:
+            yield g, m, None, None
+        else:
+            w = np.searchsorted(window_ends, np.arange(a, a + m), side="right")
+            yield g, m, edges[w] + g.integers(0, widths[w]), local[w]
+
+
+def _fragment_sample(hap0, hap1, positions, depth, model, factor, site_factor, rng, *, batch_key):
+    """REF/ALT counts int64[L, 2] of one sample under the paired-end fragment sampler, from its own stream (later
+    read batches from their own: module docstring, Batches)."""
     sites = len(hap0)
     r = int(model.read_length_bp)
     mean, sd = float(model.fragment_mean_bp), float(model.fragment_sd_bp)
@@ -340,7 +388,7 @@ def _fragment_sample(hap0, hap1, positions, depth, model, factor, site_factor, r
             target *= site_factor
     if target is None:
         n = int(rng.poisson(rate * span))
-        start = lo + rng.integers(0, span, size=n)
+        windows = {}
     else:
         # Conditional Poisson thinning gives each cell its target rate while retaining
         # common fragment starts/lengths/homologues across sites. Gamma mixing then
@@ -351,49 +399,55 @@ def _fragment_sample(hap0, hap1, positions, depth, model, factor, site_factor, r
         edges, widths, local = _fragment_envelopes(positions, target, lo, span, f_max)
         per_window = rng.poisson(rate * local * widths)
         n = int(per_window.sum())
-        start = np.repeat(edges, per_window) + rng.integers(0, np.repeat(widths, per_window))
-        envelope = np.repeat(local, per_window)
-    length = np.clip(np.rint(rng.normal(mean, sd, size=n)), f_min, f_max).astype(np.int64)
-    which = rng.integers(0, 2, size=n)
-    first_end = start + np.minimum(length, r)
-    second_start = np.maximum(start + length - r, first_end)
-    second_end = start + length
-    intervals = (
-        (np.searchsorted(positions, start), np.searchsorted(positions, first_end)),
-        (np.searchsorted(positions, second_start), np.searchsorted(positions, second_end)),
-    )
-    site_parts, hap_parts, fragment_parts = [], [], []
-    for first, stop in intervals:
-        size = stop - first
-        keep = size > 0
-        if not np.any(keep):
+        windows = dict(edges=edges, widths=widths, local=local, window_ends=np.cumsum(per_window))
+    size_b = _batch_size(covered_per_fragment, sites, span)
+    for g, m, start, envelope in _batches(rng, n, size_b, batch_key, **windows):
+        if start is None:
+            start = lo + g.integers(0, span, size=m)
+        length = np.clip(np.rint(g.normal(mean, sd, size=m)), f_min, f_max).astype(np.int64)
+        which = g.integers(0, 2, size=m)
+        first_end = start + np.minimum(length, r)
+        second_start = np.maximum(start + length - r, first_end)
+        second_end = start + length
+        intervals = (
+            (np.searchsorted(positions, start), np.searchsorted(positions, first_end)),
+            (np.searchsorted(positions, second_start), np.searchsorted(positions, second_end)),
+        )
+        site_parts, hap_parts, fragment_parts = [], [], []
+        for first, stop in intervals:
+            size = stop - first
+            keep = size > 0
+            if not np.any(keep):
+                continue
+            first, size, owner = first[keep], size[keep], which[keep]
+            offsets = np.arange(int(size.sum())) - np.repeat(np.cumsum(size) - size, size)
+            site_parts.append(np.repeat(first, size) + offsets)
+            hap_parts.append(np.repeat(owner, size))
+            if target is not None:
+                fragment_parts.append(np.repeat(np.flatnonzero(keep), size))
+        if not site_parts:
             continue
-        first, size, owner = first[keep], size[keep], which[keep]
-        offsets = np.arange(int(size.sum())) - np.repeat(np.cumsum(size) - size, size)
-        site_parts.append(np.repeat(first, size) + offsets)
-        hap_parts.append(np.repeat(owner, size))
-        if target is not None:
-            fragment_parts.append(np.repeat(np.flatnonzero(keep), size))
-    if site_parts:
         site = np.concatenate(site_parts)
         owner = np.concatenate(hap_parts)
+        del site_parts, hap_parts
         if target is not None:
             # One uniform mark per fragment couples retention across all its hits.
             # Shared-hit intensity is proportional to min(target_i, target_j), so an
             # unrelated high-depth site cannot change local dependence via the envelope.
-            mark = rng.random(n)
+            mark = g.random(m)
             fragment = np.concatenate(fragment_parts)
             keep = mark[fragment] < target[site] / envelope[fragment]
             site, owner = site[keep], owner[keep]
+            del fragment, keep
         allele = np.where(owner == 0, hap0[site], hap1[site]).astype(np.int64)
         het = hap0[site] != hap1[site]
         if bias:
             favoured = 1 if bias > 0 else 0
-            convert = het & (allele != favoured) & (rng.random(len(site)) < 2 * abs(bias))
+            convert = het & (allele != favoured) & (g.random(len(site)) < 2 * abs(bias))
             allele[convert] = favoured
-        allele ^= (~het) & (rng.random(len(site)) < model.error_rate)
-        counts = np.bincount(site, minlength=sites).astype(np.int64)
-        alt = np.bincount(site, weights=allele, minlength=sites).astype(np.int64)
+        allele ^= (~het) & (g.random(len(site)) < model.error_rate)
+        counts += np.bincount(site, minlength=sites).astype(np.int64)
+        alt += np.bincount(site, weights=allele, minlength=sites).astype(np.int64)
     if width:
         first = int(rng.integers(0, sites - width + 1))
         counts[first : first + width] = 0
@@ -421,11 +475,12 @@ def _window_alt_counts(haplotype, positions, window):
 
 
 def _long_read_sample(hap0, hap1, positions, depth, model, factor, site_factor, rng, context, present=None,
-                      cohort=None):
-    """REF/ALT counts int64[L, 2] of one sample under the long-read sampler (module docstring), from its own stream.
+                      cohort=None, *, batch_key):
+    """REF/ALT counts int64[L, 2] of one sample under the long-read sampler (module docstring), from its own stream
+    (later read batches from their own: module docstring, Batches).
 
     present: bool [2, L] (structure) or None; a homologue's hits at its absent cells are removed. cohort: (hap0 [N, L],
-    hap1 [N, L], this sample's row) for foreign reads."""
+    hap1 [N, L], this sample's row) for foreign reads. batch_key: (seed, sample index) of the batch streams."""
     sites = len(hap0)
     mu, sigma, f_min, f_max, covered_per_read = _long_read_lengths(model)
     width = int(sites * model.dropout_fraction)
@@ -442,42 +497,53 @@ def _long_read_sample(hap0, hap1, positions, depth, model, factor, site_factor, 
             target *= site_factor
     if target is None:
         n = int(rng.poisson(rate * span))
-        start = lo + rng.integers(0, span, size=n)
+        windows = {}
     else:
         edges, widths, local = _fragment_envelopes(positions, target, lo, span, f_max)
         per_window = rng.poisson(rate * local * widths)
         n = int(per_window.sum())
-        start = np.repeat(edges, per_window) + rng.integers(0, np.repeat(widths, per_window))
-        envelope = np.repeat(local, per_window)
-    length = np.clip(np.rint(np.exp(rng.normal(mu, sigma, size=n))), f_min, f_max).astype(np.int64)
-    which = rng.integers(0, 2, size=n)
-    quality = np.clip(rng.normal(model.read_quality_mean, model.read_quality_sd, size=n), READ_QUALITY_MIN,
-                      READ_QUALITY_MAX)
-    error = 10.0 ** (-quality / 10)
-    donor = None
-    if model.foreign_read_share and cohort is not None and len(cohort[0]) > 1:
-        # A foreign read takes a uniform other sample's homologue (which); drawn only when the share is positive.
-        foreign = rng.random(n) < model.foreign_read_share
-        other = rng.integers(0, len(cohort[0]) - 1, size=n)
-        donor = np.where(foreign, other + (other >= cohort[2]), -1)
-    first = np.searchsorted(positions, start)
-    stop = np.searchsorted(positions, start + length)
-    size = stop - first
-    keep = size > 0
-    if np.any(keep):
+        windows = dict(edges=edges, widths=widths, local=local, window_ends=np.cumsum(per_window))
+    window_alt = None
+    if model.reference_bias:
+        window = int(model.reference_bias_window_bp)
+        window_alt = (_window_alt_counts(hap0, positions, window), _window_alt_counts(hap1, positions, window))
+    size_b = _batch_size(covered_per_read, sites, span)
+    for g, m, start, envelope in _batches(rng, n, size_b, batch_key, **windows):
+        if start is None:
+            start = lo + g.integers(0, span, size=m)
+        length = np.clip(np.rint(np.exp(g.normal(mu, sigma, size=m))), f_min, f_max).astype(np.int64)
+        which = g.integers(0, 2, size=m)
+        quality = np.clip(g.normal(model.read_quality_mean, model.read_quality_sd, size=m), READ_QUALITY_MIN,
+                          READ_QUALITY_MAX)
+        error = 10.0 ** (-quality / 10)
+        donor = None
+        if model.foreign_read_share and cohort is not None and len(cohort[0]) > 1:
+            # A foreign read takes a uniform other sample's homologue (which); drawn only when the share is positive.
+            foreign = g.random(m) < model.foreign_read_share
+            other = g.integers(0, len(cohort[0]) - 1, size=m)
+            donor = np.where(foreign, other + (other >= cohort[2]), -1)
+        first = np.searchsorted(positions, start)
+        stop = np.searchsorted(positions, start + length)
+        size = stop - first
+        keep = size > 0
+        if not np.any(keep):
+            continue
         first, size = first[keep], size[keep]
         reads = np.flatnonzero(keep)
         offsets = np.arange(int(size.sum())) - np.repeat(np.cumsum(size) - size, size)
         site = np.repeat(first, size) + offsets
+        del offsets
         read = np.repeat(reads, size)
         if target is not None:
-            mark = rng.random(n)
+            mark = g.random(m)
             retained = mark[read] < target[site] / envelope[read]
             site, read = site[retained], read[retained]
+            del retained
         owner = which[read]
         if present is not None:
             here = present[owner, site] | (donor is not None and donor[read] >= 0)
             site, read, owner = site[here], read[here], owner[here]
+            del here
         allele = np.where(owner == 0, hap0[site], hap1[site]).astype(np.int64)
         het = hap0[site] != hap1[site]
         if donor is not None:
@@ -487,19 +553,19 @@ def _long_read_sample(hap0, hap1, positions, depth, model, factor, site_factor, 
             het = het & ~outside
         if bias:
             favoured = 1 if bias > 0 else 0
-            convert = het & (allele != favoured) & (rng.random(len(site)) < 2 * abs(bias))
+            convert = het & (allele != favoured) & (g.random(len(site)) < 2 * abs(bias))
             allele[convert] = favoured
+        del het
         e = error[read]
+        del read
         substitution = model.substitution_share
         lost = 1 - (1 - e * (1 - substitution) / 2) * (1 - e * substitution * 2 / 3)
         other = e * substitution / 3
         if model.reference_pull:
             pull = np.minimum(1.0, model.reference_pull * e / _mean_error(model))
             other = np.where(allele == 1, 1 - (1 - other) * (1 - pull), other)
-        if model.reference_bias:
-            window = int(model.reference_bias_window_bp)
-            k = np.where(owner == 0, _window_alt_counts(hap0, positions, window)[site],
-                         _window_alt_counts(hap1, positions, window)[site])
+        if window_alt is not None:
+            k = np.where(owner == 0, window_alt[0][site], window_alt[1][site])
             lost = 1 - (1 - lost) * np.exp(-model.reference_bias * k.astype(np.float64) ** model.reference_bias_power)
         if context is not None:
             extending, strength = context
@@ -507,13 +573,13 @@ def _long_read_sample(hap0, hap1, positions, depth, model, factor, site_factor, 
             indel = np.where(at, np.minimum(1.0, e * (1 - substitution) * model.context_factor * strength[site]), 0.0)
             lost = 1 - (1 - lost) * (1 - indel * (1 - model.context_convert))
             other = 1 - (1 - other) * (1 - indel * model.context_convert)
-        u = rng.random(len(site))
+        u = g.random(len(site))
         dropped = u < lost
         flipped = ~dropped & (u < lost + (1 - lost) * other)
         allele[flipped] ^= 1
         site, allele = site[~dropped], allele[~dropped]
-        counts = np.bincount(site, minlength=sites).astype(np.int64)
-        alt = np.bincount(site, weights=allele, minlength=sites).astype(np.int64)
+        counts += np.bincount(site, minlength=sites).astype(np.int64)
+        alt += np.bincount(site, weights=allele, minlength=sites).astype(np.int64)
     if width:
         cut = int(rng.integers(0, sites - width + 1))
         counts[cut : cut + width] = 0

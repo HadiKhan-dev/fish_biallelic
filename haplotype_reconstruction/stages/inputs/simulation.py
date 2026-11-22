@@ -700,5 +700,8 @@ def simulation_config(settings: Any, *, realised_seed: int | None = None) -> Sim
             reference_bias_power=reads.reference_bias_power,
             reference_pull=reads.reference_pull,
             foreign_read_share=reads.foreign_read_share,
+            injected_outlier_rate=reads.injected_outlier_rate,
+            injected_outlier_pattern=reads.injected_outlier_pattern,
+            uncalled_base_probability=reads.uncalled_base_probability,
         ),
     )

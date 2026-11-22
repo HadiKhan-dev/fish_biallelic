@@ -7,6 +7,7 @@ Method: docs/methods/pedigree.md#products-and-published-tables.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -35,10 +36,12 @@ from ...contracts.pedigree import (
 from ...core.concurrency import threaded_each
 from ...core.errors import InputError, InvariantError
 from ...engine.cpu import TASK_THREADS
+from ...engine.records import record_diagnostic
 from ...engine.workers import ResidentRef, release_resident, release_shared_value, resident_value, retain
-from ...science.pedigree import material_veto, not_assessable, regimes, panel, resampling, stacking
+from ...science.pedigree import material_veto, not_assessable, panel, regimes, resampling, stacking
 from ...science.pedigree import run as science
-from ...science.pedigree.parameters import ExclusionParameters, PedigreeParameters
+from ...science.pedigree.exclusion_parameters import ExclusionParameters
+from ...science.pedigree.parameters import PedigreeParameters
 from ...science.pedigree.resampling import FitResult
 from ...store.container import CheckpointFile
 from ...store.protocol import NumericalPolicy, claim
@@ -297,6 +300,8 @@ def run(
     if classification.name != inputs.genome.regime:
         raise InputError("unit scores' regime differs from their material")
     inputs = replace(inputs, identities=replace(inputs.identities, regime=classification.name))
+    # The first fit uses the assembled genome state. Its graph choices and prior updates depend on
+    # the preceding fit state. Independent support fits start below once this fit supplies their inputs.
     state = science.start_full_fit(inputs.genome, parameters)
     if isinstance(state, Pedigree):
         raise InputError("score block axis differs from its prepared layout")
@@ -337,6 +342,7 @@ def _resampled_retained(
     veto: material_veto.VetoSet | None = None,
 ) -> Expansion:
     """Reduce the fit subtasks' results in the plan's order on the affinity worker, then request exclusion."""
+    # The ordered gather depends on the submitted fit results. It took 0.14 s on famhs and 0.25 s on TroMau.
     inputs, parameters, state, planned, shared = resident_value(reference)
     try:
         release_shared_value(shared)
@@ -382,6 +388,9 @@ def _requested(
         publish_product(
             file, REQUEST, _request_identity(inputs, parameters, numerical_policy), request, RequestAdapter()
         )
+    # Count and relationship evidence already fan out over contigs. Their request needs the completed
+    # decision, and the ordered release waits for the resulting parts. In the matched 76-core replay,
+    # the two release gathers together took 0.05 s on famhs and 0.06 s on TroMau.
     parts = tuple(
         _exclusion_task(
             c,
@@ -393,6 +402,8 @@ def _requested(
             cores=workers,
             file=None if contig_files is None else contig_files[c],
             identity=None if contig_files is None else dict(identities.exclusion)[c],
+            sample_rates=inputs.identities.sample_rates,
+            sharing=inputs.identities.exclusion_sharing,
         )
         for c, log_weight in science.exclusion_contigs(request)
     )
@@ -686,32 +697,6 @@ def _summary(value: PreparedChromosome | StoredPrepared) -> ChromosomeSummaryVie
     return value.summary if isinstance(value, StoredPrepared) else scores.chromosome_summary((value,))[0]
 
 
-def _exclusion_stored(
-    contig: str,
-    reference: StoredEvidence,
-    dyads: np.ndarray,
-    parameters: ExclusionParameters,
-    log_weight: float,
-    sample_count: int,
-    *,
-    threads: int = 1,
-    file: CheckpointFile | None = None,
-    identity: str | None = None,
-) -> ExclusionEvidence:
-    evidence = evidence_records.load_dense(reference.file, expected_identity=reference.identity)
-    return exclusion.run(
-        contig,
-        evidence,
-        dyads,
-        parameters,
-        log_weight,
-        sample_count,
-        threads=threads,
-        file=file,
-        identity=identity,
-    )
-
-
 def _exclusion_task(
     contig: str,
     evidence: ContigEvidence | StoredEvidence,
@@ -723,6 +708,8 @@ def _exclusion_task(
     cores: int,
     file: CheckpointFile | None,
     identity: str | None,
+    sample_rates: tuple[float, ...] = (),
+    sharing: tuple[bool, ...] = (),
 ) -> Task:
     if not isinstance(evidence, StoredEvidence):
         return exclusion.task(
@@ -735,12 +722,14 @@ def _exclusion_task(
             cores=cores,
             file=file,
             identity=identity,
+            sample_rates=sample_rates,
+            sharing=sharing,
         )
     return Task(
         TaskKey("pedigree", "exclusion", contig),
-        _exclusion_stored,
-        args=(contig, evidence, dyads, parameters, log_weight, sample_count),
-        kwargs=dict(file=file, identity=identity),
+        exclusion.run_stored,
+        args=(contig, evidence.file, evidence.identity, dyads, parameters, log_weight, sample_count),
+        kwargs=dict(file=file, identity=identity, sample_rates=tuple(sample_rates), sharing=sharing),
         inputs=(RecordKey(contig, "evidence"),),
         outputs=(RecordKey(contig, exclusion.KEY),),
         resources=ResourceRequest(max_cores=cores),
@@ -765,6 +754,9 @@ def _relationship_stored(
         previous = load_product(file, relationship.KEY, identity, relationship.RelationshipAdapter())
         if previous is not None:
             return previous
+    # Relationship likelihoods cover complete ordered bin sequences and start from a shared set of
+    # seeded references per component. Contigs already run independently. Summed task wall was 2.2 s
+    # on famhs (12.5 CPU s) and 2.7 s on TroMau (14.9 CPU s) in the rebind replay.
     prepared = load_product(reference.file, PREPARED, reference.identity, prepare.PreparedAdapter())
     if prepared is None:
         raise InvariantError("relationship evidence requires complete prepared inputs")
@@ -836,10 +828,23 @@ def _relative_stored(
     *,
     threads: int = 1,
 ) -> relatives.ContigContrasts:
-    prepared = load_product(reference.file, PREPARED, reference.identity, prepare.PreparedAdapter())
+    # At 19 threads the warm famhs chr19 proxies use .89, while resident setup takes .37 wall / 1.2 CPU s.
+    # Extra independent child ranges repeat decoding and setup: one/two/four per contig took 15.1/16.7/21.6 s
+    # on famhs and 5.9/6.4/7.1 s on longbc. Std, tl and TroMau repeated that pattern: one/two/four
+    # took 8.63/10.04/11.66, 9.58/10.29/13.53 and 17.09/21.94/26.24 s. TroMau's 16-thread cap used
+    # .807 in 17.61 s, versus .757 in 16.17 s on the dynamic grant. Repeated warm std timings on the
+    # final records gave 8.41 s median dynamic and 8.53 s with a 24-thread cap. Keep the faster schedule.
+    wall, cpu = time.perf_counter(), time.process_time()
+    file = CheckpointFile(reference.file.path, kind=reference.file.kind, name=reference.file.name, nthreads=TASK_THREADS)
+    prepared = load_product(file, PREPARED, reference.identity, prepare.PreparedAdapter())
     if prepared is None:
         raise InvariantError("relative report requires complete prepared inputs")
-    return relatives.run(prepared, parameters, pairs, threads=threads, reverse=parameters.reverse_conventions)
+    read_wall, read_cpu = time.perf_counter(), time.process_time()
+    value = relatives.run(prepared, parameters, pairs, threads=threads, reverse=parameters.reverse_conventions)
+    record_diagnostic(f"relatives {reference.contig}: prepared read {read_wall-wall:.3f} wall s, "
+                      f"{read_cpu-cpu:.3f} CPU s; contrasts {time.perf_counter()-read_wall:.3f} wall s, "
+                      f"{time.process_time()-read_cpu:.3f} CPU s")
+    return value
 
 
 def _relative_task(
@@ -851,13 +856,14 @@ def _relative_task(
 ) -> Task:
     if not isinstance(prepared, StoredPrepared):
         return relatives.task(prepared, parameters, pairs, cores=cores, reverse=parameters.reverse_conventions)
+    # The chains of a pair advance in marker order. Restricting the three longbc contigs to 16 threads
+    # reached .83 use but raised elapsed time from 5.92 to 9.40 s. Let each contig use its live share.
     return Task(
         TaskKey("pedigree", "relatives", prepared.contig),
         _relative_stored,
         args=(prepared, parameters, pairs),
         inputs=(RecordKey(prepared.contig, PREPARED),),
         resources=ResourceRequest(max_cores=cores),
-        affinity=prepared.contig,
         thread_argument="threads",
     )
 
@@ -869,7 +875,7 @@ def run_stored(
     """Read one chromosome at a time; retain only scores and immutable descriptors.
 
     Fit work shares the one assembled genome bundle. Exclusion and relatives load
-    their own per-contig records on their affinity workers. Resume validates the
+    their own per-contig records. Resume validates the
     whole published product before loading scoring arrays or observed masks. The
     reply is the published product's receipt (``product_receipt``), never the product.
     On the both-maps route with a veto regime, the veto regime's chain runs first (``veto_only``: it replies with

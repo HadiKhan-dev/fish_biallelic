@@ -121,6 +121,7 @@ def canonical_component_inputs(
         else gather_likelihoods(evidence.likelihoods, slice(left, right)),
         evidence.observed[:, left:right],
         evidence.founder_excluded,
+        np.asarray(evidence.cohort_frequencies[left:right], dtype=np.float64),
     )
     phase_painting = PhasePainting(
         PhaseStates(

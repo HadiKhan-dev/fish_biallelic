@@ -46,6 +46,7 @@ def execute_join(
     identity: str,
     *,
     cores: int = 1,
+    cohort: np.ndarray | None = None,
 ) -> JoinRecord:
     """Execute one whole batch and atomically publish it before returning.
 
@@ -58,19 +59,21 @@ def execute_join(
                 assert stored is not None
                 return stored
             progress = unit_progress(records.file, JOINS + identity, identity)
-            result = _execute(task, scoring, cores, progress)
+            result = _execute(task, scoring, cores, progress, cohort)
             save_join(records.file, identity, result)
             close_progress(progress)
             return result
-    return _execute(task, scoring, cores, None)
+    return _execute(task, scoring, cores, None, cohort)
 
 
-def _execute(task: JoinTask, scoring: np.ndarray | SharedArrayRef, cores: int, progress) -> JoinRecord:
+def _execute(
+    task: JoinTask, scoring: np.ndarray | SharedArrayRef, cores: int, progress, cohort: np.ndarray | None = None
+) -> JoinRecord:
     began = perf_counter()
     with attached_scoring(scoring) as data, thread_team(default=cores):
         # The task's live allowance: the join search re-reads it at its boundaries, so a long batch grows into CPUs
         # its finished peers left (a fixed budget kept a tail batch on the cores it started with).
-        result = run_batch(task, data, JoinTeam(batch_threads(task)), progress=progress)
+        result = run_batch(task, data, JoinTeam(batch_threads(task)), progress=progress, cohort=cohort)
     return replace(result, seconds=perf_counter() - began)
 
 
@@ -144,6 +147,7 @@ def expand_level(
                 key,
                 execute_join,
                 args=(item, evidence.scoring if scoring_ref is None else scoring_ref, records, identities[item.index]),
+                kwargs=dict(cohort=evidence.cohort),
                 resources=ResourceRequest(
                     team, max(team, max_cores), batch_memory_bytes(item), cost=work, width=batch_team_width(item)
                 ),

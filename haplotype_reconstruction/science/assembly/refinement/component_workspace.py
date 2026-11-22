@@ -29,7 +29,7 @@ from haplotype_reconstruction.contracts.panels import PreparedPanel
 from haplotype_reconstruction.core.kernels import kernel
 from haplotype_reconstruction.science.shared.emissions import (
     CENTER,
-    normalised_likelihoods,
+    centred_likelihoods,
     pair_code,
     predictive_likelihood,
     robust_log_likelihood,
@@ -67,7 +67,7 @@ def binned_emissions(evidence, offsets, alleles, keeps, full, bin_size, outputs)
             if not kept[site]:
                 continue
             index = offsets[block] + site
-            informative, p0, p1, p2 = normalised_likelihoods(
+            informative, p0, p1, p2 = centred_likelihoods(
                 evidence[sample, index, 0], evidence[sample, index, 1], evidence[sample, index, 2]
             )
             if not informative:
@@ -113,6 +113,24 @@ def frozen(array, dtype):
     part = np.ascontiguousarray(array, dtype).view()
     part.flags.writeable = False
     return part
+
+
+# An uncalled allele is coded -2 - row in int16 (objective.pair_code7), so a block's prepared rows, exchange rows
+# included, are bounded by the code's range.
+LEAF_ROW_CAPACITY = 32766
+
+
+def coded_leaf(panel, identity=None):
+    """int16 (R, L): a prepared panel's coded calls: the called allele, or -2 - i where uncalled, i the local row
+    whose unknown allele the cell is.
+
+    identity: None (every row its own) or int (R, L), the latent identities of a block with exchange rows
+    (science.assembly.exchange.extended_identity): outside its run an exchange row's unknown allele is the source
+    row's, so both homologues copying "the same prepared row" there keep one latent allele (pair code 6)."""
+    if panel.rows > LEAF_ROW_CAPACITY:
+        raise ValueError("a block's prepared rows exceed the int16 code of uncalled alleles")
+    owner = np.arange(panel.rows, dtype=np.int16)[:, None] if identity is None else np.asarray(identity, np.int16)
+    return np.ascontiguousarray(np.where(panel.inference >= 0, panel.inference, -2 - owner), np.int16)
 
 
 def component_evidence(evidence, panels):
@@ -162,6 +180,7 @@ class ComponentWorkspace:
         ]
         | None = None,
         message_step: int | None = None,
+        latent: Sequence[NDArray[np.int16] | None] | None = None,
     ) -> None:
         if genetic_map is None:
             raise ValueError("founder refinement needs the contig's genetic map (map-derived switch costs)")
@@ -172,17 +191,10 @@ class ComponentWorkspace:
         # caller passed (a direct replay's own array): a no-copy view of the stage's component_evidence.
         evidence = frozen(evidence, np.float32)
         self.evidence = evidence
-        # Coded leaves: the called allele or -2 - local row where uncalled (objective.pair_code7).
+        # Coded leaves: the called allele or -2 - local row where uncalled (objective.pair_code7); latent: the
+        # latent identities of blocks that hold exchange rows (coded_leaf), None elsewhere.
         self.leaves = List(
-            [
-                np.ascontiguousarray(
-                    np.where(
-                        panel.inference >= 0, panel.inference, -2 - np.arange(panel.rows, dtype=np.int16)[:, None]
-                    ),
-                    np.int16,
-                )
-                for panel in self.panels
-            ]
+            [coded_leaf(panel, None if latent is None else latent[block]) for block, panel in enumerate(self.panels)]
         )
         self.offsets = np.asarray([0, *np.cumsum([panel.sites for panel in self.panels])], np.int64)
         self.penalty = SWITCH_PENALTY
@@ -249,4 +261,12 @@ class ComponentWorkspace:
         return list(outputs)
 
 
-__all__ = ["binned_emissions", "map_hazards", "frozen", "component_evidence", "ComponentWorkspace"]
+__all__ = [
+    "LEAF_ROW_CAPACITY",
+    "binned_emissions",
+    "coded_leaf",
+    "map_hazards",
+    "frozen",
+    "component_evidence",
+    "ComponentWorkspace",
+]

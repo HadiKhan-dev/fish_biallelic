@@ -5,8 +5,8 @@ relative paths, NUL separators and source bytes. Code identities follow local
 imports, including package initializers; callers seed the graph with stage adapters,
 input construction and decoding modules as well as science. No module is imported
 while computing a closure. Once a process has fixed its installed sources (the engine runtime
-does when it starts), each installed closure is hashed once; before that, and for any other
-root, closures are hashed on every call, so edits are seen.
+does when it starts), each installed closure is hashed once. Standalone readers reuse a closure while the
+installed source files match. Other roots are read afresh on each call.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ def _read_sources(root: Path) -> dict[Path, bytes]:
         subdirectories[:] = [name for name in subdirectories if name != "__pycache__"]
         paths.extend(Path(directory) / name for name in files if name.endswith(".py"))
     with ThreadPoolExecutor(max_workers=min(32, max(1, len(paths)))) as pool:
-        return dict(zip(paths, pool.map(Path.read_bytes, paths)))
+        return dict(zip(paths, pool.map(Path.read_bytes, paths), strict=True))
 
 
 @functools.cache
@@ -376,8 +376,8 @@ def code_dependency_identity(
     In a process with fixed installed sources (a run's coordinator, forkserver and workers), a closure of the
     installed package is hashed once: every derivation of every stage task reads its code identity, and parsing and
     hashing a closure's sources each time dominated planning steps and readers. Elsewhere (a reader or notebook with
-    no runtime, whose sources may be edited between calls) and for any other package root, such as a fixture tree,
-    the closure is hashed on every call."""
+    no runtime), reuse the closure for the same source snapshot. Other package roots, such as fixture trees,
+    are read afresh on every call."""
     root = Path(package_root)
     modules = tuple(modules)
     if pinned and root == PACKAGE_ROOT and _PINNED:
@@ -386,7 +386,28 @@ def code_dependency_identity(
             return _pinned_identity(cast(str, stage), frozenset(modules))
     if root == PACKAGE_ROOT and _SOURCES_FIXED:
         return _installed_identity(frozenset(modules))
+    if root == PACKAGE_ROOT:
+        with _call_snapshot(root):
+            sources = cast(dict[Path, bytes], _snapshot(root))
+            return _editable_identity(frozenset(modules), sources)
     return _hashed_closure(modules, root)
+
+
+# Keep one editable package snapshot, shared by all of its cached root sets.
+_EDITABLE: tuple[dict[Path, bytes], dict[frozenset[str], CodeIdentity]] | None = None
+
+
+def _editable_identity(modules: frozenset[str], sources: dict[Path, bytes]) -> CodeIdentity:
+    global _EDITABLE
+    snapshot = _EDITABLE
+    if snapshot is None or snapshot[0] != sources:
+        snapshot = sources, {}
+        _EDITABLE = snapshot
+    # Keep the memo paired with this call's bytes even if another thread encounters a newer revision.
+    identities = snapshot[1]
+    if modules not in identities:
+        identities[modules] = _hashed_snapshot(tuple(modules), PACKAGE_ROOT)
+    return identities[modules]
 
 
 @functools.cache

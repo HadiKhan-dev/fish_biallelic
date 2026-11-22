@@ -1,19 +1,21 @@
 """Estimate the working map's fallback rate from painted sib frames and decide how the material regime uses it.
 
 The late (painting) estimate er (DESIGN_MAPSCALE rev 5, release form DESIGN_RELEASE): one genome-wide rate r (cM/Mb)
-maximising the composite likelihood of every frame sequence's error-run chain (map_scale_kernels.error_run_loglik;
-nuisances: the misfit weight delta, fitted first on the 4-state chain, then the error-run start and end
-probabilities). It is fitted on the map-free contigs only, the stretches whose distances the fallback rate sets; file
-contigs give the file-map ratio diagnostic instead (the same chain on file-map coordinates).
+maximising the composite likelihood of every frame sequence's error-run chain (map_scale_chains.error_run_loglik, the
+target's read class carried; nuisances: the misfit weight delta, fitted first on the 4-state chain, then the
+error-run start and end probabilities). It is fitted on the map-free contigs only, the stretches whose distances the
+fallback rate sets; file contigs give the file-map ratio diagnostic instead (the same chain on file-map coordinates).
 
+- Material units: equal-material units (MaterialParameters.unit_morgans of the working map along the map-free
+  contigs in configured order, the pedigree's convention), with the exact split of every sequence's forward
+  log-likelihood into per-unit predictive terms. They are the independent units of both the consistency test and the
+  interval; no count of chromosomes or contigs decides anything (owner, 13 and 16 Nov 2026).
 - Family consistency (rev 5 R5.2-R5.3): z_f = d_f / sqrt(phi_f (v_f + v_rest)) with d_f = log r_f - log r_(-f), v the
-  profile-curvature variances of log r, phi_f the family-within-contig deviance per degree of freedom of the other
-  families (floored at 1), referred to t(df) at a Bonferroni level; the most deviant family is dropped above
-  drop_margin z_crit (three or more families) and the test repeats; any remaining |z| > z_crit makes the estimate
-  inconsistent. Contigs are the strata of the dispersion only; no count of contigs decides anything.
-- Interval: a crossed percentile bootstrap of families and equal-material units (MaterialParameters.unit_morgans of
-  the working map along the map-free contigs in configured order, the pedigree's convention), from the exact split
-  of every sequence's forward log-likelihood into per-unit predictive terms. It replaces rev 5's contig bootstrap and
+  profile-curvature variances of log r, phi_f the family-within-unit deviance per degree of freedom of the other
+  families (floored at 1; df = sum over units of the families with frames there minus one), referred to t(df) at a
+  Bonferroni level; the most deviant family is dropped above drop_margin z_crit (three or more families) and the test
+  repeats; any remaining |z| > z_crit makes the estimate inconsistent. Rev 5 took contigs as the strata (4.21 C11).
+- Interval: a crossed percentile bootstrap of families and material units. It replaces rev 5's contig bootstrap and
   its >= 5-contig rule (owner, 13 Nov 2026).
 - Adopted: not at a grid edge, >= minimum_events expected crossovers on the kept families, half-width <=
   maximum_half_width, >= 2 families with frames, consistent. Usable (may veto): consistent, >= 2 families, not at a
@@ -36,9 +38,10 @@ from scipy.stats import t as student_t
 from ...contracts.genetic_map import ChromosomeGeneticMap
 from ...contracts.map_scale import MapScaleEstimate
 from ..shared.material import unit_count
+from .map_scale_chains import error_run_loglik, frame_loglik
 from .map_scale_frames import Frames, GuardResult, argmax_refined
-from .map_scale_kernels import error_run_loglik, frame_loglik
-from .parameters import MapScaleParameters, MaterialParameters
+from .map_scale_parameters import MapScaleParameters
+from .material_parameters import MaterialParameters
 
 __all__ = ["MapScaleFit", "fit", "estimate_record", "route_of", "consistency", "joint_interval", "unit_segments"]
 
@@ -50,8 +53,9 @@ _FILE_SCALE = 1e6  # file-map coordinates as pseudo-bp: 1 cM -> 1e6, so a "rate"
 class MapScaleFit:
     """One fit: the estimate, its tables and the gate.
 
-    cells: [C, F, R, N] log-likelihood of each (contig, family) on the error-run grid (N = start x end nuisances);
-    unit_cells: [U, F, R, N] the same split by material unit; families: family ids (F); kept: kept family indices."""
+    unit_cells: [U, F, R, N] log-likelihood of each (material unit, family) on the error-run grid (N = start x end
+    nuisances); families: family ids (F); kept: kept family indices; contigs: the contig indices carrying frames
+    (a description; nothing counts them)."""
 
     estimate: float
     at_edge: bool
@@ -71,7 +75,6 @@ class MapScaleFit:
     frames: int
     targets: int
     contigs: tuple[int, ...]
-    cells: np.ndarray
     unit_cells: np.ndarray
     grid: np.ndarray
     delta: float
@@ -102,11 +105,12 @@ def _curvature_variance(table: np.ndarray, grid: np.ndarray) -> float:
 
 
 def _dispersion(cells: np.ndarray, families: Sequence[int], nuisance: int) -> tuple[float, int]:
-    """Family-within-stratum deviance per degree of freedom over ``families`` at nuisance ``nuisance`` (floor 1)."""
+    """Family-within-stratum deviance per degree of freedom over ``families`` at nuisance ``nuisance`` (floor 1); the
+    strata are the first axis of ``cells`` (material units), each contributing its families with frames minus one."""
     deviance = 0.0
     df = 0
-    for c in range(cells.shape[0]):
-        rows = [cells[c, k, :, nuisance] for k in families if np.any(cells[c, k] != 0)]
+    for u in range(cells.shape[0]):
+        rows = [cells[u, k, :, nuisance] for k in families if np.any(cells[u, k] != 0)]
         if len(rows) < 2:
             continue
         deviance += 2.0 * (sum(_max_refined(x) for x in rows) - _max_refined(np.sum(rows, axis=0)))
@@ -117,13 +121,14 @@ def _dispersion(cells: np.ndarray, families: Sequence[int], nuisance: int) -> tu
 
 
 def consistency(cells: np.ndarray, grid: np.ndarray, p: MapScaleParameters):
-    """Rev-5 family consistency on [C, F, R, N] tables. Returns kept indices, dropped [(index, z)], the last round's
-    rows (index, z, d, sd, phi, df, z_crit), z_crit, consistent, near."""
-    C, F, R = cells.shape[:3]
-    fam = [cells[:, f].reshape(C, R, -1) for f in range(F)]
+    """Rev-5 family consistency on [U, F, R, N] tables whose first axis is the strata of the dispersion: the
+    material units (``fit``). Returns kept indices, dropped [(index, z)], the last round's rows (index, z, d, sd, phi,
+    df, z_crit), z_crit, consistent, near."""
+    U, F, R = cells.shape[:3]
+    fam = [cells[:, f].reshape(U, R, -1) for f in range(F)]
     total = sum(fam)
     nuisance = int(np.unravel_index(int(np.argmax(total.sum(axis=0))), total.shape[1:])[1])
-    flat = cells.reshape(C, F, R, -1)
+    flat = cells.reshape(U, F, R, -1)
     active = list(range(F))
     dropped: list[tuple[int, float]] = []
     rows: list[tuple] = []
@@ -224,11 +229,11 @@ def fit(frames: Frames, coordinate_maps: Mapping[int, ChromosomeGeneticMap] | No
     positions are file-map pseudo-bp, whose Morgans are position / (100 positions_scale))."""
     if not len(frames):
         return None
-    offsets, pos, em = frames.stacked()
+    offsets, pos, em, entry = frames.stacked()
     grid_fine = p.rate_grid_values()
     grid = p.error_run_grid()
     deltas = np.asarray(p.misfit_weights, dtype=np.float64)
-    ll_p1 = frame_loglik(offsets, pos, em, grid_fine, deltas)
+    ll_p1 = frame_loglik(offsets, pos, em, entry, grid_fine, deltas)
     delta = float(deltas[argmax_refined(ll_p1.sum(axis=0), grid_fine)[1]])
     del ll_p1
     contig_of_frame = np.repeat(np.asarray(frames.contig, np.int64), np.diff(offsets))
@@ -242,24 +247,21 @@ def fit(frames: Frames, coordinate_maps: Mapping[int, ChromosomeGeneticMap] | No
     _unit, segment, segment_unit, units, axis_morgans = unit_segments(contig_of_frame, coordinate, offsets, material)
     starts = np.asarray(p.error_run_starts, dtype=np.float64)
     ends = np.asarray(p.error_run_ends, dtype=np.float64)
-    seg_ll = error_run_loglik(offsets, pos, em, segment, int(len(segment_unit)), grid, delta, starts, ends)
+    seg_ll = error_run_loglik(offsets, pos, em, entry, segment, int(len(segment_unit)), grid, delta, starts, ends)
     seg_ll = seg_ll.reshape(seg_ll.shape[0], seg_ll.shape[1], -1)
-    # segment -> sequence -> (contig, family)
+    # segment -> sequence -> family
     seq_of_segment = np.empty(len(segment_unit), np.int64)
     for s in range(len(offsets) - 1):
         seq_of_segment[segment[offsets[s]]:segment[offsets[s + 1] - 1] + 1] = s
     families = tuple(sorted(set(frames.family)))
     contigs = tuple(sorted(set(frames.contig)))
     fpos = {f: k for k, f in enumerate(families)}
-    cpos = {c: k for k, c in enumerate(contigs)}
     seq_family = np.asarray([fpos[f] for f in frames.family], np.int64)
-    seq_contig = np.asarray([cpos[c] for c in frames.contig], np.int64)
-    cells = _sum_at((len(contigs), len(families)) + seg_ll.shape[1:],
-                    (seq_contig[seq_of_segment], seq_family[seq_of_segment]), seg_ll)
     unit_cells = _sum_at(
         (units, len(families)) + seg_ll.shape[1:], (segment_unit, seq_family[seq_of_segment]), seg_ll
     )
-    kept, dropped, rows, z_crit, consistent, near = consistency(cells, grid, p)
+    # the material units are the strata of the consistency test, as they are the interval's units (4.21 C11)
+    kept, dropped, rows, z_crit, consistent, near = consistency(unit_cells, grid, p)
     sub = unit_cells[:, kept]
     estimate, _n, at_edge = argmax_refined(sub.sum(axis=(0, 1)), grid)
     interval = joint_interval(sub, grid, p)
@@ -268,13 +270,13 @@ def fit(frames: Frames, coordinate_maps: Mapping[int, ChromosomeGeneticMap] | No
     np.add.at(span_family, seq_family, span)
     meioses = 2.0  # each sequence carries its target's two transmissions
     events = meioses * float(sum(span_family[k] for k in kept)) * _PER_BP * estimate
-    family_estimate = tuple(argmax_refined(cells[:, k].sum(axis=0), grid)[0] for k in range(len(families)))
+    family_estimate = tuple(argmax_refined(unit_cells[:, k].sum(axis=0), grid)[0] for k in range(len(families)))
     family_events = tuple(meioses * span_family[k] * _PER_BP * family_estimate[k] for k in range(len(families)))
     return MapScaleFit(
         float(estimate), bool(at_edge), interval, float(events), families, tuple(int(k) for k in kept),
         tuple(dropped), tuple(tuple(r) for r in rows), float(z_crit), bool(consistent), bool(near), family_estimate,
-        family_events, int(units), axis_morgans, int(len(pos)), int(len(set(frames.target))), contigs, cells,
-        unit_cells, grid, delta,
+        family_events, int(units), axis_morgans, int(len(pos)), int(len(set(frames.target))), contigs, unit_cells,
+        grid, delta,
     )
 
 

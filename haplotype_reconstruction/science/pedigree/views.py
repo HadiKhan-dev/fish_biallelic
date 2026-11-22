@@ -507,13 +507,16 @@ def build(
     dyads = np.asarray(release.dyads, dtype=np.int64).reshape(-1, 2)
     lower = np.array(release.log_e, dtype=np.float64)
     observed = np.array(release.observed_sites, dtype=np.int64)
+    certifiable = None if release.certifiable is None else release.certifiable.copy()
     if release.log_e_upper is None:
-        exclusion = ExclusionEvidenceView(dyads[:, 0].copy(), dyads[:, 1].copy(), lower, observed)
+        exclusion = ExclusionEvidenceView(dyads[:, 0].copy(), dyads[:, 1].copy(), lower, observed,
+                                          certifiable=certifiable)
     else:
         upper = np.array(release.log_e_upper, dtype=np.float64)
         exact = lower == upper
         exclusion = ExclusionEvidenceView(
-            dyads[:, 0].copy(), dyads[:, 1].copy(), np.where(exact, lower, np.nan), observed, lower, upper, exact
+            dyads[:, 0].copy(), dyads[:, 1].copy(), np.where(exact, lower, np.nan), observed,
+            lower, upper, exact, certifiable,
         )
     scores = decision.scores
     if scores.contig_junctions is not None and scores.contig_callable_bins is not None:

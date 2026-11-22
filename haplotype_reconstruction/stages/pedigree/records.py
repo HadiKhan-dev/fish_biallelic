@@ -28,7 +28,7 @@ from ...store.protocol import Derivation, NumericalPolicy, read_items
 from ...store.store import CheckpointStore
 from ..evidence import records as evidence_records
 from ..framework import load_product
-from ..painting import records as painting_records
+from ..painting import repaint as painting_records  # the painting the pedigree reads (4.21 P)
 from ..relatedness import families_records
 from . import exclusion, map_scale, prepare, relationship, scores, screen
 from .codec import PedigreeAdapter
@@ -76,9 +76,11 @@ class PedigreeDependencies:
     evidence: tuple[tuple[str, str], ...] = ()
     relationship: tuple[tuple[str, str], ...] = ()
     regime: str = "standard"
+    sample_rates: tuple[float, ...] = ()  # A11: the calibration's per-sample outlier rates (empty: 4.20's constant)
     map_scale: str = ""  # identity of pedigree/map_scale (regimes.material_choice reads it)
     veto: str = ""  # the regime whose released calls a call must also be in (both-maps route), or ""
     reference: str = ""  # the working regime, run only to count the product against it (regimes.reference_regime)
+    exclusion_sharing: tuple[bool, ...] = ()
 
 
 def expected(
@@ -216,7 +218,8 @@ def run_parameters(manifest: Mapping[str, Any]) -> PedigreeParameters:
 def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundInputs:
     """Rebuild pedigree preparation–pedigree scoring causes from the bound manifest, validating every publication.
 
-    Only omission/summary headers and the run panel are decoded here. Original
+    Read omission/summary headers and the run panel. Mixed read-library status
+    also needs the stored evidence counts to recover sample membership. Original
     genotype/map sources are never reopened. A cached product's own derivation is
     never an input to the expected identity. Output-only relatedness settings are
     excluded by the families owner's reader.
@@ -228,19 +231,20 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     eligibility = ParentEligibility.unrestricted(sample_ids)
     from ..relatedness.working_map import map_identity
 
-    def bind(c: str) -> tuple[str, str, Mapping[str, Any]]:
+    def bind(c: str) -> tuple[str, tuple[str, str, str], Mapping[str, Any]]:
         file = store.contig(c)
         evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=c)
         painting = painting_records.result_reader(
-            store, manifest, product="reference", contig=c, panels=False, emissions=False
+            store, manifest, product="refit_reference", contig=c, panels=False, emissions=False
         )
         if evidence is None or painting is None:
             raise InvariantError(f"pedigree requires evidence and painting for {c}")
         _header(file, evidence.key, evidence.identity, schemas=evidence_records.SCHEMA)
         _header(file, painting.key, painting.identity)
+        working_map = map_identity(store, manifest, c)
         prepared_identity = prepare.derivation(
             parameters.preparation,
-            dict(painting=painting.identity, evidence=evidence.identity, genetic_map=map_identity(store, manifest, c)),
+            dict(painting=painting.identity, evidence=evidence.identity, genetic_map=working_map),
             reverse=parameters.reverse_conventions,
             numerical_policy=policy,
         )
@@ -248,14 +252,15 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
                          schemas=prepare.PreparedAdapter.schema)
         if header["contig"] != c:
             raise InputError("prepared header contig differs from its configured axis")
-        return prepared_identity, evidence.identity, header
+        return prepared_identity, (painting.identity, evidence.identity, working_map), header
 
     # each contig's upstream chain (evidence, painting and through it assembly, selection and discovery
     # readers: header reads and decodes) is independent of the others; contig after contig, this binding took most of
     # an export check and of the run's completion step (chr3's export manifest check: 55 s on one CPU).
     bound = threaded_each(bind, contigs)
     prepared_ids = [(c, prepared) for c, (prepared, _, _) in zip(contigs, bound, strict=True)]
-    evidence_ids = [(c, evidence) for c, (_, evidence, _) in zip(contigs, bound, strict=True)]
+    contig_inputs = {c: inputs for c, (_, inputs, _) in zip(contigs, bound, strict=True)}
+    evidence_ids = [(c, evidence) for c, (_, evidence, _) in contig_inputs.items()]
     prepared_headers = [header for _, _, header in bound]
     informative = tuple(
         pair for pair, h in zip(prepared_ids, prepared_headers, strict=True) if h["omitted_reason"] is None
@@ -270,7 +275,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     # With rate_estimate = ignore nothing in the pedigree reads the map-scale record (it is reported on its own).
     scale_identity, estimate = "", None
     if parameters.map_scale.mode != "ignore":
-        scale_identity = map_scale.expected(store, manifest, parameters, policy)
+        scale_identity = map_scale.expected(store, manifest, parameters, policy, contig_inputs=contig_inputs)
         estimate = map_scale.load(store, scale_identity)
     choice, classification, applied_morgans, axis = regimes.material_choice(tuple(layouts), parameters, estimate)
     regime_morgans, veto_morgans = material_morgans(choice, axis, applied_morgans)
@@ -335,6 +340,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     if family_reader is None:
         raise InvariantError("pedigree requires relatedness/families")
     _header(store.run, family_reader.key, family_reader.identity, schemas=families_records.SCHEMA)
+    rates, sharing = _exclusion_calibration(store, manifest, sample_ids, evidence_ids)
     dependencies = PedigreeDependencies(
         eligibility.identity(),
         panel_identity,
@@ -342,6 +348,8 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         tuple(prepared_ids),
         score_ids,
         evidence=tuple(evidence_ids),
+        sample_rates=rates,
+        exclusion_sharing=sharing,
         regime=classification.name,
         map_scale=scale_identity,
         veto=choice.veto_regime,
@@ -349,6 +357,21 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     )
     return BoundInputs(parameters, policy, sample_ids, contigs, eligibility, panel, tuple(summary), dependencies,
                        classification, axis, choice, estimate, regime_morgans, veto_morgans)
+
+
+def _exclusion_calibration(store, manifest, sample_ids, evidence_ids):
+    """Read A11 allowances and fitted sharing libraries from the same calibration."""
+    from ..painting import calibration_records
+
+    reader = calibration_records.result_reader(store, manifest, product="calibration")
+    saved = None if reader is None else read_items(
+        store.run, reader.key, reader.identity, ("sample_rates", "read_libraries")
+    )
+    calibration = {} if saved is None else saved.payload
+    rates = tuple(float(x) for x in calibration.get("sample_rates", ()))
+    if rates and len(rates) != len(sample_ids):
+        raise InputError("the calibration's per-sample rates do not cover the pedigree's samples")
+    return rates, exclusion.sharing_samples(store, manifest, evidence_ids, calibration.get("read_libraries", ()))
 
 
 def material_morgans(choice: Any, axis: Any, applied_morgans: float) -> tuple[float | None, float | None]:
@@ -382,6 +405,8 @@ def request_dependencies(
                     request.contigs,
                     weights[c],
                     numerical_policy=policy,
+                    sample_rates=inputs.sample_rates,
+                    sharing=inputs.exclusion_sharing,
                 ),
             )
             for c, identity in inputs.evidence
@@ -453,6 +478,9 @@ def result_reader(
 
 
 def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product: str) -> Reader:
+    # Report output needs the bound product and its ordered release request. The remaining contig header
+    # reads run independently. Cold matched reports took 12.7 wall / 15.3 CPU s on famhs and 17.0 / 22.7
+    # on TroMau after sharing refit and map inputs, down from 39.9 / 51.0 and 158.0 / 233.8.
     bound = bound_inputs(store, manifest)
     request_id = expected(
         bound.parameters,

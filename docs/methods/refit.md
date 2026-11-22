@@ -16,14 +16,14 @@ Parameters by name: `robustness_grid`, `REFIT_TIE_QUANTUM`. Values, units and cu
 Cost and scope: O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="fr02"></a>
-## fr02 Refit coordinate ascent: flip and two-row phases, rounds, interaction, sweeps, hysteresis gains
+## fr02 Refit coordinate ascent: flip and two-row phases, rounds, interaction, sweeps, class penalties
 
-Within each site, run the named sweep schedule with flip rounds before two-row rounds. Rank qualified moves, withhold conflicting tied alternatives, otherwise apply independent moves and rescore affected candidates. Limit each row’s changes as declared. For finite tables, score a two-row move by the identity `joint_gain = flip_gain(a) + flip_gain(b) + Delta_ab`, where `Delta_ab` is the pair curvature. Cached single-row gains make each pair score O(1). A table containing an infinite entry (a zero likelihood at robustness epsilon 0) uses direct gains and conflict checks, because the identity can evaluate infinity minus infinity even for a finite swap gain. The minimum gain is per-move hysteresis per changed cell, not a fixed prior on the assembled allele.
+Within each site, run the named sweep schedule with flip rounds before two-row rounds. Rank qualified moves, withhold conflicting tied alternatives, otherwise apply independent moves and rescore affected candidates. Limit each row’s changes as declared. For finite tables, score a two-row move by the identity `joint_gain = flip_gain(a) + flip_gain(b) + Delta_ab`, where `Delta_ab` is the pair curvature. Cached single-row gains make each pair score O(1). A table containing an infinite entry (a zero likelihood at robustness epsilon 0) uses direct gains and conflict checks, because the identity can evaluate infinity minus infinity even for a finite swap gain. A move is eligible when its gain, net of signed class penalties, exceeds the tie quantum: a departure from the painted allele pays the penalty of its carrier class, a return regains it, and a two-row move sums its cells (4.21 A7, replacing the fixed 5-nat hysteresis). Moves are ordered by their penalised gain. Every departure needs at least `min_supporters` own-row carriers favouring it (in a joint flip a carrier shared by both rows counts for both cells; in a swap for neither); a fill of an unknown allele uses a flat prior and the same support count. A per-site certificate counts the eligible moves left, those refused for support and those eligible after the fills.
 
 
 Implementation: [science/refit/refit.py](../../haplotype_reconstruction/science/refit/refit.py).
 
-Parameters by name: `minimum_gain_nats`, `coordinate_sweeps`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `min_supporters`, `coordinate_sweeps`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K^2); O(P); O(n). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -60,13 +60,34 @@ Cost and scope: finite tables O(N + (S + 1) K^3 + K sum_r Uu_r) per site; at mos
 <a id="fr05"></a>
 ## fr05 Refit fill rule for alleles the painted panel left unknown
 
-After the coordinate sweeps, visit alleles that were already unknown in the painted panel. Test the declared allele order, minimum gain and supporter gates inclusively. Preserve unknown on insufficient evidence; this fill cannot undo ambiguity withholding of an originally called allele.
+After the coordinate sweeps, visit alleles that were already unknown in the painted panel. Test the declared allele order, the class penalty and the supporter gate. The fill's prior is flat (4.21: with the cohort allele frequency as its prior, wrong fills exceeded the flat arm's on the development replays). Preserve unknown on insufficient evidence; this fill cannot undo ambiguity withholding of an originally called allele.
 
 Implementation: [science/refit/refit.py](../../haplotype_reconstruction/science/refit/refit.py).
 
-Parameters by name: `minimum_gain_nats`, `fill_min_supporters`, `REFIT_TIE_QUANTUM`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `min_supporters`, `REFIT_TIE_QUANTUM`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+
+<a id="fr07"></a>
+## fr07 The run's class penalties (start-state gain histograms, pooled coefficients)
+
+Before any move, each contig records the histogram of its start-state single-flip gains by carrier class (one carrier,
+2, 3-4, 5-8, 9-16, 17-32, 33 or more; one carrier never departs). The run's histograms are summed (integer counts, any
+order), classes pool with the next class of more carriers until a pool holds 4,096 cells (the top class pools
+downward), and each pool's discordance coefficient c maximises sum log(1 - c + c exp(G)) over its cells on
+[0.5 / max(cells, 4,096), 1/2]; the class penalty is log((1 - c) / c). c is a working coefficient, not the probability
+that a call is wrong. One coefficient per class and run (4.21 A7: the arm frozen by gate G7', ADVICE2 16.2; per contig
+the estimates were unstable on TroMau's halves). The histograms are written after each contig's painting; the priors
+and every contig's moves run in the run-wide pedigree step.
+
+Implementation: [science/refit/refit.py](../../haplotype_reconstruction/science/refit/refit.py),
+[science/refit/run.py](../../haplotype_reconstruction/science/refit/run.py),
+[stages/refit/tasks.py](../../haplotype_reconstruction/stages/refit/tasks.py).
+
+Parameters by name: `CARRIER_CLASS_EDGES`, `MINIMUM_CLASS_CELLS`, `GAIN_BIN_WIDTH`, `GAIN_LIMIT`. Values, units and current
+rationale are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O(cells) per contig for the histogram; O(classes x bins) for the pooled fit.
 
 <a id="fr06"></a>
 ## fr06 Refit stage, product, records and downstream reach

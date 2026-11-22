@@ -66,6 +66,7 @@ def run_contig(
     # Pair-backed output no longer owns coded raw count rows. Release the input
     # before publication; dense fallback rows remain alive through prepared.
     del reads
+    records.write_read_sharing(file, prepared.read_sharing, derivation)
     records.write(file, prepared, derivation, payload_identity=consumed)
     return derivation
 

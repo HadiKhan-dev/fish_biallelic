@@ -36,11 +36,12 @@ Each round fits O(K) candidates, costing O(N L K³) under the quadratic fixed-K 
 | [refinement.search](../methods/refinement.md) | O(N L K²) messages; O(B N K³) exchanges; canonical fixing O(K W R×programme) | acceptance≈2.5GB; polish 8 N Q(6h+12+b)+8 N b²/thread | above cubic: exception 0e ([RS05](../methods/refinement.md#rs05), [RS07](../methods/refinement.md#rs07)) | K30 N2500 polish≈3.7GB; canonical-fixing worst case carried |
 | [refinement.count](../methods/refinement.md) | O(K) fits/round, O(N L K³); ≤d+1 deletion rounds, O(N L K⁴) worst case; ≤16 histories | candidate fits plus existing message and shadow workspaces; one 64MiB score-miss ledger per component; admission-only copy messages removed | natural domain; quartic worst-case pass | up to 30 eligible fits/round; ≤2048 shadow scores/member |
 | [painting.coalescence](../methods/painting.md) | O(N B S²) messages; O(links N(S² log S+C² S)); per iteration ≤b charged checks and ≤2b−1 trial decodes, O(b N (B+J) K²); iterations ≤ the initial switch total | 0.6–0.8GB/sample at K30 B10000 | ≤ K³ per iteration ([PR17](../methods/painting.md#pr17)) | N2500 K30 links 2000≈1e11 gain operations; b=64 |
-| [painting](../methods/painting.md) | O(N L S²) emissions; O(N B S'²) chain; O(N B S³) masks; S'≤2K+1 | 40 S'² B+16 S² B+24 L/sample; pointers 4 S'² B | ≤ K³ | S'=61; pointers 148840000 bytes B10000; ≈1.6GB/sample |
+| [painting](../methods/painting.md) | O(N L S²) emissions; O(N B S'²) chain; O(N B S³) masks; S'≤2K+1; with R read classes, read matrices O(N L U R³) over the U ≤ S(S+1)/2 label pairs with distinct alleles in a bin (pairs with equal alleles share one) and chain O(N B S'² R²) | 40 S'² B+16 S² B+24 L/sample; pointers 4 S'² B; read matrices 4 S(S+1)/2 B R² per strength | ≤ K³ | S'=61; pointers 148840000 bytes B10000; ≈1.6GB/sample |
 | [painting.pair_sharing](../methods/painting.md#pr20) | O(N² B) per contig in NumPy row passes; optional report | 48 P per contig + O(N B) workspace; P = N(N − 1)/2 | no K term | N2800 B900: 28 s and 1.2 GB per contig on one core (8 ns per pair-bin); 3.9 M rows, 0.7 GB CSV per table and contig |
 | [founder_refit](../methods/refit.md) | Finite: O(N+(S+1)K³+K sum_r Uu_r)/site over S sweeps; worst K⁴/sweep. Non-finite: up to K⁵/round | 4 N L label expansion; O(K²) table/candidate scratch per tile | above cubic: exception 0e ([FR04](../methods/refit.md#fr04)) | K³=27000 base; K⁴=810000 worst/sweep; K⁵=24300000 non-finite/round |
-| [pedigree.prepare](../methods/pedigree.md) | O(N B S²) sources; O(N M S) ALT; O(N B(S²+128S)) bridges | 24 N B S²+1.25 evidence+painting+2GiB | ≤ K³ | S31:right weights 7688 bytes/sample/bin |
+| [pedigree.prepare](../methods/pedigree.md) | O(N B S² R²) sources (R read classes, 1 without read state); O(N L S R²) BACKGROUND ALT; O(N B(S²+128S)) bridges | 8 n B S² R backward vectors per batch of n + the batch's read matrices and per-site read parts; stored 4 N B S(S+1)+32 N B S+8 N M; evidence+painting+2GiB | ≤ K³ | S31 R5: stored 4960 bytes/sample/bin; backward 38440 bytes/sample/bin in a batch |
 | [pedigree.screen_pair_bound](../methods/pedigree.md) | O(R² B G³) pair bound G≤S+1; O(C² P) panel; O(D L) exclusion | 16 N(B-1)S² geometry; 4 P/contig; stack streamed | ≤ K³ | N2500 B1000 S31≈38GB geometry; 414M pairs≈1.7GB/contig |
+| [pedigree.child_read_state](../methods/pedigree.md#child-read-state) | worst case per configuration O(B R S² + K' (R² + R) S²), K' the child's observed markers whose pair is not cached; class-transfer cache O(K R³ W²) per child (W ≤ S allele words per bin); M1 screen certificates = one exact chain per eligible pair (no class bound); pair bound O(K R³ W²) per child + O(B S² R²) per (child, first parent) + O(B G S R²) per pair. Equal-row transitions reduce the live edge width to one and their class mix to O(R) per pair | stored 4 K (R² + 4R) bytes per component (K observed child markers, float32); resident layout adds K flag bytes and 8 N(B+1) width bytes; class cache 16 B S² R² bytes per child within 1 GiB per batch | ≤ K³ | S31 R5 B320: class cache 123 MB/child; famhs S7 R5 B2727: 53 MB/child |
 | [pedigree.scores_exposure](../methods/pedigree.md) | O((E/2+T)B S(S+1)/2) exposure; O(N B J²) junctions; O(C N²) order/fit | 8 N B S(S+1)/2 masses; 32 N² outputs; 40 N² family | ≤ K³ | S31:496 features×3123750 unordered edges×B |
 | [pedigree.decision](../methods/pedigree.md) | O(C(N²+T)) stack; graph O(N(N+edges)+A) | four 8 C E arrays+likelihood/junction; N² dominant | no K term | N2500 C22 each 8 C E≈1.1GB |
 | [pedigree.resampling_release](../methods/pedigree.md) | ≤1000+C fits; O(C A+C N²+I(A+N²)+R A+R N²+R² T+graph)/fit | ≈80 N²/worker | no K term | N2500≈500000000 bytes/fit worker |
@@ -58,6 +59,19 @@ Each round fits O(K) candidates, costing O(N L K³) under the quadratic fixed-K 
 | [engine_graph](../methods/execution.md) | O(tasks)/boundary; O(contigs nodes) graph | O(tasks + live expansion results + public outputs); geometric ledger growth | no intrinsic K/N | task-count proxy; overhead separate |
 | [interface](../methods/execution.md) | Parsing/validation; negligible | O(configuration) | no intrinsic K/N | settings-resolution proxy only (interface.settings); no scientific K ladder |
 
+
+## Pedigree record binding and mixed libraries
+
+A fixed runtime checks the upstream dependencies of each refit contig once per store. The shared run-priors
+request gathers the checked histogram identities in the included contig order. Decision binding also reuses its
+checked painting, evidence and map identities for the map-scale record. The report and the fit still check
+the requested publication identities independently.
+
+Pedigree source recurrence work in a mixed evidence slice is the sum over the two sample groups.
+For N₁ scalar samples and Nᵣ read-state samples, the term is O(B S² (N₁ + Nᵣ R²)).
+A carried group can require a compact copy of its input matrices and site arrays. The preparation's batch
+budget includes that copy. The prepared child record retains the configured class width, with no slots for
+scalar samples.
 
 ## Founder refit
 

@@ -16,8 +16,9 @@ class CrossFitParameters:
 
     max_iterations / minimum_iterations: EM iteration bounds; elbo_absolute_tolerance,
     elbo_relative_tolerance: convergence of the evidence lower bound; monotonic_tolerance: allowed
-    ELBO decrease before an iteration counts as non-monotone. uniform_mix, log_floor: the robust
-    genotype emission max(log((1 - mix) P + mix / 3), floor). fold_seed: seed of the deterministic
+    ELBO decrease before an iteration counts as non-monotone. Genotype emissions: the centred view's
+    max(log L~, CENTRED_FLOOR) (the run's outlier rate against the cohort law; science.shared.emissions).
+    fold_seed: seed of the deterministic
     two-fold sample split. minimum_call_probability: an unknown allele is released when its
     posterior reaches it; minimum_carriers: support by carrier count or expected carrier mass.
     """
@@ -50,17 +51,6 @@ class CrossFitParameters:
             "units": "nats",
             "provenance": "Allow an ELBO decrease of at most 1e-8 before flagging a non-monotone iteration.",
         },
-    )
-    uniform_mix: float = field(
-        default=0.01,
-        metadata={
-            "units": "probability",
-            "provenance": "Uniform genotype emission mixture weight 0.01 for robust cross-fit evidence.",
-        },
-    )
-    log_floor: float = field(
-        default=-2.0,
-        metadata={"units": "nats", "provenance": "Robust genotype log-emission floor -2 in variational EM."},
     )
     fold_seed: int = field(
         default=1729,
@@ -168,7 +158,7 @@ class CavityFillParameters:
     """Whole-bin leave-out ("cavity") fill of unknown founder alleles.
 
     snps_per_bin: bin width of the cavity; minimum_supporters: carrier support of a fill;
-    minimum_posterior_probability: posterior of the filled allele; uniform_mix: emission mixture;
+    minimum_posterior_probability: posterior of the filled allele (emissions: the centred view, as the cross-fit);
     tie_tolerance, founder_identifiability_tolerance: numerical ties; minimum_observable_founder_
     separation: each founder must differ observably from every other founder outside the bin.
     """
@@ -192,13 +182,6 @@ class CavityFillParameters:
         metadata={
             "units": "probability",
             "provenance": ("Require filled-allele posterior probability at least 0.99."),
-        },
-    )
-    uniform_mix: float = field(
-        default=0.01,
-        metadata={
-            "units": "probability",
-            "provenance": "Uniform genotype mixture weight 0.01 for robust cavity emissions.",
         },
     )
     tie_tolerance: float = field(
@@ -322,8 +305,6 @@ class CompletionParameters:
 
 # U04/U05/U07: normalized genotype evidence range; observation.py:15.
 UNIFORM_TOLERANCE = 1e-12
-# U05 bin emissions use this fixed floor independently of cross-fit configuration.
-CAVITY_LOG_FLOOR = -2.0
 
 __all__ = [
     "CompletionParameters",
@@ -332,5 +313,4 @@ __all__ = [
     "LinkParameters",
     "OccupancyParameters",
     "UNIFORM_TOLERANCE",
-    "CAVITY_LOG_FLOOR",
 ]

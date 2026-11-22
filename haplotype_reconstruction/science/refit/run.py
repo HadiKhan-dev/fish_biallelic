@@ -11,50 +11,111 @@ from ...contracts.likelihoods import gather_likelihoods
 from ...contracts.refit import ComponentRefit, FounderRefit
 from ...contracts.roles import record_field
 from ...core.errors import InvariantError
-from .parameters import RefitParameters
-from .refit import refit_alleles
+from ..shared.observation import mix_likelihoods
+from .parameters import CARRIER_CLASS_EDGES, RefitParameters
+from .refit import AcceptancePriors, class_priors, refit_alleles, start_gain_histogram
 
 if TYPE_CHECKING:
     from ...contracts.evidence import ContigEvidence
     from ...contracts.painting import Painting
 
 
-def refit_chromosome(
-    painting: Painting, evidence: ContigEvidence, config: RefitParameters, *, reverse: bool = False
-) -> FounderRefit:
-    """Refit every painted component of one chromosome; the painting is unchanged.
-
-    ``painting`` must carry its panels (painting.records.load(..., assembly=assembly));
-    ``evidence`` is the contig's evidence (its founder view is used here).
-    """
+def _components(painting: Painting, evidence: ContigEvidence, config: RefitParameters):
+    """(units, inputs): the painted components with their panels and sites, and the per-component reader of labels,
+    mixed likelihoods and observed cells (the painting's outlier rate)."""
     founder = evidence.founder_view()
-    components = []
+    units = []
     for component in painting.components:
         panel = component.panel
         if panel is None:
             raise InvariantError("refit requires the painted component panel")
-        sites = panel.site_indices()
+        units.append((component, panel, panel.site_indices()))
+
+    def inputs(component, panel, sites):
         labels = component.site_labels(panel.positions)
-        likelihoods, observed, kernel_sites = founder.likelihoods, founder.observed, sites
-        if not isinstance(likelihoods, np.ndarray) or not isinstance(observed, np.ndarray):
-            likelihoods = gather_likelihoods(likelihoods, sites)
-            observed = np.ascontiguousarray(observed[:, sites])
-            kernel_sites = np.arange(len(sites), dtype=np.int64)
-        refit_calls, gain = refit_alleles(
+        # The component's mixed likelihoods at the painting's outlier rate (science.shared.observation).
+        likelihoods = mix_likelihoods(
+            gather_likelihoods(founder.likelihoods, sites), founder.cohort_frequencies[sites], painting.robustness_epsilon
+        )
+        return labels, likelihoods, np.ascontiguousarray(founder.observed[:, sites])
+
+    return units, inputs
+
+
+def chromosome_histogram(painting: Painting, evidence: ContigEvidence, config: RefitParameters) -> np.ndarray:
+    """Pass 1 (ADVICE2 12.2): the contig's start-state single-flip gain histogram by carrier class, int64 counts (a sum
+    over contigs is exact in any order). The run's class priors pool every analysed contig's histogram (N0run, the arm
+    frozen by gate G7', ADVICE2 16.2: one coefficient per class and run)."""
+    units, inputs = _components(painting, evidence, config)
+    histogram = None
+    for component, panel, sites in units:
+        labels, likelihoods, observed = inputs(component, panel, sites)
+        part = start_gain_histogram(
+            panel.released, labels[:, 0], labels[:, 1], likelihoods, observed, np.arange(len(sites), dtype=np.int64)
+        )
+        histogram = part if histogram is None else histogram + part
+        del labels, likelihoods, observed
+    return histogram if histogram is not None else np.zeros((len(CARRIER_CLASS_EDGES) + 1, 1), dtype=np.int64)
+
+
+def run_priors(histograms) -> AcceptancePriors:
+    """The run's class priors from the analysed contigs' histograms (summed; pooled run-wide by the 4,096-cell rule)."""
+    histograms = [np.asarray(h) for h in histograms]
+    if not histograms:
+        return class_priors(np.zeros((len(CARRIER_CLASS_EDGES) + 1, 1), dtype=np.int64))
+    width = max(h.shape[1] for h in histograms)
+    total = np.zeros((histograms[0].shape[0], width), dtype=np.int64)
+    for h in histograms:
+        total[:, : h.shape[1]] += h.astype(np.int64)
+    return class_priors(total)
+
+
+def refit_chromosome(
+    painting: Painting, evidence: ContigEvidence, config: RefitParameters, *, reverse: bool = False,
+    priors: AcceptancePriors | None = None,
+) -> FounderRefit:
+    """Refit every painted component of one chromosome; the painting is unchanged.
+
+    ``painting`` must carry its panels (painting.records.load(..., assembly=assembly));
+    ``evidence`` is the contig's evidence (its founder view is used here). ``priors``: the run's class priors
+    (run_priors over every analysed contig); without them the contig's own histogram (a one-contig run).
+    """
+    units, inputs = _components(painting, evidence, config)
+    if priors is None:
+        priors = run_priors([chromosome_histogram(painting, evidence, config)])
+    classes = len(priors.cells)
+    changed_by_class = np.zeros(classes, dtype=np.int64)
+    filled_by_class = np.zeros(classes, dtype=np.int64)
+    guard_sites = 0
+    certificate = np.zeros(3, dtype=np.int64)
+    components = []
+    for component, panel, sites in units:
+        labels, likelihoods, observed = inputs(component, panel, sites)
+        refit_calls, gain, guard, cell_class, residual = refit_alleles(
             panel.released,
             labels[:, 0],
             labels[:, 1],
             likelihoods,
             observed,
-            kernel_sites,
-            robustness_epsilon=painting.robustness_epsilon,
-            minimum_gain_nats=config.minimum_gain_nats,
+            np.arange(len(sites), dtype=np.int64),
+            thresholds=priors.threshold,
+            # A flat fill prior (ADVICE2 section 16): with the cohort allele frequency as the prior, wrong fills
+            # exceeded the flat arm's on the development replays, so a fill weighs the carriers' evidence alone.
+            cohort_alt=np.full(len(sites), 0.5),
             coordinate_sweeps=config.coordinate_sweeps,
-            fill_min_supporters=config.fill_min_supporters,
+            min_supporters=config.min_supporters,
             reverse=reverse,
         )
-        del labels
+        del labels, likelihoods, observed
         rows, columns = np.nonzero(refit_calls != panel.released)
+        filled = panel.released[rows, columns] < 0
+        released = refit_calls[rows, columns] >= 0
+        index = cell_class[rows, columns].astype(np.int64)
+        valid = index >= 0
+        np.add.at(changed_by_class, index[valid & ~filled & released], 1)
+        np.add.at(filled_by_class, index[valid & filled], 1)
+        guard_sites += int(np.count_nonzero(guard))
+        certificate += residual.sum(axis=1)
         inference = np.where(panel.inference >= 0, refit_calls, -1).astype(np.int8)
         components.append(
             ComponentRefit(
@@ -64,7 +125,7 @@ def refit_chromosome(
                 changed_rows=rows.astype(np.int64),
                 changed_sites=columns.astype(np.int64),
                 gain_nats=gain[rows, columns],
-                filled=panel.released[rows, columns] < 0,
+                filled=filled,
             )
         )
     excluded = tuple(
@@ -75,6 +136,17 @@ def refit_chromosome(
         sample_ids=tuple(painting.sample_ids),
         components=tuple(components),
         excluded_samples=excluded,
+        class_cells=np.asarray(priors.cells, dtype=np.int64),
+        class_positive=np.asarray(priors.positive, dtype=np.int64),
+        class_discordance=np.asarray(priors.coefficient, dtype=np.float64),
+        class_penalty=np.asarray(priors.penalty, dtype=np.float64),
+        class_bound=np.asarray(priors.bound, dtype=bool),
+        class_changed=changed_by_class,
+        class_filled=filled_by_class,
+        guard_sites=guard_sites,
+        eligible_remaining=int(certificate[0]),
+        refused_by_support=int(certificate[1]),
+        eligible_after_fills=int(certificate[2]),
     )
 
 
@@ -94,6 +166,7 @@ class RefitSummary:
     changed_sites: int = record_field("report", dtype="int64", units="1")
     median_changed_gain_nats: float | None = record_field("report", dtype="float64", units="nats")
     excluded_samples: tuple[str, ...] = record_field("report", dtype="tuple[str]", units="1")
+    guard_sites: int = record_field("report", dtype="int64", units="1", default=0)
 
 
 def summary(refit: FounderRefit) -> RefitSummary:
@@ -114,4 +187,5 @@ def summary(refit: FounderRefit) -> RefitSummary:
         changed_sites=sum(len(np.unique(c.changed_sites)) for c in refit.components),
         median_changed_gain_nats=float(np.median(gains)) if len(gains) else None,
         excluded_samples=tuple(refit.excluded_samples),
+        guard_sites=int(refit.guard_sites),
     )

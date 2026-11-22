@@ -36,15 +36,16 @@ def make_task(
     contig: str | None = None,
     depends_on: Sequence[TaskKey] = (),
     working_set_bytes: int = 0,
+    max_cores: int = 1,
 ) -> Task:
-    """Declare an idempotent collector or writer with explicit prerequisites and one CPU."""
+    """Declare an idempotent collector or writer with explicit prerequisites and a bounded team."""
     return Task(
         TaskKey("report", "contig" if contig else "run", scope=contig or "run", round=name),
         writer,
         args=args,
         kwargs={} if kwargs is None else dict(kwargs),
         depends_on=tuple(depends_on),
-        resources=ResourceRequest(working_set_bytes=working_set_bytes),
+        resources=ResourceRequest(max_cores=max_cores, working_set_bytes=working_set_bytes),
     )
 
 
@@ -182,6 +183,7 @@ def run_tasks(
                 (output, results, results.contigs) if name == "complete" else (output, results),
                 kwargs=kwargs,
                 depends_on=after,
+                max_cores=max(1, len(results.contigs)) if name == "calibration" else 1,
             )
         )
     return tuple(tasks)

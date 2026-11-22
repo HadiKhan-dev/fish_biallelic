@@ -22,7 +22,9 @@ from ...contracts.pedigree import PreparedChromosome, TierReach
 from ...core.errors import InvariantError
 from ..shared.material import unit_count
 from .blocks import component_length
-from .parameters import SELECTOR_SWITCH_FLOOR, MaterialParameters, PedigreeParameters
+from .material_parameters import MaterialParameters
+from .numerical_parameters import SELECTOR_SWITCH_FLOOR
+from .parameters import PedigreeParameters
 
 __all__ = ["Layout", "MaterialAxis", "Regime", "layout", "axis", "classify", "effective", "reach", "material_choice",
            "rescaled", "reference_regime"]

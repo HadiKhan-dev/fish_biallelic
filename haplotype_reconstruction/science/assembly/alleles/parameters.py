@@ -31,9 +31,7 @@ SITE_HALF_BAND = 2.0 ** (-20)
 POLYNOMIAL_CANCELLATION = 1e-10
 # Positive likelihood floor, preventing log(0) in site posteriors.
 TINY_LIKELIHOOD = 1e-300
-# Robust evidence mixture weights and strict uniform-range tolerance for context feedback.
-FEEDBACK_EVIDENCE_KEEP = 0.99
-FEEDBACK_EVIDENCE_MIX = 0.01
+# Strict uniform-range tolerance for context feedback (its evidence carries the run's outlier mixture).
 FEEDBACK_UNIFORM_TOLERANCE = 1e-12
 
 
@@ -160,7 +158,5 @@ __all__ = [
     "SITE_HALF_BAND",
     "POLYNOMIAL_CANCELLATION",
     "TINY_LIKELIHOOD",
-    "FEEDBACK_EVIDENCE_KEEP",
-    "FEEDBACK_EVIDENCE_MIX",
     "FEEDBACK_UNIFORM_TOLERANCE",
 ]

@@ -14,12 +14,14 @@ from haplotype_reconstruction.contracts.source import ContigReads
 from haplotype_reconstruction.core.concurrency import ThreadSource
 from haplotype_reconstruction.core.errors import InputError
 
+from ..shared.cohort import cohort_genotype_frequencies
 from .blocks import _block_spans
 from .compact import build_likelihoods
 from .likelihoods import _observation_mask
 from .likelihoods import likelihoods_by_sample as likelihoods_by_sample
 from .parameters import EvidenceParameters
 from .quality.site_quality import filter_sites
+from .read_sharing import ReadSharing
 from .read_model import calibrate as calibration
 from .read_model.fit import fixed_model
 
@@ -28,6 +30,7 @@ from .read_model.fit import fixed_model
 class PreparedEvidence:
     evidence: ContigEvidence = record_field("state", dtype="ContigEvidence")
     decisions: EvidenceDecisions = record_field("state", dtype="EvidenceDecisions")
+    read_sharing: ReadSharing = record_field("state", dtype="ReadSharing")
 
 
 def prepare_contig(
@@ -43,11 +46,13 @@ def prepare_contig(
         raise InputError(f"{reads.contig}: no biallelic SNPs to analyse")
     contig = reads.contig
     input_positions, dropped = (reads.positions, dict(reads.dropped))
-    site, samples = filter_sites(
+    # with them the read sharing between nearby sites (4.21), from the depths of the sites the sample QC reads
+    site, samples, sharing = filter_sites(
         reads.positions,
         reads.counts,
         config.site_quality,
         config.sample_quality,
+        contig=contig,
         team=team,
         map_work=map_work,
         reverse=reverse,
@@ -82,8 +87,13 @@ def prepare_contig(
         evidence_counts, observed = pair_views(likelihoods, counts)
     else:
         evidence_counts, observed = counts, _observation_mask(counts)
+    # the cohort of the founder view: QC-flagged libraries do not shape the outlier law
+    cohort = cohort_genotype_frequencies(
+        likelihoods, observed, kept.n_sites, excluded=founder_excluded, map_work=map_work
+    )
     evidence = ContigEvidence(
         payload_identity="",
+        cohort_frequencies=cohort,
         contig=contig,
         sample_ids=kept.sample_ids,
         positions=positions,
@@ -104,6 +114,7 @@ def prepare_contig(
             sample_quality=samples,
             read_model=report,
         ),
+        sharing,
     )
 
 

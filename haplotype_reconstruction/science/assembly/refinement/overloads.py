@@ -2180,7 +2180,7 @@ _SIGNATURES = {
             ),
         },
     ),
-    "haplotype_reconstruction.science.assembly.refinement.emissions.normalised_likelihoods": (),
+    "haplotype_reconstruction.science.assembly.refinement.emissions.centred_likelihoods": (),
     "haplotype_reconstruction.science.assembly.refinement.emissions.pair_code": (),
     "haplotype_reconstruction.science.assembly.refinement.emissions.pair_index": (),
     "haplotype_reconstruction.science.assembly.refinement.emissions.predictive_likelihood": (),

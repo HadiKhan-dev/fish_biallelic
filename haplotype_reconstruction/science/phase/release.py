@@ -6,8 +6,9 @@ ordered allele posteriors (kernels.site_posteriors): given its label pair, each 
 allele except for a flip with that allele's conditional uncertainty (allele_evidence.py: the sample's direct
 own-read term is removed with the fitted carriers, panel and empirical prior held fixed; indirect own-read
 influence on those fitted quantities remains),
-the pair departs from the alleles with probability ``site_deviation``, and its own reads at the site weigh the
-alternatives.
+the pair departs from the alleles with probability eps (the run's outlier rate, estimated at the painting calibration:
+a redraw from the site's cohort genotype frequencies, science.shared.observation), and its own reads at the site weigh
+the alternatives.
 
 - Genotypes come from the unanchored posterior (the homologue-order gauge does not change unordered genotypes). A
   genotype is called where its posterior reaches ``genotype_posterior``; otherwise both alleles are unknown.
@@ -18,6 +19,8 @@ alternatives.
   given the current partition's anchor, the orientation of its alleles is uncertain: the median over the bin's
   confidently heterozygous sites (P(heterozygous) >= ``genotype_posterior``) of max(P01, P10) / (P01 + P10) falls
   below ``set_posterior`` (stricter than ``phase_posterior``: a wrong continuation misphases the rest of the set).
+  This set statistic uses its own site model, ``set_site_deviation`` against a uniform genotype, not the run's outlier
+  rate, which would cap every common heterozygote below ``set_posterior`` (parameters.py).
   Uncertainty about which labels a sample carries does not break its phase where the
   candidate labels carry the same alleles at its sites (the orientation is then still determined). Each partition is
   anchored at its first confidently heterozygous bin (P(heterozygous) >= ``phase_posterior``) by the gauge "homologue
@@ -62,6 +65,7 @@ class ReleaseInputs:
     site_bin: np.ndarray = record_field("state", units="1", dtype="int64", stored=False)
     site_alleles: np.ndarray = record_field("state", units="1", dtype="int8", stored=False)
     site_gl: np.ndarray = record_field("evidence", units="1", dtype="float32", stored=False)
+    site_cohort: np.ndarray = record_field("state", units="probability", dtype="float64", stored=False)
     break_bins: tuple[int, ...] = record_field("call", units="1", dtype="bin_indices", stored=False)
     tie_bins: tuple[int, ...] = record_field("call", units="1", dtype="bin_indices", stored=False)
     allele_evidence: np.ndarray = record_field("state", units="nats", dtype="float64", stored=False)
@@ -123,12 +127,12 @@ def bin_orientation(ordered, site_bin, tau_g, B):
     return kernels.orientation(ordered, site_bin, float(tau_g), int(B))
 
 
-def _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, lo=0, hi=None, shared=None):
+def _site_posteriors(post, site_bin, alleles, gl, cohort, epsilon, flips, lo=0, hi=None, shared=None):
     """kernels.site_posteriors over the sites [lo, hi) with the sample's flip arrays ``flips`` (flips [S, m],
     own_state [2, m], own_flip [2, m]); ``shared``: the solve's window copies of alleles and flips[0]."""
     hi = len(site_bin) if hi is None else hi
     if lo == 0 and hi == len(site_bin):
-        return kernels.site_posteriors(post, site_bin, alleles, gl, epsilon, *flips)
+        return kernels.site_posteriors(post, site_bin, alleles, gl, cohort, epsilon, *flips)
     window = None if shared is None else shared.get((lo, hi))
     if window is None:
         window = (np.ascontiguousarray(alleles[:, lo:hi]), np.ascontiguousarray(flips[0][:, lo:hi]))
@@ -137,6 +141,7 @@ def _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, lo=0, hi=None,
         site_bin[lo:hi],
         window[0],
         gl[lo:hi],
+        np.ascontiguousarray(cohort[lo:hi]),
         epsilon,
         window[1],
         *(np.ascontiguousarray(a[:, lo:hi]) for a in flips[1:]),
@@ -149,35 +154,15 @@ def sample_flips(model, n, ctx):
     site_bin, alleles = ctx.site_bin, ctx.site_alleles
     labels = np.ascontiguousarray(model.X[n][:, site_bin])
     state, flip = own_terms(
-        labels, alleles, ctx.site_gl, ctx.robust_epsilon, bool(ctx.excluded), ctx.allele_evidence, ctx.logit_prior
+        labels, alleles, ctx.site_gl, ctx.robust_epsilon, bool(ctx.excluded), ctx.allele_evidence, ctx.logit_prior,
+        ctx.site_cohort,
     )
     return ctx.flips, state, flip
 
 
-def _orientation_certainty(
-    post, site_bin, alleles, gl, epsilon, flips, tau_g, lo_bin, hi_bin, B, windowed=True
-):
-    """bin_orientation of the bins in [lo_bin, hi_bin) under the label-pair posteriors ``post``; NaN elsewhere."""
-    lo = int(np.searchsorted(site_bin, lo_bin, side="left"))
-    hi = int(np.searchsorted(site_bin, hi_bin, side="left"))
-    if hi <= lo:
-        return np.full(B, np.nan)
-    if not windowed:
-        ordered = _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, lo, hi)
-        return bin_orientation(ordered, site_bin[lo:hi], tau_g, B)
-    orientation = np.full(B, np.nan)
-    for left, right in site_windows(site_bin, lo, hi, window=RELEASE_WINDOW):
-        bins = site_bin[left:right]
-        ordered = _site_posteriors(post, site_bin, alleles, gl, epsilon, flips, left, right)
-        local = bin_orientation(ordered, bins, tau_g, B)
-        orientation[bins[0] : bins[-1] + 1] = local[bins[0] : bins[-1] + 1]
-    return orientation
-
-
-def _piece_orientation(lp, site_bin, alleles, gl, epsilon, flips, tau_g, lo_bin, hi_bin, windowed=True):
+def _piece_orientation(lp, site_bin, alleles, gl, cohort, epsilon, flips, tau_g, lo_bin, hi_bin, windowed=True):
     """bin_orientation of the bins [lo_bin, hi_bin), float64 [hi_bin - lo_bin], under their label-pair posteriors
-    ``lp`` [hi_bin - lo_bin, S, S]: _orientation_certainty's values for those bins (a bin's certainty reads only its
-    own posterior and sites), with the same whole-bin site windows as workspace bound."""
+    ``lp`` [hi_bin - lo_bin, S, S], using whole-bin site windows as the workspace bound."""
     bins = hi_bin - lo_bin
     lo = int(np.searchsorted(site_bin, lo_bin, side="left"))
     hi = int(np.searchsorted(site_bin, hi_bin, side="left"))
@@ -191,6 +176,7 @@ def _piece_orientation(lp, site_bin, alleles, gl, epsilon, flips, tau_g, lo_bin,
             local,
             np.ascontiguousarray(alleles[:, left:right]),
             gl[left:right],
+            np.ascontiguousarray(cohort[left:right]),
             epsilon,
             *(np.ascontiguousarray(a[:, left:right]) for a in flips),
         )
@@ -229,8 +215,8 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
     set-break bins, optional float32[2,m] reporting scores and optional
     float64[2,2,B] source probabilities. Free-homologue chains are NaN. Inputs
     are borrowed; arrays in the returned record are owned by this sample call.
-    The optional ordered map runs independent hard-cut intervals concurrently;
-    each interval writes only its own bins and retains full-chain posteriors.
+    The optional ordered map runs independent hard-cut intervals and final site
+    windows. Each item writes only its own bins and uses full-chain posteriors.
     """
     config = ctx.config
     windowed = ctx.windowed
@@ -246,6 +232,8 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
     site_bin = ctx.site_bin
     alleles = ctx.site_alleles
     gl = ctx.site_gl
+    cohort = ctx.site_cohort
+    uniform = np.full_like(cohort, 1.0 / 3.0)  # the set statistic's genotype law (config.set_site_deviation)
     flips = sample_flips(model, n, ctx)
     map0, map1 = model.X[n, 0], model.X[n, 1]
     het_bins = np.flatnonzero(map0 != map1)
@@ -293,12 +281,15 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
                 last = kernels.restricted(alpha[anchor], mask)
                 posts[anchor] = anchored(last[None], beta[anchor : anchor + 1], anchor, anchor + 1)[0]
                 stop, lo = hard, anchor + 1
+                # When sets fragment, most of a large initial piece would be
+                # recomputed at every new anchor. Grow after successful tests.
+                width = 1
                 while lo < hard:
-                    hi = min(hard, lo + advance)
+                    hi = min(hard, lo + width)
                     forward = kernels.forward_from(last, em, T0, T1, TG, lo, hi)
                     lp = anchored(forward, beta[lo:hi], lo, hi)
                     orientation = _piece_orientation(
-                        lp, site_bin, alleles, gl, config.site_deviation, flips, tau_g, lo, hi, windowed
+                        lp, site_bin, alleles, gl, uniform, config.set_site_deviation, flips, tau_g, lo, hi, windowed
                     )
                     tested = het_bins[np.searchsorted(het_bins, lo) : np.searchsorted(het_bins, hi)]
                     failing = next(
@@ -310,6 +301,7 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
                         break
                     posts[lo:hi] = lp
                     lo, last = hi, forward[-1]
+                    width = min(advance, 2 * width)
                 start = stop
             return breaks
 
@@ -325,51 +317,65 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
     else:
         posts = gposts
         set_breaks = cuts
-    ordered = None if windowed else _site_posteriors(posts, site_bin, alleles, gl, config.site_deviation, flips)
     ties = ctx.tie_bins
-    if children and not anchored_by_parent and len(ties):
-        orientation = (
-            _orientation_certainty(
-                posts, site_bin, alleles, gl, config.site_deviation, flips, tau_g, 0, B, B
-            )
-            if windowed
-            else bin_orientation(ordered, site_bin, tau_g, B)
-        )
-        bridged = _bridged_ties(ties, orientation, tau_s)
-        set_breaks = [c for c in cuts if c not in bridged]
-    # Only a single sample's result survives these site windows. The stage consumes completed samples immediately.
+    orientation = np.full(B, np.nan) if children and not anchored_by_parent and len(ties) else None
     calls = np.full((len(site_bin), 2), -1, dtype=np.int8)
     undetermined = np.zeros(len(site_bin), dtype=bool)
     scores = np.empty((2, len(site_bin)), dtype=np.float32) if ctx.scores else None
-    chain = None
-    windows = site_windows(site_bin, window=RELEASE_WINDOW) if windowed else ((0, len(site_bin)),)
     shared = ctx.shared_windows
-    for left, right in windows:
-        if windowed:
-            ordered = _site_posteriors(
-                posts, site_bin, alleles, gl, config.site_deviation, flips, left, right, shared=shared
-            )
-        genotype = _site_posteriors(
-            gposts, site_bin, alleles, gl, config.site_deviation, flips, left, right, shared=shared
+
+    def release_sites(bounds):
+        left, right = bounds
+        ordered = _site_posteriors(
+            posts, site_bin, alleles, gl, cohort, ctx.robust_epsilon, flips, left, right, shared=shared
         )
+        # With no gauge partition the unanchored and ordered release use the same site posteriors.
+        genotype = ordered
+        if partitioned:
+            genotype = _site_posteriors(
+                gposts, site_bin, alleles, gl, cohort, ctx.robust_epsilon, flips, left, right, shared=shared
+            )
+        if orientation is not None and right > left:
+            bins = site_bin[left:right]
+            first, last = int(bins[0]), int(bins[-1]) + 1
+            # Tie bridging uses the gauge set statistic's site model.
+            oriented = _site_posteriors(
+                posts, site_bin, alleles, gl, uniform, config.set_site_deviation, flips, left, right, shared=shared
+            )
+            orientation[first:last] = bin_orientation(oriented, bins - first, tau_g, last - first)
         pg = np.stack([genotype[0], genotype[1] + genotype[2], genotype[3]])
         g = pg.argmax(axis=0)
         maximum_genotype = pg.max(axis=0)
         called = maximum_genotype >= tau_g
-        assert ordered is not None
         p01, p10 = ordered[1], ordered[2]
         het = called & (g == 1)
-        phase_confident = np.maximum(p01, p10) >= tau_p
-        phased = het & phase_confident
+        maximum_phase = np.maximum(p01, p10)
         local_calls = calls[left:right]
         hom = called & (g != 1)
         local_calls[hom, 0] = local_calls[hom, 1] = (g[hom] // 2).astype(np.int8)
         one_first = p10 > p01
         local_calls[het, 0] = np.where(one_first[het], 1, 0)
         local_calls[het, 1] = np.where(one_first[het], 0, 1)
-        undetermined[left:right] = het & ~phased
+        undetermined[left:right] = het & ~(maximum_phase >= tau_p)
         if scores is not None:
-            scores[:, left:right] = np.stack([pg.max(axis=0), np.maximum(p01, p10)]).astype(np.float32)
+            scores[0, left:right] = maximum_genotype
+            scores[1, left:right] = maximum_phase
+
+    # Windows contain complete bins, so every output slice and median is independent.
+    windows = (
+        tuple(site_windows(site_bin, window=RELEASE_WINDOW))
+        if windowed or map_work is not None
+        else ((0, len(site_bin)),)
+    )
+    if map_work is not None and len(windows) > 1:
+        map_work(release_sites, windows)
+    else:
+        for bounds in windows:
+            release_sites(bounds)
+    if orientation is not None:
+        bridged = _bridged_ties(ties, orientation, tau_s)
+        set_breaks = [c for c in cuts if c not in bridged]
+    chain = None
     if ctx.chain:
         chain = np.full((2, 2, B), np.nan, dtype=np.float64)
         for k in (0, 1):

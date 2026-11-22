@@ -22,10 +22,12 @@ from ...contracts.observations import PairArray
 from ...contracts.panels import unknown_copy_mass
 from ...contracts.roles import freeze_record_arrays, record_field
 from ...contracts.selection import BlockSelection, MemoHits, SelectionMemo, SelectionSummary
+from ...core.errors import InvariantError
 from ...core.progress import Progress
 from ...core.progress import frame as progress_frame
 from ...core.ties import BOUNDARY_GUARD, TieCounter, census, census_enabled, fixed_policy, improves, tie_classes
 from ..discovery.api import DiscoveryParameters, search_bytes
+from ..shared.observation import mix_likelihoods
 from .bank import candidate_bank
 from .objective import ContextFounders, selection_objective
 from .parameters import SEARCH_GROWTH, TASK_WORKSPACE_BASE_BYTES, SelectionParameters
@@ -424,6 +426,8 @@ def select_task(
     observed: np.ndarray | PairArray,
     settings: tuple[SelectionParameters, DiscoveryParameters, float],
     *,
+    cohort: np.ndarray | None,
+    outlier_rate: float,
     reverse: bool,
     census_sink=None,
     threads: int | Callable[[], int] = 1,
@@ -434,8 +438,15 @@ def select_task(
     Inputs are float64[N,L,3] GL and bool[N,L] observed. Only columns in block.columns
     are read. Missing cells become the literal uniform value before both fitting and
     input-key construction. Mutates no input; shape/index failures propagate.
+    ``cohort`` float64[L, 3] (the contig's cohort genotype frequencies) and ``outlier_rate`` (the run's rate before the
+    calibration barrier): every genotype law of the block is scored against its mixed likelihoods
+    (science.shared.observation); 0 scores the likelihoods themselves.
     """
     local_gl = gather_likelihoods(likelihoods, block.columns)
+    if outlier_rate > 0.0:
+        if cohort is None:
+            raise InvariantError("a block scored with outliers needs its sites' cohort genotype frequencies")
+        local_gl = mix_likelihoods(local_gl, cohort[block.columns], outlier_rate)
     local_observed = np.asarray(observed[:, block.columns], dtype=bool, order="C")
     local_gl[~local_observed] = 1.0 / 3.0
     return select_block(

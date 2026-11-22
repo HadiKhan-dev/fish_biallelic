@@ -122,8 +122,9 @@ def join_view(task: JoinTask) -> str:
     )
 
 
-def join_inputs(task: JoinTask, scoring: np.ndarray) -> JoinInputs:
-    """The batch's materialised input components and their evidence."""
+def join_inputs(task: JoinTask, scoring: np.ndarray, cohort: np.ndarray | None = None) -> JoinInputs:
+    """The batch's materialised input components and their evidence (``cohort``: the contig's cohort genotype
+    frequencies [L, 3], taken at the batch's sites)."""
     blocks = _input_blocks(task)
     sites = np.concatenate([block.site_indices() for block in blocks])
     offsets: np.ndarray = np.zeros(len(blocks) + 1, dtype=np.int64)
@@ -135,11 +136,15 @@ def join_inputs(task: JoinTask, scoring: np.ndarray) -> JoinInputs:
         gl = scoring[int(samples[0]) : int(samples[-1]) + 1, int(sites[0]) : int(sites[-1]) + 1]
     else:
         gl = gather_evidence(scoring, samples, sites)
-    return JoinInputs(blocks=blocks, gl=gl, offsets=offsets, samples=task.samples)
+    return JoinInputs(
+        blocks=blocks, gl=gl, offsets=offsets, samples=task.samples,
+        cohort=None if cohort is None else np.ascontiguousarray(cohort[sites], dtype=np.float64),
+    )
 
 
 def _run_single(
-    task: JoinTask, scoring: np.ndarray, budget, *, report_switches=False, max_branches=MAX_BRANCHES, progress=None
+    task: JoinTask, scoring: np.ndarray, budget, *, report_switches=False, max_branches=MAX_BRANCHES, progress=None,
+    cohort=None,
 ) -> JoinRecord:
     """Join one batch (see the module docstring); results never depend on the budget.
 
@@ -148,7 +153,8 @@ def _run_single(
     return _record(
         task,
         _search(
-            task, scoring, budget, report_switches=report_switches, max_branches=max_branches, progress=progress
+            task, scoring, budget, report_switches=report_switches, max_branches=max_branches, progress=progress,
+            cohort=cohort,
         ),
     )
 
@@ -163,7 +169,9 @@ class _LocalJoin:
     work_counters: dict[str, int]
 
 
-def _search(task: JoinTask, scoring: np.ndarray, budget, *, report_switches, max_branches, progress=None) -> _LocalJoin:
+def _search(
+    task: JoinTask, scoring: np.ndarray, budget, *, report_switches, max_branches, progress=None, cohort=None
+) -> _LocalJoin:
     """The join search of one batch in local row terms; its outcome reads only the batch's join view (and, with a
     census attached, the census label). ``progress`` (core.progress) reaches the panel search; a resumed search
     fits the linker and runs the beam again (deterministic functions of the inputs) before continuing."""
@@ -183,7 +191,7 @@ def _search(task: JoinTask, scoring: np.ndarray, budget, *, report_switches, max
     workspace = linker_em.LinkerWorkspace(
         map_tasks=ordered_map, lane_threads=None if budget is None else budget.threads, census=settings.census
     )
-    inputs = join_inputs(task, scoring)
+    inputs = join_inputs(task, scoring, cohort)
     # The batch's content label (valley-census keys): its inputs, without settings or evidence identity.
     label = (
         f"join/{task.prepared[0].positions[0]}-{task.prepared[-1].positions[-1]}/"
@@ -294,7 +302,9 @@ def _record(task: JoinTask, searched: _LocalJoin) -> JoinRecord:
     )
 
 
-def run_batch(task: JoinTask, scoring: np.ndarray, budget, *, progress: Progress | None = None) -> JoinRecord:
+def run_batch(
+    task: JoinTask, scoring: np.ndarray, budget, *, progress: Progress | None = None, cohort: np.ndarray | None = None
+) -> JoinRecord:
     """Compare a complete bounded Cartesian input family on one common cohort.
 
     No child and parent scores are added, and linker scores from different
@@ -306,7 +316,7 @@ def run_batch(task: JoinTask, scoring: np.ndarray, budget, *, progress: Progress
     publishes the record the uninterrupted batch would have published.
     """
     if not task.branches:
-        return _run_single(task, scoring, budget, progress=progress)
+        return _run_single(task, scoring, budget, progress=progress, cohort=cohort)
     from ..alternatives import terminal_winners
     from ..orders import panel_key
 
@@ -339,7 +349,9 @@ def run_batch(task: JoinTask, scoring: np.ndarray, budget, *, progress: Progress
                 # The complete incoming family shares at most 16 executions. Do not
                 # multiply that allowance by an independent per-input replay budget.
                 # Unperformed inner histories remain explicit source uncertainty.
-                searched = _search(branch, scoring, budget, report_switches=True, max_branches=1, progress=progress)
+                searched = _search(
+                    branch, scoring, budget, report_switches=True, max_branches=1, progress=progress, cohort=cohort
+                )
                 search_of_view[view] = len(searches)
                 searches.append(searched)
             branch_search.append(search_of_view[view])

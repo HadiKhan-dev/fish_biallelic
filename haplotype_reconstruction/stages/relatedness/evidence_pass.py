@@ -47,12 +47,17 @@ class EvidenceInput:
 
 @dataclass(frozen=True)
 class EvidenceArrays:
-    """The four read-only evidence fields consumed by relatedness, without founder views."""
+    """The read-only evidence fields consumed by relatedness, without founder views (cohort_frequencies: the
+    observation model's outlier law, science.shared.cohort)."""
 
     sample_ids: tuple[str, ...]
     positions: np.ndarray
     likelihoods: np.ndarray | CodedLikelihoods
     observed: np.ndarray | PairArray
+    cohort_frequencies: np.ndarray
+    read_sharing_range: int  # bp: the contig's read-sharing range (science.evidence.read_sharing)
+    read_sharing_status: str = "resolved_within"  # none_detected, resolved_within or unresolved
+    read_sharing_reach: int = 0  # bp: the reach of the curve the consumers read (the widest measured when unresolved)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -72,7 +77,9 @@ def upstream_identities(inputs: tuple[EvidenceInput, ...]) -> dict[str, str]:
 
 def _read(store: CheckpointStore, item: EvidenceInput, sample_ids: tuple[str, ...]) -> EvidenceArrays:
     file = store.contig(item.contig)
-    record = read_items(file, _EVIDENCE_KEY, item.evidence_identity, ("schema", "sample_ids", "positions"))
+    record = read_items(
+        file, _EVIDENCE_KEY, item.evidence_identity, ("schema", "sample_ids", "positions", "cohort_frequencies")
+    )
     if record is None:
         raise InputError(f"relatedness needs evidence for {item.contig}")
     require_schema(record.payload, EVIDENCE_SCHEMA)
@@ -81,7 +88,20 @@ def _read(store: CheckpointStore, item: EvidenceInput, sample_ids: tuple[str, ..
         raise InputError(f"relatedness sample axis differs on {item.contig}")
     gl = load_likelihoods(file, expected_identity=item.evidence_identity)
     observed = load_observed(file, expected_identity=item.evidence_identity, likelihoods=gl)
-    return EvidenceArrays(names, record.payload["positions"], gl, observed)
+    from ..evidence.records import load_read_sharing
+
+    sharing = load_read_sharing(file, item.evidence_identity)
+    if sharing is None:
+        raise InputError(f"relatedness needs the read-sharing record of {item.contig}")
+    # B3's spacing uses the estimated range when it is resolved (none detected: 0; resolved within the measured lags:
+    # r_phi).
+    # An unresolved range is read as unresolved, as by every consumer: the stride of every 20th site stays alone, a
+    # named compute exception (ADVICE2 14.1 item 4, which amends 11.10); the evidence record carries the status.
+    return EvidenceArrays(
+        names, record.payload["positions"], gl, observed, np.asarray(record.payload["cohort_frequencies"]),
+        int(sharing.range_bp) if sharing.resolved() else 0,
+        str(sharing.status), int(sharing.consumer_curve()[2]),
+    )
 
 
 def evidence_pass(
@@ -123,6 +143,9 @@ def bound_upstream(store: CheckpointStore, manifest: Mapping[str, Any]) -> dict[
         require_schema(record.payload, reader.schema)
         upstream[f"evidence/{name}"] = reader.identity
         upstream[f"genetic_map/{name}"] = manifest["map_identities"][name]
+    from ..observation import records as observation_records
+
+    upstream["observation"] = observation_records.bound_identity(store, manifest)
     return upstream
 
 

@@ -143,6 +143,7 @@ def release_decision(
     chromosomes: list[dict[str, str | int | float]] | None = None
     exclusion_status = "no_unresolved_candidates"
     lower, upper, observed = np.empty(0), None, np.empty(0, dtype=np.int64)
+    certifiable = None
     if len(scored):
         weighted = exclusion_contigs(request)
         if len(evidence) != len(weighted):
@@ -157,6 +158,13 @@ def release_decision(
             if value.log_e_upper is not None and value.log_e_upper.shape != (len(scored),):
                 raise InvariantError(f"exclusion upper endpoint axis differs on {contig}")
         lower, upper, observed = exclusion.combine(evidence)
+        # A fitted library on any contributing contig makes the genome score a working score.
+        certifiable = np.ones(len(scored), dtype=np.bool_)
+        for value in evidence:
+            if value.certifiable is not None:
+                if value.certifiable.shape != certifiable.shape:
+                    raise InvariantError(f"exclusion certification axis differs on {value.contig}")
+                certifiable &= value.certifiable
         chromosomes = [
             dict(contig=value.contig, markers=value.markers, pattern_fallback_samples=value.pattern_fallback_samples,
                  weight=float(np.exp(value.log_weight)))
@@ -186,7 +194,8 @@ def release_decision(
             decided.eligibility,
         ),
         CountExclusion(
-            dyads, lower[:targets], observed[:targets], None if upper is None or not targets else upper[:targets]
+            dyads, lower[:targets], observed[:targets], None if upper is None or not targets else upper[:targets],
+            None if certifiable is None else certifiable[:targets],
         ),
         parameters,
         withheld=preliminary_guard.withheld,

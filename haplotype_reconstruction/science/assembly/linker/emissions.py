@@ -2,8 +2,9 @@
 
 Founder pairs are classified by science.shared.emissions.pair_code (seven predictive classes; unknown alleles are
 Bernoulli(1/2), two copies of one latent allele share it) and scored by
-science.shared.emissions.predictive_likelihood mixed
-with the linker's robustness (no log floor). Storage is O(N L + L K^2) (a code per site and ordered pair, a log
+science.shared.emissions.predictive_likelihood on the centred view of the evidence (the run's outlier mixture against
+the cohort law divided by the cohort likelihood; science.shared.emissions): a class's log emission is the log Bayes
+factor c against a random member of the cohort, at least log eps, with no floor. Storage is O(N L + L K^2) (a code per site and ordered pair, a log
 likelihood per sample, site and code), never an N L K^2 floating-point tensor.
 
 
@@ -22,7 +23,6 @@ from numba import prange, types
 from haplotype_reconstruction.core.kernels import kernel
 from haplotype_reconstruction.science.shared.emissions import pair_code, predictive_likelihood
 
-from ..parameters import LINKER_EMISSION_FLOOR
 
 
 @kernel(
@@ -57,7 +57,6 @@ def pair_codes(alleles: np.ndarray, source_rows: np.ndarray) -> np.ndarray:
     overloads=(
         (
             types.Array(types.float32, 3, "C", readonly=False),
-            types.float64,
             types.int64,
         ),
     ),
@@ -65,27 +64,21 @@ def pair_codes(alleles: np.ndarray, source_rows: np.ndarray) -> np.ndarray:
     parallel=True,
     nogil=True,
 )
-def log_emissions(likelihoods: np.ndarray, robustness: float, codes: np.ndarray) -> np.ndarray:
+def log_emissions(likelihoods: np.ndarray, codes: np.ndarray) -> np.ndarray:
     """float32[S, L, codes] log emission of every sample, site and pair class (the linker's observation model).
 
-    likelihoods: float32[S, L, 3] genotype likelihoods of the batch's informative samples (the neutral view:
-        exactly 1/3 where a sample is unobserved; not renormalised). robustness r: each class's predictive
-        likelihood is mixed with a uniform genotype, (1 - r) P + r / 3, then bounded below by
-        LINKER_EMISSION_FLOOR before taking the log. The mixture keeps incompatible observations
-        finite while preserving their evidence. codes: 3 for a fully called block,
-        7 otherwise (the first three classes are identical in both).
+    likelihoods: float32[S, L, 3] centred likelihoods of the batch's informative samples (the scoring view: exactly 1
+        where a sample is unobserved; never renormalised). A class's emission is log P~ with P~ its predictive
+        likelihood: the run's outlier rate keeps incompatible observations finite (at least log eps) while preserving
+        their evidence. codes: 3 for a fully called block, 7 otherwise (the first three classes are identical in both).
     """
     samples, sites, _ = likelihoods.shape
     result = np.empty((samples, sites, codes), np.float32)
-    keep = 1.0 - robustness
-    uniform = robustness / 3.0
     for sample in prange(samples):
         for site in range(sites):
             p0, p1, p2 = likelihoods[sample, site]
             for code in range(codes):
-                result[sample, site, code] = math.log(
-                    max(keep * predictive_likelihood(p0, p1, p2, code) + uniform, LINKER_EMISSION_FLOOR)
-                )
+                result[sample, site, code] = math.log(predictive_likelihood(p0, p1, p2, code))
     return result
 
 

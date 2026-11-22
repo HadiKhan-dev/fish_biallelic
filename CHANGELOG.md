@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.21.0 (22 November 2026)
+
+4.21 estimates observation outliers from cohort genotype frequencies and models the dependence between sites that share reads. This changes scientific results, particularly for long-read crosses.
+
+- The evidence stage estimates read sharing separately from regional depth variation. The observation pilot estimates a run-wide outlier rate before discovery, and relatedness uses the measured sharing range when selecting sites.
+- Sample QC uses supported working weights from the first omitted read-sharing octave. Relatedness site spacing and read-library survival retain the fitted molecular range and signed curve.
+- Painting carries read-class state through the path search and scores predecessor choices using the destination read matrix. A bounded search retains class-specific alternatives on difficult bins. Libraries without detected sharing use the scalar route. Mixed ONT and short-read libraries can have higher long-read genotype error on some chromosomes. [Painting methods](docs/methods/painting.md)
+- For a sharing library with a fitted zero loss, painting checks adjacent counts for intermittent loss and excess depth variation. When both are supported, it refits loss and read survival for use in painting, pedigree and family phase. [Read-state methods](docs/methods/painting.md)
+- Family phase uses the painting's read matrices where sharing is present. Batching, kernel parallelism and checkpoint reload changes preserve the resulting decisions on the saved replay panel. [Family-phase methods](docs/methods/family_phase.md)
+- Phase-set continuation for samples without inferred relatives, and tie bridging for samples anchored by their children, keep 4.20's site model: a 0.001 departure against a uniform genotype. Genotype calls and per-site phase use the run's estimated outlier rate. That rate would cap common heterozygotes below the set threshold and fragment phase sets on real data. [Phase methods](docs/methods/phase.md)
+- Founder refit pools gain histograms over the analysed chromosomes to estimate class priors. A founder exchange now needs enough evidence from its carriers to pay the edit cost, with positive support after removing the strongest carrier's contribution. [Founder refinement](docs/methods/founder_refinement.md)
+- Under detected read sharing, the pedigree's exclusion working score cannot certify an edge. The pedigree implementation was split into smaller modules and its saved replays retain the same results.
+- In scattered workflows, run `relatedness` before the first `reconstruct` pass. It publishes the observation pilot as well as relatedness. Run `calibrate` after assembly, then reconstruct again to publish painting and refit histograms. Standalone pedigree consumes the histograms and runs on the analysed chromosomes. [Several-node workflow](docs/user/workflow.md)
+- The simulator supports mixed read technologies and `simulation.reads.uncalled_base_probability`, which defaults to zero.
+- Known limitation: under combined read stress (4 % read error, strongly uneven depth with parents near 2x, and dropout), the read state can withhold true pedigree edges. On that stress simulation Tier B recall was 36 of 68 with one reversed edge; the same data without the read state gave 68 of 68. A fix is planned for 4.22.
+
+Start a fresh checkpoint root from the original inputs when moving to 4.21.
+
 ## 4.20.0 (16 November 2026)
 
 This release rebuilds the painting stage on estimated quantities. The painting no longer has a fixed outlier rate or a

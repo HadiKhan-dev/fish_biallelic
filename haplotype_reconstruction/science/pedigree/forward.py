@@ -1,4 +1,5 @@
-"""M0 / M1 / M2 forward likelihoods of a child's genotype likelihoods (projected quadratic model).
+"""The child's scalar emission model, the configuration chains' transitions and caches, and ChildTerms (the
+configuration chains themselves, which also carry the child's read state, are in read_forward).
 
 The hidden state of a child at a bin is the ordered pair of transmitted founder states (S^2 states):
 under M0 both come from the null source (a copying chain that starts from, and redraws from, the
@@ -20,18 +21,20 @@ Method: docs/methods/pedigree.md#child-forward-model-and-composite-score
 from __future__ import annotations
 
 import math
-from collections.abc import Callable
 
 import numpy as np
 from numba import prange
 
+from ...contracts.pedigree import ChildReads
 from ...core.errors import InvariantError, SettingsError
 from ...core.kernels import kernel
-from .kernels.signatures import OVERLOADS
+from .child_reads import class_layout, resident_terms
+from .kernels.forward import OVERLOADS
+from .numerical_parameters import NULL_ROUNDING_ULPS, SITE_POLYNOMIAL_THRESHOLD
+from .projection import Projection
 
 # Temporary per-call cache of shared emission products, tiled over children (not a setting).
-from .parameters import COMMON_EMISSION_CACHE_BYTES, NULL_ROUNDING_ULPS, SITE_POLYNOMIAL_THRESHOLD
-from .projection import Projection
+from .workspace_parameters import CLASS_TRANSFER_CACHE_BYTES, COMMON_EMISSION_CACHE_BYTES
 
 _SMALLEST_NORMAL = 2.2250738585072014e-308
 
@@ -213,51 +216,6 @@ def _powered_products(products, exponent, child_start):
                     if np.isfinite(value) and value >= 0.0:
                         powered[child, block, first, second] = normalized_power(value, maximum, eta)
     return powered
-
-
-@kernel(overloads=OVERLOADS["forward._normalise"], cache=True, nogil=True)
-def _normalise(values):
-    total = np.sum(values)
-    if total <= 0.0 or not np.isfinite(total):
-        return -np.inf
-    values /= total
-    return math.log(total)
-
-
-@kernel(overloads=OVERLOADS["forward._apply_probability_emission"], cache=True, nogil=True)
-def _apply_probability_emission(current, emission, exponent, powered=None):
-    """Apply pow(emission / maximum, exponent), then normalize the pair mass.
-
-    Divide by the maximum before taking the power. Even exponent zero takes
-    this normalization path, retaining its log(total) increment.
-    """
-    maximum = np.max(emission)
-    if maximum <= 0.0 or not np.isfinite(maximum):
-        return -np.inf
-    states = current.shape[0]
-    log_maximum = math.log(maximum)
-    cached = powered is not None and powered.shape[0] == states + 1 and powered[states, 0] == maximum
-    for first in range(states):
-        for second in range(states):
-            value = np.nan if powered is None else powered[first, second]
-            if not cached or not np.isfinite(value):
-                value = normalized_power(emission[first, second], maximum, exponent)
-            current[first, second] *= value
-    increment = _normalise(current)
-    return increment + exponent * log_maximum if np.isfinite(increment) else -np.inf
-
-
-@kernel(overloads=OVERLOADS["forward._apply_log_emission"], cache=True, nogil=True)
-def _apply_log_emission(current, log_emission):
-    maximum = np.max(log_emission)
-    if not np.isfinite(maximum):
-        return -np.inf
-    states = current.shape[0]
-    for first in range(states):
-        for second in range(states):
-            current[first, second] *= math.exp(log_emission[first, second] - maximum)
-    increment = _normalise(current)
-    return increment + maximum if np.isfinite(increment) else -np.inf
 
 
 @kernel(overloads=OVERLOADS["forward._apply_star_bridge"], cache=True, nogil=True)
@@ -480,421 +438,6 @@ def advance(
         )
 
 
-@kernel(overloads=OVERLOADS["forward.score_path"], cache=True, nogil=True)
-def score_path(
-    child,
-    first_parent,
-    second_parent,
-    mode,
-    pi,
-    candidate_alt,
-    stay,
-    alpha,
-    beta,
-    row_arm,
-    column_arm,
-    pivot,
-    excursion,
-    branch,
-    state_alt,
-    child_gl,
-    coefficient,
-    site_index,
-    site_start,
-    site_stop,
-    exponent,
-    null_diagonal,
-    null_off,
-    null_frequency,
-    mismatch,
-    common_products,
-    first_cached_child,
-    common_powered,
-):
-    """(tempered, full) forward log likelihood of one child under one configuration.
-
-    The views keep their own forward state, scaling and underflow path and each stops at its first
-    non-finite increment; they share the observed-marker emission products (or their logarithms),
-    which the full view applies with exponent one.
-    """
-    states = state_alt.shape[0]
-    bins = exponent.shape[1]
-    tempered = np.empty((states, states), dtype=np.float64)
-    full = np.empty_like(tempered)
-    work = np.empty_like(tempered)
-    scratch = np.empty_like(tempered)
-    prefix = np.empty(states + 1, dtype=np.float64)
-    suffix = np.empty(states + 1, dtype=np.float64)
-    for first in range(states):
-        for second in range(states):
-            if mode == 0:
-                tempered[first, second] = null_frequency[child, 0, first] * null_frequency[child, 0, second]
-            elif mode == 1:
-                tempered[first, second] = pi[first_parent, 0, first] * null_frequency[child, 0, second]
-            else:
-                tempered[first, second] = pi[first_parent, 0, first] * pi[second_parent, 0, second]
-            full[first, second] = tempered[first, second]
-    tempered_log = 0.0
-    full_log = 0.0
-    tempered_alive = True
-    full_alive = True
-    for block in range(bins):
-        if block > 0:
-            boundary = block - 1
-            if tempered_alive:
-                advance(
-                    tempered,
-                    scratch,
-                    child,
-                    first_parent,
-                    second_parent,
-                    mode,
-                    boundary,
-                    stay,
-                    alpha,
-                    beta,
-                    row_arm,
-                    column_arm,
-                    pivot,
-                    excursion,
-                    branch,
-                    null_diagonal,
-                    null_off,
-                    null_frequency,
-                    prefix,
-                    suffix,
-                )
-            if full_alive:
-                advance(
-                    full,
-                    scratch,
-                    child,
-                    first_parent,
-                    second_parent,
-                    mode,
-                    boundary,
-                    stay,
-                    alpha,
-                    beta,
-                    row_arm,
-                    column_arm,
-                    pivot,
-                    excursion,
-                    branch,
-                    null_diagonal,
-                    null_off,
-                    null_frequency,
-                    prefix,
-                    suffix,
-                )
-
-        stable_product = True
-        for first in range(states):
-            for second in range(states):
-                if common_products is not None:
-                    saved = common_products[child - first_cached_child, block, first, second]
-                    if np.isfinite(saved):
-                        work[first, second] = saved
-                        continue
-                product = 1.0
-                for slot in range(site_start[child, block], site_stop[child, block]):
-                    site = site_index[slot]
-                    first_alt = candidate_alt[first_parent, site, first] if mode >= 1 else state_alt[first, site]
-                    second_alt = candidate_alt[second_parent, site, second] if mode == 2 else state_alt[second, site]
-                    value = site_likelihood(
-                        child_gl[child, site], coefficient[child, site], first_alt, second_alt, mismatch
-                    )
-                    if value <= 0.0:
-                        product = 0.0
-                        break
-                    product *= value
-                    if not np.isfinite(product) or product < _SMALLEST_NORMAL:
-                        stable_product = False
-                        break
-                work[first, second] = product
-                if not stable_product:
-                    break
-            if not stable_product:
-                break
-        if not stable_product:
-            for first in range(states):
-                for second in range(states):
-                    log_emission = 0.0
-                    for slot in range(site_start[child, block], site_stop[child, block]):
-                        site = site_index[slot]
-                        first_alt = candidate_alt[first_parent, site, first] if mode >= 1 else state_alt[first, site]
-                        second_alt = (
-                            candidate_alt[second_parent, site, second] if mode == 2 else state_alt[second, site]
-                        )
-                        value = site_likelihood(
-                            child_gl[child, site], coefficient[child, site], first_alt, second_alt, mismatch
-                        )
-                        if value <= 0.0:
-                            log_emission = -np.inf
-                            break
-                        log_emission += math.log(value)
-                    work[first, second] = log_emission
-
-        if tempered_alive:
-            eta = exponent[child, block]
-            powered = None if common_powered is None else common_powered[child - first_cached_child, block]
-            if eta == 0.0:
-                # A zero exponent makes the tempered emission uniform.
-                scratch[:] = 1.0
-                increment = _apply_probability_emission(tempered, scratch, eta, powered)
-            elif stable_product:
-                increment = _apply_probability_emission(tempered, work, eta, powered)
-            else:
-                for first in range(states):
-                    for second in range(states):
-                        scratch[first, second] = eta * work[first, second]
-                increment = _apply_log_emission(tempered, scratch)
-            if np.isfinite(increment):
-                tempered_log += increment
-            else:
-                tempered_alive = False
-                tempered_log = -np.inf
-        if full_alive:
-            if stable_product:
-                increment = _apply_probability_emission(full, work, 1.0, None)
-            else:
-                increment = _apply_log_emission(full, work)
-            if np.isfinite(increment):
-                full_log += increment
-            else:
-                full_alive = False
-                full_log = -np.inf
-        if not tempered_alive and not full_alive:
-            break
-    return tempered_log, full_log
-
-
-@kernel(overloads=OVERLOADS["forward.score_path_blocks"], cache=True, nogil=True)
-def score_path_blocks(
-    child,
-    first_parent,
-    second_parent,
-    mode,
-    pi,
-    candidate_alt,
-    stay,
-    alpha,
-    beta,
-    row_arm,
-    column_arm,
-    pivot,
-    excursion,
-    branch,
-    state_alt,
-    child_gl,
-    coefficient,
-    site_index,
-    site_start,
-    site_stop,
-    exponent,
-    null_diagonal,
-    null_off,
-    null_frequency,
-    mismatch,
-    common_products,
-    first_cached_child,
-    common_powered,
-    block_of_bin,
-    n_blocks,
-):
-    """[H, 2] tempered/full log increments, credited to the bin's block without chain resets.
-
-    The views keep their own forward state, scaling and underflow path and each stops at its first
-    non-finite increment; they share the observed-marker emission products (or their logarithms),
-    which the full view applies with exponent one.
-    """
-    states = state_alt.shape[0]
-    bins = exponent.shape[1]
-    tempered = np.empty((states, states), dtype=np.float64)
-    full = np.empty_like(tempered)
-    work = np.empty_like(tempered)
-    scratch = np.empty_like(tempered)
-    prefix = np.empty(states + 1, dtype=np.float64)
-    suffix = np.empty(states + 1, dtype=np.float64)
-    for first in range(states):
-        for second in range(states):
-            if mode == 0:
-                tempered[first, second] = null_frequency[child, 0, first] * null_frequency[child, 0, second]
-            elif mode == 1:
-                tempered[first, second] = pi[first_parent, 0, first] * null_frequency[child, 0, second]
-            else:
-                tempered[first, second] = pi[first_parent, 0, first] * pi[second_parent, 0, second]
-            full[first, second] = tempered[first, second]
-    output = np.zeros((n_blocks, 2))
-    tempered_alive = True
-    full_alive = True
-    for block in range(bins):
-        target = block_of_bin[block]
-        if block > 0:
-            boundary = block - 1
-            if tempered_alive:
-                advance(
-                    tempered,
-                    scratch,
-                    child,
-                    first_parent,
-                    second_parent,
-                    mode,
-                    boundary,
-                    stay,
-                    alpha,
-                    beta,
-                    row_arm,
-                    column_arm,
-                    pivot,
-                    excursion,
-                    branch,
-                    null_diagonal,
-                    null_off,
-                    null_frequency,
-                    prefix,
-                    suffix,
-                )
-            if full_alive:
-                advance(
-                    full,
-                    scratch,
-                    child,
-                    first_parent,
-                    second_parent,
-                    mode,
-                    boundary,
-                    stay,
-                    alpha,
-                    beta,
-                    row_arm,
-                    column_arm,
-                    pivot,
-                    excursion,
-                    branch,
-                    null_diagonal,
-                    null_off,
-                    null_frequency,
-                    prefix,
-                    suffix,
-                )
-
-        stable_product = True
-        for first in range(states):
-            for second in range(states):
-                if common_products is not None:
-                    saved = common_products[child - first_cached_child, block, first, second]
-                    if np.isfinite(saved):
-                        work[first, second] = saved
-                        continue
-                product = 1.0
-                for slot in range(site_start[child, block], site_stop[child, block]):
-                    site = site_index[slot]
-                    first_alt = candidate_alt[first_parent, site, first] if mode >= 1 else state_alt[first, site]
-                    second_alt = candidate_alt[second_parent, site, second] if mode == 2 else state_alt[second, site]
-                    value = site_likelihood(
-                        child_gl[child, site], coefficient[child, site], first_alt, second_alt, mismatch
-                    )
-                    if value <= 0.0:
-                        product = 0.0
-                        break
-                    product *= value
-                    if not np.isfinite(product) or product < _SMALLEST_NORMAL:
-                        stable_product = False
-                        break
-                work[first, second] = product
-                if not stable_product:
-                    break
-            if not stable_product:
-                break
-        if not stable_product:
-            for first in range(states):
-                for second in range(states):
-                    log_emission = 0.0
-                    for slot in range(site_start[child, block], site_stop[child, block]):
-                        site = site_index[slot]
-                        first_alt = candidate_alt[first_parent, site, first] if mode >= 1 else state_alt[first, site]
-                        second_alt = (
-                            candidate_alt[second_parent, site, second] if mode == 2 else state_alt[second, site]
-                        )
-                        value = site_likelihood(
-                            child_gl[child, site], coefficient[child, site], first_alt, second_alt, mismatch
-                        )
-                        if value <= 0.0:
-                            log_emission = -np.inf
-                            break
-                        log_emission += math.log(value)
-                    work[first, second] = log_emission
-
-        if tempered_alive:
-            eta = exponent[child, block]
-            powered = None if common_powered is None else common_powered[child - first_cached_child, block]
-            if eta == 0.0:
-                # A zero exponent makes the tempered emission uniform.
-                scratch[:] = 1.0
-                increment = _apply_probability_emission(tempered, scratch, eta, powered)
-            elif stable_product:
-                increment = _apply_probability_emission(tempered, work, eta, powered)
-            else:
-                for first in range(states):
-                    for second in range(states):
-                        scratch[first, second] = eta * work[first, second]
-                increment = _apply_log_emission(tempered, scratch)
-            if np.isfinite(increment):
-                output[target, 0] += increment
-            else:
-                tempered_alive = False
-                for later in range(target, n_blocks):
-                    output[later, 0] = -np.inf
-        if full_alive:
-            if stable_product:
-                increment = _apply_probability_emission(full, work, 1.0, None)
-            else:
-                increment = _apply_log_emission(full, work)
-            if np.isfinite(increment):
-                output[target, 1] += increment
-            else:
-                full_alive = False
-                for later in range(target, n_blocks):
-                    output[later, 1] = -np.inf
-        if not tempered_alive and not full_alive:
-            break
-    return output
-
-
-@kernel(overloads=OVERLOADS["forward.score_block_rows"], cache=True, parallel=True, nogil=True)
-def score_block_rows(rows, block_of_bin, n_blocks, available, pi, candidate_alt, stay, alpha, beta,
-                     row_arm, column_arm, pivot, excursion, branch, state_alt, child_gl, coefficient,
-                     site_index, site_start, site_stop, exponent, null_diagonal, null_off, null_frequency, mismatch):
-    """Pooled [R,H] contributions; unavailable parental slots follow the original raw M1/M0 fallback."""
-    output = np.empty((len(rows), n_blocks))
-    for row in prange(len(rows)):
-        child, first, second = rows[row, 0], rows[row, 1], rows[row, 2]
-        if first >= 0 and not available[first]:
-            first = -1
-        if second >= 0 and not available[second]:
-            second = -1
-        if first < 0 and second >= 0:
-            first, second = second, -1
-        mode = int(first >= 0) + int(second >= 0)
-        views = score_path_blocks(child, max(first, 0), max(second, 0), mode, pi, candidate_alt,
-            stay, alpha, beta, row_arm, column_arm, pivot, excursion, branch, state_alt,
-            child_gl, coefficient, site_index, site_start, site_stop, exponent, null_diagonal,
-            null_off, null_frequency, mismatch, None, 0, None, block_of_bin, n_blocks)
-        for block in range(n_blocks):
-            output[row, block] = 0.5 * (views[block, 0] + views[block, 1])
-    return output
-
-
-def component_block_scores(projection, terms, rows, block_of_bin, n_blocks):
-    return score_block_rows(np.ascontiguousarray(rows, dtype=np.int64), block_of_bin, n_blocks,
-        np.array(projection.available, copy=True), projection.pi, projection.candidate_alt, projection.stay,
-        projection.alpha, projection.beta, projection.row_arm, projection.column_arm, projection.pivot,
-        projection.excursion, projection.branch, projection.state_alt, terms.gl, terms.coefficient,
-        terms.site_index, terms.site_start, terms.site_stop, terms.exponent, terms.null_diagonal,
-        terms.null_off, terms.null_frequency, terms.mismatch)
-
-
 @kernel(overloads=OVERLOADS["forward.named_column_powers"], cache=True, parallel=True, nogil=True)
 def named_column_powers(products, exponent, child_start):
     """For the M1 screen's completed cache (_fill_named_first_products): per child and bin, the largest named-first
@@ -928,387 +471,6 @@ def named_column_powers(products, exponent, child_start):
     return maximum, powered
 
 
-@kernel(overloads=OVERLOADS["forward._apply_tempered_m1"], cache=True, nogil=True)
-def _apply_tempered_m1(current, emission, exponent, powered, named_maximum, column_powered):
-    """_apply_probability_emission for a fractional exponent with the M1 screen's caches: the same values, except that
-    a BACKGROUND-second entry with a named first state takes its cached power when the bin's maximum equals the
-    named-first maximum (the power is then of the identical base)."""
-    maximum = np.max(emission)
-    if maximum <= 0.0 or not np.isfinite(maximum):
-        return -np.inf
-    states = current.shape[0]
-    last = states - 1
-    log_maximum = math.log(maximum)
-    cached = powered.shape[0] == states + 1 and powered[states, 0] == maximum
-    column = maximum == named_maximum
-    for first in range(states):
-        for second in range(states):
-            saved = powered[first, second]
-            if cached and np.isfinite(saved):
-                value = saved
-            elif column and second == last and first < last and np.isfinite(column_powered[first]):
-                value = column_powered[first]
-            else:
-                value = normalized_power(emission[first, second], maximum, exponent)
-            current[first, second] *= value
-    increment = _normalise(current)
-    return increment + exponent * log_maximum if np.isfinite(increment) else -np.inf
-
-
-@kernel(overloads=OVERLOADS["forward.score_m1_cached"], cache=True, nogil=True)
-def score_m1_cached(
-    child,
-    parent,
-    pi,
-    candidate_alt,
-    stay,
-    alpha,
-    beta,
-    row_arm,
-    column_arm,
-    pivot,
-    excursion,
-    branch,
-    state_alt,
-    child_gl,
-    coefficient,
-    site_index,
-    site_start,
-    site_stop,
-    exponent,
-    null_diagonal,
-    null_off,
-    null_frequency,
-    mismatch,
-    common_products,
-    first_cached_child,
-    common_powered,
-    named_maximum,
-    column_powered,
-):
-    """score_path(child, parent, 0, 1, ...) with the M1 screen's completed caches: the same
-    forward recursion, emission values and operations, so the same (tempered, full) log likelihoods.
-
-    Where every named-first product of the bin is cached, the candidate's BACKGROUND row is accumulated site by site
-    for all second states together (each entry still multiplies its own site likelihoods in site order, with the
-    zero rule; any underflow sends the bin to the log path, which recomputes every entry); otherwise the
-    general loop of score_path runs unchanged.
-    """
-    states = state_alt.shape[0]
-    last = states - 1
-    bins = exponent.shape[1]
-    local = child - first_cached_child
-    tempered = np.empty((states, states), dtype=np.float64)
-    full = np.empty_like(tempered)
-    work = np.empty_like(tempered)
-    scratch = np.empty_like(tempered)
-    prefix = np.empty(states + 1, dtype=np.float64)
-    suffix = np.empty(states + 1, dtype=np.float64)
-    row = np.empty(states, dtype=np.float64)
-    zeroed = np.empty(states, dtype=np.bool_)
-    for first in range(states):
-        for second in range(states):
-            tempered[first, second] = pi[parent, 0, first] * null_frequency[child, 0, second]
-            full[first, second] = tempered[first, second]
-    tempered_log = 0.0
-    full_log = 0.0
-    tempered_alive = True
-    full_alive = True
-    for block in range(bins):
-        if block > 0:
-            boundary = block - 1
-            if tempered_alive:
-                advance(
-                    tempered,
-                    scratch,
-                    child,
-                    parent,
-                    0,
-                    1,
-                    boundary,
-                    stay,
-                    alpha,
-                    beta,
-                    row_arm,
-                    column_arm,
-                    pivot,
-                    excursion,
-                    branch,
-                    null_diagonal,
-                    null_off,
-                    null_frequency,
-                    prefix,
-                    suffix,
-                )
-            if full_alive:
-                advance(
-                    full,
-                    scratch,
-                    child,
-                    parent,
-                    0,
-                    1,
-                    boundary,
-                    stay,
-                    alpha,
-                    beta,
-                    row_arm,
-                    column_arm,
-                    pivot,
-                    excursion,
-                    branch,
-                    null_diagonal,
-                    null_off,
-                    null_frequency,
-                    prefix,
-                    suffix,
-                )
-
-        stable_product = True
-        complete = np.isfinite(named_maximum[local, block])
-        if complete:
-            for first in range(last):
-                for second in range(states):
-                    work[first, second] = common_products[local, block, first, second]
-            for second in range(states):
-                row[second] = 1.0
-                zeroed[second] = False
-            for slot in range(site_start[child, block], site_stop[child, block]):
-                site = site_index[slot]
-                first_alt = candidate_alt[parent, site, last]
-                for second in range(states):
-                    if zeroed[second]:
-                        continue
-                    value = site_likelihood(
-                        child_gl[child, site], coefficient[child, site], first_alt, state_alt[second, site], mismatch
-                    )
-                    if value <= 0.0:
-                        row[second] = 0.0
-                        zeroed[second] = True
-                        continue
-                    row[second] *= value
-                    if not np.isfinite(row[second]) or row[second] < _SMALLEST_NORMAL:
-                        stable_product = False
-                        break
-                if not stable_product:
-                    break
-            for second in range(states):
-                work[last, second] = row[second]
-        else:
-            for first in range(states):
-                for second in range(states):
-                    saved = common_products[local, block, first, second]
-                    if np.isfinite(saved):
-                        work[first, second] = saved
-                        continue
-                    product = 1.0
-                    for slot in range(site_start[child, block], site_stop[child, block]):
-                        site = site_index[slot]
-                        value = site_likelihood(
-                            child_gl[child, site],
-                            coefficient[child, site],
-                            candidate_alt[parent, site, first],
-                            state_alt[second, site],
-                            mismatch,
-                        )
-                        if value <= 0.0:
-                            product = 0.0
-                            break
-                        product *= value
-                        if not np.isfinite(product) or product < _SMALLEST_NORMAL:
-                            stable_product = False
-                            break
-                    work[first, second] = product
-                    if not stable_product:
-                        break
-                if not stable_product:
-                    break
-        if not stable_product:
-            for first in range(states):
-                for second in range(states):
-                    log_emission = 0.0
-                    for slot in range(site_start[child, block], site_stop[child, block]):
-                        site = site_index[slot]
-                        value = site_likelihood(
-                            child_gl[child, site],
-                            coefficient[child, site],
-                            candidate_alt[parent, site, first],
-                            state_alt[second, site],
-                            mismatch,
-                        )
-                        if value <= 0.0:
-                            log_emission = -np.inf
-                            break
-                        log_emission += math.log(value)
-                    work[first, second] = log_emission
-
-        if tempered_alive:
-            eta = exponent[child, block]
-            powered = common_powered[local, block]
-            if eta == 0.0:
-                # A zero exponent makes the tempered emission uniform.
-                scratch[:] = 1.0
-                increment = _apply_probability_emission(tempered, scratch, eta, powered)
-            elif stable_product and complete and eta != 1.0:
-                increment = _apply_tempered_m1(
-                    tempered, work, eta, powered, named_maximum[local, block], column_powered[local, block]
-                )
-            elif stable_product:
-                increment = _apply_probability_emission(tempered, work, eta, powered)
-            else:
-                for first in range(states):
-                    for second in range(states):
-                        scratch[first, second] = eta * work[first, second]
-                increment = _apply_log_emission(tempered, scratch)
-            if np.isfinite(increment):
-                tempered_log += increment
-            else:
-                tempered_alive = False
-                tempered_log = -np.inf
-        if full_alive:
-            if stable_product:
-                increment = _apply_probability_emission(full, work, 1.0, None)
-            else:
-                increment = _apply_log_emission(full, work)
-            if np.isfinite(increment):
-                full_log += increment
-            else:
-                full_alive = False
-                full_log = -np.inf
-        if not tempered_alive and not full_alive:
-            break
-    return tempered_log, full_log
-
-
-@kernel(overloads=OVERLOADS["forward._m0_kernel"], cache=True, parallel=True, nogil=True)
-def _m0_kernel(
-    pi,
-    candidate_alt,
-    stay,
-    alpha,
-    beta,
-    row_arm,
-    column_arm,
-    pivot,
-    excursion,
-    branch,
-    state_alt,
-    child_gl,
-    coefficient,
-    site_index,
-    site_start,
-    site_stop,
-    exponent,
-    null_diagonal,
-    null_off,
-    null_frequency,
-    mismatch,
-    eligible_child,
-):
-    tempered = np.empty(child_gl.shape[0], dtype=np.float64)
-    full = np.empty(child_gl.shape[0], dtype=np.float64)
-    for child in prange(child_gl.shape[0]):
-        if eligible_child[child]:
-            tempered[child], full[child] = score_path(
-                child,
-                0,
-                0,
-                0,
-                pi,
-                candidate_alt,
-                stay,
-                alpha,
-                beta,
-                row_arm,
-                column_arm,
-                pivot,
-                excursion,
-                branch,
-                state_alt,
-                child_gl,
-                coefficient,
-                site_index,
-                site_start,
-                site_stop,
-                exponent,
-                null_diagonal,
-                null_off,
-                null_frequency,
-                mismatch,
-                None,
-                0,
-                None,
-            )
-        else:
-            tempered[child] = -np.inf
-            full[child] = -np.inf
-    return tempered, full
-
-
-@kernel(overloads=OVERLOADS["forward._m2_kernel"], cache=True, parallel=True, nogil=True)
-def _m2_kernel(
-    trios,
-    pi,
-    candidate_alt,
-    stay,
-    alpha,
-    beta,
-    row_arm,
-    column_arm,
-    pivot,
-    excursion,
-    branch,
-    state_alt,
-    child_gl,
-    coefficient,
-    site_index,
-    site_start,
-    site_stop,
-    exponent,
-    null_diagonal,
-    null_off,
-    null_frequency,
-    mismatch,
-    common_products,
-    first_cached_child,
-    common_powered,
-):
-    tempered = np.empty(len(trios), dtype=np.float64)
-    full = np.empty(len(trios), dtype=np.float64)
-    for row in prange(len(trios)):
-        tempered[row], full[row] = score_path(
-            trios[row, 0],
-            trios[row, 1],
-            trios[row, 2],
-            2,
-            pi,
-            candidate_alt,
-            stay,
-            alpha,
-            beta,
-            row_arm,
-            column_arm,
-            pivot,
-            excursion,
-            branch,
-            state_alt,
-            child_gl,
-            coefficient,
-            site_index,
-            site_start,
-            site_stop,
-            exponent,
-            null_diagonal,
-            null_off,
-            null_frequency,
-            mismatch,
-            common_products,
-            first_cached_child,
-            common_powered,
-        )
-    return tempered, full
-
-
 def null_frequencies(pi: np.ndarray, available: np.ndarray, prior_samples: float) -> np.ndarray:
     """float64 [N, B, S]: per child, the leave-one-out transmitted-state frequency of the other informative
     samples with a uniform pseudo-count regulariser of ``prior_samples`` samples (see ChildTerms)."""
@@ -1326,7 +488,9 @@ class ChildTerms:
     gl float64 [N, M, 3], coefficient [N, M, 3], observed-marker CSR (site_index, site_start,
     site_stop), exponent float64 [N, B], null transition coefficients [N, B-1] (diagonal, off),
     null_frequency float64 [N, B, S] (the null source's initial and redraw law per child and bin), mismatch, the
-    cache batch size and whether any exponent is fractional.
+    cache batch size and whether any exponent is fractional; the children's read state (child_reads.resident_terms
+    of the component's ChildReads, one class without it): read_offset, read_initial, read_operator, read_ratio and
+    read_powered, carried by the configuration chains (read_forward).
 
     The null source of a child's unobserved parent slot starts from, and redraws from, the frequency at which the
     other samples transmit each founder state, f_cb(s) = (sum_{j != c} a_j pi_jb(s) + w / S) /
@@ -1349,9 +513,12 @@ class ChildTerms:
         same: np.ndarray,
         one: np.ndarray,
         two: np.ndarray,
-        mismatch: float,
         null_prior_samples: float,
+        reads: ChildReads | None = None,
     ):
+        # ``gl`` are the children's mixed likelihoods (the painting's outlier rate against the cohort law,
+        # science.shared.observation): a genotype redraw is in them, so the kernels' allele-flip term is zero (A8).
+        mismatch = 0.0
         children = gl.shape[0]
         states = projection.n_states
         bins = projection.n_bins
@@ -1386,9 +553,20 @@ class ChildTerms:
             raise SettingsError("null_prior_samples must be positive")
         self.null_frequency = null_frequencies(projection.pi, projection.available, float(null_prior_samples))
         self.fractional = bool(np.any((exponent > 0.0) & (exponent < 1.0)))
+        (self.read_offset, self.read_initial, self.read_operator, self.read_ratio,
+         self.read_powered) = resident_terms(reads, children, self.site_start, self.site_stop, exponent)
+        self.read_reset, self.read_width = class_layout(
+            self.read_operator, self.read_offset, self.site_start, self.site_stop)
+        self.n_classes = int(self.read_initial.shape[1])
         cache_children = COMMON_EMISSION_CACHE_BYTES // max(1, bins * states * (2 * states + 1) * 8)
         self.cached = cache_children > 0
         self.batch = min(children, cache_children) if cache_children else children
+        # the read state's class-transfer cache (class_cache): one child batch within CLASS_TRANSFER_CACHE_BYTES, the
+        # batch then shared with the scalar caches; none when one child's would not fit (scored per site)
+        class_bytes = bins * 2 * states * states * self.n_classes * self.n_classes * 8 if self.n_classes > 1 else 0
+        self.class_cached = 0 < class_bytes <= CLASS_TRANSFER_CACHE_BYTES
+        if self.class_cached:
+            self.batch = max(1, min(self.batch, CLASS_TRANSFER_CACHE_BYTES // class_bytes))
 
     def common(self, projection: Projection, child_start: int, child_stop: int):
         """(cached products, powered products) of a child batch, or (None, None) without a cache."""
@@ -1407,6 +585,18 @@ class ChildTerms:
         )
         powered = _powered_products(products, self.exponent, child_start) if self.fractional else None
         return products, powered
+
+    def class_cache(self, projection: Projection, child_start: int, child_stop: int):
+        """The read state's class-transfer cache of a child batch (read_transfer.class_transfers), or None without
+        read state or when it does not fit (the chains then carry every pair site by site)."""
+        if not self.class_cached:
+            return None
+        from .read_transfer import class_transfers
+
+        return class_transfers(
+            int(child_start), int(child_stop), projection.state_alt, self.gl, self.site_index, self.site_start,
+            self.site_stop, self.exponent, self.read_offset, self.read_reset, self.read_width, self.read_operator, self.read_ratio, self.read_powered,
+        )
 
     def common_null_second(self, projection: Projection, child_start: int, child_stop: int):
         """``common`` for M0/M1 configurations only (the M1 screen): the products also hold every entry with a named
@@ -1442,207 +632,6 @@ def model_arguments(projection: Projection) -> tuple:
     )
 
 
-def component_m2(
-    projection: Projection,
-    terms: ChildTerms,
-    trios: np.ndarray,
-    zero: np.ndarray,
-    one: np.ndarray,
-    claim_threads=lambda: None,
-) -> np.ndarray:
-    """Pooled M2 log likelihoods [T] of the panel rows; a row with an evidence-free parent reduces
-    to the other parent's M1 (or M0) screen value."""
-    children = terms.gl.shape[0]
-    first_available = projection.available[trios[:, 1]]
-    second_available = projection.available[trios[:, 2]]
-    active = first_available & second_available
-    two = np.empty(len(trios), dtype=np.float64)
-    for row in np.flatnonzero(~active):
-        child, first, second = trios[row]
-        two[row] = (
-            one[child, first] if first_available[row] else one[child, second] if second_available[row] else zero[child]
-        )
-    active_rows = np.flatnonzero(active)
-    if not len(active_rows):
-        return two
-    active_children = trios[active_rows, 0]
-    common_args = (
-        projection.state_alt,
-        terms.gl,
-        terms.coefficient,
-        terms.site_index,
-        terms.site_start,
-        terms.site_stop,
-        terms.exponent,
-        terms.null_diagonal,
-        terms.null_off,
-        terms.null_frequency,
-        terms.mismatch,
-    )
-    for child_start in range(0, children, terms.batch):
-        child_stop = min(children, child_start + terms.batch)
-        batch_rows = active_rows[(active_children >= child_start) & (active_children < child_stop)]
-        if not len(batch_rows):
-            continue
-        claim_threads()
-        products, powered = terms.common(projection, child_start, child_stop)
-        claim_threads()
-        tempered, full = _m2_kernel(
-            np.ascontiguousarray(trios[batch_rows]),
-            *model_arguments(projection),
-            *common_args,
-            products,
-            child_start,
-            powered,
-        )
-        two[batch_rows] = 0.5 * (tempered + full)
-        del products, powered
-    return two
-
-
-@kernel(overloads=OVERLOADS["forward._dyads"], cache=True, parallel=True, nogil=True)
-def _dyads(
-    pairs,
-    pi,
-    candidate_alt,
-    stay,
-    alpha,
-    beta,
-    row_arm,
-    column_arm,
-    pivot,
-    excursion,
-    branch,
-    available,
-    state_alt,
-    gl,
-    coefficient,
-    indices,
-    starts,
-    stops,
-    exponent,
-    null_diag,
-    null_off,
-    null_frequency,
-    mismatch,
-    zero,
-    products,
-    first_child,
-    powered,
-):
-    output = np.empty(len(pairs))
-    for i in prange(len(pairs)):
-        c, p = pairs[i]
-        if not available[p]:
-            output[i] = zero[c]
-        else:
-            a, b = score_path(
-                c,
-                p,
-                0,
-                1,
-                pi,
-                candidate_alt,
-                stay,
-                alpha,
-                beta,
-                row_arm,
-                column_arm,
-                pivot,
-                excursion,
-                branch,
-                state_alt,
-                gl,
-                coefficient,
-                indices,
-                starts,
-                stops,
-                exponent,
-                null_diag,
-                null_off,
-                null_frequency,
-                mismatch,
-                products,
-                first_child,
-                powered,
-            )
-            output[i] = 0.5 * (a + b)
-    return output
-
-
-@kernel(overloads=OVERLOADS["forward._dyads_cached"], cache=True, parallel=True, nogil=True)
-def _dyads_cached(
-    pairs,
-    pi,
-    candidate_alt,
-    stay,
-    alpha,
-    beta,
-    row_arm,
-    column_arm,
-    pivot,
-    excursion,
-    branch,
-    available,
-    state_alt,
-    gl,
-    coefficient,
-    indices,
-    starts,
-    stops,
-    exponent,
-    null_diag,
-    null_off,
-    null_frequency,
-    mismatch,
-    zero,
-    products,
-    first_child,
-    powered,
-    named_maximum,
-    column_powered,
-):
-    """_dyads with the completed M1 caches (score_m1_cached: the same values)."""
-    output = np.empty(len(pairs))
-    for i in prange(len(pairs)):
-        c, p = pairs[i]
-        if not available[p]:
-            output[i] = zero[c]
-        else:
-            a, b = score_m1_cached(
-                c,
-                p,
-                pi,
-                candidate_alt,
-                stay,
-                alpha,
-                beta,
-                row_arm,
-                column_arm,
-                pivot,
-                excursion,
-                branch,
-                state_alt,
-                gl,
-                coefficient,
-                indices,
-                starts,
-                stops,
-                exponent,
-                null_diag,
-                null_off,
-                null_frequency,
-                mismatch,
-                products,
-                first_child,
-                powered,
-                named_maximum,
-                column_powered,
-            )
-            output[i] = 0.5 * (a + b)
-    return output
-
-
 def terms_args(p, t):
     return (
         p.state_alt,
@@ -1657,47 +646,3 @@ def terms_args(p, t):
         t.null_frequency,
         t.mismatch,
     )
-
-
-def component_m0(
-    p: Projection, t: ChildTerms, eligible_children: np.ndarray, claim_threads: Callable[[], int | None]
-) -> np.ndarray:
-    claim_threads()
-    a, b = _m0_kernel(*model_arguments(p), *terms_args(p, t), np.ascontiguousarray(eligible_children))
-    return 0.5 * (a + b)
-
-
-# Pair chunks per M1 query call: the calling thread re-reads its CPU share before each chunk, so a
-# chromosome whose query outlasts its peers grows into the CPUs they free (a kernel's team is fixed for the whole call).
-# Pairs are scored independently, so chunking does not change any value.
-_CLAIM_CHUNKS = 32
-_CLAIM_CHUNK_MINIMUM = 256
-
-
-def component_m1(
-    p: Projection,
-    t: ChildTerms,
-    pairs: np.ndarray,
-    zero_scores: np.ndarray,
-    first_child: int,
-    products: np.ndarray | None,
-    powered: np.ndarray | None,
-    claim_threads: Callable[[], int | None],
-    columns: tuple[np.ndarray, np.ndarray] | None = None,
-) -> np.ndarray:
-    pairs = np.ascontiguousarray(pairs, dtype=np.int64)
-    model, terms = model_arguments(p), terms_args(p, t)
-    output = np.empty(len(pairs))
-    step = max(_CLAIM_CHUNK_MINIMUM, -(-len(pairs) // _CLAIM_CHUNKS))
-    for start in range(0, max(1, len(pairs)), step):
-        claim_threads()
-        chunk = pairs[start : start + step]
-        if columns is not None and products is not None and powered is not None:
-            output[start : start + len(chunk)] = _dyads_cached(
-                chunk, *model, p.available, *terms, zero_scores, products, first_child, powered, *columns
-            )
-        else:
-            output[start : start + len(chunk)] = _dyads(
-                chunk, *model, p.available, *terms, zero_scores, products, first_child, powered
-            )
-    return output

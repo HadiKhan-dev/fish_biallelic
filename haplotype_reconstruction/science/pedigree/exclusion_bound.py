@@ -19,8 +19,8 @@ from ...contracts.pedigree import ExclusionEvidence
 from ...core.errors import InputError
 from ...core.kernels import kernel
 from . import exclusion
-from .kernels.signatures import OVERLOADS
-from .parameters import ExclusionParameters
+from .exclusion_parameters import ExclusionParameters
+from .kernels.exclusion import OVERLOADS
 
 MODEL = "completed-window-exclusion-v1"
 
@@ -64,11 +64,12 @@ def _completed_windows(
     stops,
     start_index,
     original_window,
-    delta,
+    deltas,
     bets,
     log_denominator,
     log_chromosomes,
     threshold,
+    certifiable,
 ):
     lower = np.full(len(rows), -np.inf)
     visited = np.zeros(len(rows), np.int64)
@@ -76,6 +77,7 @@ def _completed_windows(
     eps = np.finfo(np.float64).eps
     for row in prange(len(rows)):
         a, b = rows[row]
+        delta = deltas[row]  # A11: the dyad's own allowance (one constant in 4.20)
         encoded = counts[a] >= 0 and counts[b] >= 0
         width = counts[b] if encoded else 0
         entries = counts[a] * width if encoded else 0
@@ -88,6 +90,7 @@ def _completed_windows(
         first = 0
         last = 0
         certified = False
+        can_certify = certifiable[row]
         for site in range(gl.shape[1] + 1):
             while first < len(starts) and starts[first] == site:
                 saved[first] = prefix
@@ -96,6 +99,8 @@ def _completed_windows(
                 for h in range(len(bets)):
                     value = prefix[h] - saved[start_index[last], h]
                     completed[h, original_window[last]] = value
+                    if not can_certify:
+                        continue
                     # Conservative allowance for prefix summation, subtraction,
                     # logarithms and the fixed positive-term reduction.
                     guard = (
@@ -136,7 +141,8 @@ def _completed_windows(
                 for h in range(len(bets)):
                     value = table[pair, h]
                     prefix[h] += value
-                    absolute[h] += abs(value)
+                    if can_certify:
+                        absolute[h] += abs(value)
             else:
                 ratio = exclusion._ratio(
                     gl[a, site, 0],
@@ -150,7 +156,8 @@ def _completed_windows(
                 for h in range(len(bets)):
                     value = exclusion._log_bet(ratio, bets[h])
                     prefix[h] += value
-                    absolute[h] += abs(value)
+                    if can_certify:
+                        absolute[h] += abs(value)
         is_certificate[row] = certified
         if not certified:
             # Every window has completed. Reduce in the declared bet/window
@@ -173,11 +180,20 @@ def score_contig(
     log_weight: float,
     sample_count: int,
     claim_threads: Callable[[], int | None] = lambda: None,
+    sample_rates: np.ndarray | None = None,
+    *,
+    certifiable: np.ndarray | None = None,
 ) -> tuple[ExclusionEvidence, dict[str, int | float]]:
     """Bounded scorer with exact fallback; a certificate proves log w_k + log E_k >= threshold (``log_weight`` =
-    log w_k, the contig's fixed weight in the genome e-value, DESIGN_417 D9)."""
+    log w_k, the contig's fixed weight in the genome e-value, DESIGN_417 D9). A11 (4.21, ADVICE2 14.1 item 9): with
+    ``sample_rates`` [N] each dyad (x, y) scores at delta = max(genotype_replacement_probability, e_x + e_y), the two
+    samples' own outlier-rate point estimates; without them every dyad at the constant (4.20). A working exclusion
+    score: on identical inputs, with delta >= the constant, every site ratio falls, so every exclusion statistic is at
+    most 4.20's (the change can only remove exclusions); no error control beyond 4.20's test is claimed."""
     if not (np.isfinite(log_weight) and log_weight <= 0.0) or sample_count < 1:
         raise InputError("a finite log weight <= 0 and a positive sample count are required")
+    if certifiable is None:
+        certifiable = np.ones(len(dyads), dtype=np.bool_)
     threshold = exclusion.log_threshold(sample_count, config.alpha)
     spans = exclusion.physical_windows(positions, config.window_widths_bp)
     starts = np.unique(spans[:, 0])
@@ -194,6 +210,15 @@ def score_contig(
     words = observation_words(observed)
     jointly_observed = _observed_counts(words, dyads)
     del words
+    floor = float(config.genotype_replacement_probability)
+    if sample_rates is None:
+        deltas = np.full(len(dyads), floor)
+    else:
+        rates = np.asarray(sample_rates, dtype=np.float64)
+        if len(dyads) and int(dyads.max()) >= len(rates):
+            raise InputError("per-sample outlier rates do not cover the dyads' samples")
+        deltas = np.maximum(floor, rates[dyads[:, 0]] + rates[dyads[:, 1]]) if len(dyads) else np.zeros(0)
+    deltas = np.ascontiguousarray(deltas, dtype=np.float64)
     for start in range(0, len(dyads), exclusion.DYAD_BATCH):
         claim_threads()
         stop = start + exclusion.DYAD_BATCH
@@ -208,11 +233,12 @@ def score_contig(
             stops,
             start_index,
             order,
-            float(config.genotype_replacement_probability),
+            np.ascontiguousarray(deltas[start:stop]),
             bets,
             log_denominator,
             -float(log_weight),
             threshold,
+            certifiable[start:stop],
         )
     upper = np.where(certified, np.inf, lower)
     fallback_samples = int(np.count_nonzero(counts < 0))
@@ -227,4 +253,4 @@ def score_contig(
         threshold=threshold,
     )
     return ExclusionEvidence(contig, dyads, lower, jointly_observed, len(positions), fallback_samples, upper,
-                             log_weight=float(log_weight)), work
+                             log_weight=float(log_weight), certifiable=certifiable), work

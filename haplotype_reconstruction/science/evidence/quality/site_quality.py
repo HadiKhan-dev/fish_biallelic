@@ -47,6 +47,8 @@ from haplotype_reconstruction.core import ties
 from haplotype_reconstruction.core.concurrency import ThreadSource, thread_count
 from haplotype_reconstruction.core.kernels import kernel
 
+from ..read_sharing import ReadSharing, read_sharing
+from ..read_sharing_tail import apply_tail
 from . import sample_quality
 from .parameters import (
     BALANCE_BACKTRACK_TRIALS,
@@ -1269,6 +1271,16 @@ def _fitted_quality(values) -> SiteQualityFit:
     )
 
 
+def _sharing(counts, positions, passing, contig) -> ReadSharing:
+    """Fit the published curve and its QC working tail on the final r1–r4 evidence axis."""
+    depth = np.asarray(counts).sum(axis=2, dtype=np.int64)
+    positions = np.asarray(positions, dtype=np.int64)
+    if passing is not None and not passing.all():
+        depth = np.ascontiguousarray(depth[:, passing])
+        positions = positions[passing]
+    return apply_tail(read_sharing(depth, positions, contig), depth, positions)
+
+
 def filter_sites(
     positions,
     counts,
@@ -1278,8 +1290,11 @@ def filter_sites(
     team: ThreadSource,
     map_work=map,
     reverse: bool = False,
-) -> tuple[SiteQualityDecision, SampleQualityDecision | None]:
-    """Decide the site filter (and, with it, the contamination QC) on one contig's SNPs.
+    contig: str = "",
+) -> tuple[SiteQualityDecision, SampleQualityDecision | None, ReadSharing]:
+    """Decide the site filter (and, with it, the contamination QC) on one contig's SNPs; with them the contig's
+    read-sharing curve, measured on the r1-r4-passing SNPs that the sample QC reads (all SNPs when the filter does not
+    apply): artefact sites (collapsed repeats, depth outliers) carry depth covariance that is not read sharing.
 
     positions int64[L], counts int32[N, L, 2] of the analysed samples. With an enabled
     ``sample_config``, the per-sample QC is decided on this contig's r1-r4-passing SNPs with r4's
@@ -1290,14 +1305,14 @@ def filter_sites(
     if not config.enabled:
         return SiteQualityDecision(
             enabled=False, applied=False, reason="site filter off", kept=np.ones(n_sites, bool)
-        ), None
+        ), None, _sharing(counts, positions, None, contig)
     if n_sites < config.minimum_calibration_sites:
         return SiteQualityDecision(
             enabled=True,
             applied=False,
             kept=np.ones(n_sites, bool),
             reason=f"fewer than {config.minimum_calibration_sites} biallelic SNPs",
-        ), None
+        ), None, _sharing(counts, positions, None, contig)
     flags, parameters = _quality_flags(
         n_sites,
         counts.shape[0],
@@ -1309,8 +1324,9 @@ def filter_sites(
         reverse=reverse,
     )
     samples = None
+    passing = ~np.any([flags[rule] for rule in QUALITY_RULES], axis=0)
+    sharing = _sharing(counts, positions, passing, contig)
     if sample_config.enabled:
-        passing = ~np.any([flags[rule] for rule in QUALITY_RULES], axis=0)
         interval, why = sample_quality.balance_support(parameters["balance"])
         samples = sample_quality.assess_counts(
             counts,
@@ -1321,6 +1337,7 @@ def filter_sites(
             sample_config,
             balance_interval=interval,
             balance_reason=why,
+            read_sharing=sharing,
             chunk_sites=_tile_sites(counts.shape[0]),
             reverse=reverse,
         )
@@ -1358,7 +1375,7 @@ def filter_sites(
         removed_only_by=only,
         parameters=_fitted_quality(parameters),
         r5_excluded_samples=0 if samples is None else int(np.sum(samples.flagged)),
-    ), samples
+    ), samples, sharing
 
 
 __all__ = ["SiteQualityDecision", "filter_sites"]

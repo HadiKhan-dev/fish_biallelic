@@ -244,6 +244,10 @@ class JoinInputs:
     gl: NDArray[np.float32] = record_field("evidence", axes=("S", "L", "3"), dtype="float32")
     offsets: NDArray[np.int64] = record_field("state", axes=("n+1",), units="site", dtype="int64")
     samples: NDArray[np.int64] = record_field("state", axes=("S",), dtype="int64")
+    cohort: NDArray[np.float64] | None = record_field(
+        "state", axes=("L", "3"), units="probability", dtype="float64", default=None, kw_only=True
+    )
+    """The sites' cohort genotype frequencies in gl's column order (ContigEvidence.cohort_frequencies)."""
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -628,6 +632,12 @@ class AssemblyProduct:
     release_alternatives: tuple[ReleaseFamily, ...] = record_field("call", dtype="tuple[ReleaseFamily, ...]")
     prepared: tuple[PreparedPanel, ...] = record_field(
         "call", stored=False, default=(), dtype="tuple[PreparedPanel, ...]"
+    )
+    # The exchange record of the final product (stages.assembly.exchange.encode_exchange plus its report), None
+    # when the product has none. ``prepared`` already carries its rows; the record is what the final product's
+    # publication stores beside the completion's panels, so a decoded product can be encoded again.
+    exchange: Mapping[str, Any] | None = record_field(
+        "call", stored=False, default=None, dtype="Mapping[str, Any] | None"
     )
     schema: int = schema_field(1)
 

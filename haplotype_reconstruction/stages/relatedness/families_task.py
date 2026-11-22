@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from ...engine.cpu import thread_team
-from ...science.relatedness.parameters import AlleleFrequencyParameters, FamilyParameters, RateParameters
+from ...science.relatedness.parameters import FamilyParameters, RateParameters
 from ...science.relatedness.rate import decide, estimate_rate
 from ...science.relatedness.run import concatenate_terms, contig_terms, fit_families, with_sources
 from ...store.protocol import claim
@@ -20,7 +20,13 @@ from . import families_records as records
 from .evidence_pass import upstream_identities, bound_inputs, EvidenceInput, evidence_pass
 
 __all__ = ["run", "run_stage"]
-_DEFAULT_FREQUENCY = AlleleFrequencyParameters()
+
+
+class _ManifestReader:
+    """The run manifest as the observation records read it."""
+
+    def __init__(self, manifest):
+        self.manifest = manifest
 _DEFAULT_RATE = RateParameters()
 
 
@@ -29,7 +35,6 @@ def run(
     inputs: tuple[EvidenceInput, ...],
     sample_ids: tuple[str, ...],
     parameters: FamilyParameters,
-    frequency: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
     rate: RateParameters = _DEFAULT_RATE,
     *,
     reverse: bool = False,
@@ -44,14 +49,19 @@ def run(
         contigs=tuple(item.contig for item in inputs), sample_ids=sample_ids,
         parameters={
             "relatedness": to_payload(parameters),
-            "allele_frequency": to_payload(frequency),
             "rate": to_payload(rate),
         },
         ties={"reverse": reverse}, numerical_policy=to_payload(NumericalPolicy.current()),
     )
     # These inputs have already been checked by evidence_pass; the reader derives the same named map/evidence set.
+    from ..observation import records as observation_records
+
+    run_manifest = store.manifest("run")
+    observation_identity = observation_records.bound_identity(store, run_manifest)
+    outlier_rate = observation_records.outlier_rate_blocks(_ManifestReader(run_manifest), store)
     derivation = records.expected(
-        store, manifest, product="families", upstream=upstream_identities(inputs)
+        store, manifest, product="families",
+        upstream=dict(upstream_identities(inputs), observation=observation_identity),
     ).identity
     file = CheckpointStore(root, nthreads=team).run
     with claim(file, records.KEY, derivation) as compute:
@@ -61,18 +71,19 @@ def run(
 
         def terms_of(item, evidence):
             claim_threads()  # each contig's terms on the task's current share
-            # Decode independent allele-frequency site windows on that live share.
-            budget = current_budget()
-            return contig_terms(
-                evidence,
-                item.genetic_map,
-                parameters,
-                frequency,
-                map_work=lambda work, items: budget.thread_map(work, items, label="relatedness frequency windows"),
-            )
+            return contig_terms(evidence, item.genetic_map, parameters, outlier_rate=outlier_rate)
 
         with thread_team(default=team):
             terms = evidence_pass(root, inputs, sample_ids, terms_of, team=team)
+            # B3's record per contig (ADVICE2 17.3): read-sharing status, the consumers' reach, the median spacing
+            sharing_record = dict(
+                read_sharing_status=tuple(t.read_sharing_status for t in terms),
+                read_sharing_reach_bp=tuple(int(t.read_sharing_reach_bp) for t in terms),
+                site_spacing_bp=tuple(
+                    float(np.median(np.diff(t.positions))) if t.positions is not None and len(t.positions) > 1
+                    else float("nan") for t in terms
+                ),
+            )
             # rl21: with two source populations, the ancestry classes' laws on every contig's terms (else unchanged).
             terms, sources = with_sources(terms, parameters)
             combined = concatenate_terms(
@@ -97,7 +108,7 @@ def run(
             rate_estimate=parameters.rate_estimate,
             parameters=rate,
         )
-        records.write(file, replace(product, rate=estimate), derivation)
+        records.write(file, replace(product, rate=estimate, **sharing_record), derivation)
     return derivation
 
 

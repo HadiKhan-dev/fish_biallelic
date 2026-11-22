@@ -13,6 +13,7 @@ from ...store.protocol import Derivation, NumericalPolicy, read_items
 
 KEYS = dict(
     robustness="painting/calibration/robustness",
+    refine="painting/calibration/refine",
     outlier="painting/calibration/outlier",
     divisor="painting/calibration/divisor",
     calibration="painting/calibration",
@@ -44,6 +45,10 @@ def expected(store, manifest, *, product="calibration", contig=None):
             raise InvariantError("painting calibration requires every final assembly and evidence product")
         inputs[c + "/assembly"], inputs[c + "/evidence"], inputs[c + "/map"] = bound[1], bound[3], bound[4]
     params = from_payload(PaintingParameters, manifest["parameters"]["painting"])
+    # The outlier profile's clusters are the pedigree's material units (its MaterialParameters, read as the run's
+    # values, never as pedigree code): bound whenever several candidate rates are fitted. A single-value grid fixes
+    # the rate, fits nothing and reads no material.
+    material = manifest["parameters"]["pedigree"]["material"] if len(set(params.robustness_grid)) > 1 else None
     policy = NumericalPolicy(**manifest["numerical_policy"])
     code = code_dependency_identity(
         ("science.painting.calibration", "stages.painting.calibration_tasks", "stages.painting.calibration_records")
@@ -52,7 +57,7 @@ def expected(store, manifest, *, product="calibration", contig=None):
     def identity(which, scope=None, upstream=None):
         return Derivation(
             code,
-            dict(product=which, contig=scope, contigs=contigs, parameters=params),
+            dict(product=which, contig=scope, contigs=contigs, parameters=params, material=material),
             policy,
             dict(inputs, **(upstream or {})),
             tie_reverse=manifest["ties"]["reverse"],
@@ -60,9 +65,13 @@ def expected(store, manifest, *, product="calibration", contig=None):
         ).identity
 
     shards = {c: identity("robustness", c) for c in contigs}
-    outlier = identity("outlier", upstream=shards)
+    # the two midpoint rates around the pooled grid maximum (ADVICE2 14.1 item 6): every contig's grid fits decide them
+    refine = {c: identity("refine", c, shards) for c in contigs}
+    outlier = identity("outlier", upstream={**shards, **{c + "/refine": r for c, r in refine.items()}})
     if product == "robustness":
         result = shards[contig]
+    elif product == "refine":
+        result = refine[contig]
     elif product == "outlier":
         result = outlier
     elif product == "divisor":

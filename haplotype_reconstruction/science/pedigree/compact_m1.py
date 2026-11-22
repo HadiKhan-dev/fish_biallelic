@@ -12,9 +12,10 @@ from ...contracts.pedigree import CompactM1
 
 
 class CompactBuilder:
-    def __init__(self, n, markers, eligible_counts):
+    def __init__(self, n, markers, eligible_counts, units=None):
         self.n = n
         self.markers = np.asarray(markers)
+        self.units = None if units is None else np.asarray(units, dtype=np.float64)
         self.counts = eligible_counts
         c = len(markers)
         self.best = np.full(n, -np.inf)
@@ -46,4 +47,5 @@ class CompactBuilder:
             self.floors,
             self.markers,
             np.asarray(self.counts, np.int64),
+            units=self.units,
         )

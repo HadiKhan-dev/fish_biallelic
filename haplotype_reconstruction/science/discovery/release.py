@@ -22,7 +22,7 @@ from ...core.ties import BlockQuanta, fixed_policy
 from .diagnostics import BlockDiagnostics
 from .panel import assignment_tie_mask, known_content_key, solution_tie_mask, state_layout, unknown_alleles
 from .panel import state_membership as _state_membership
-from .parameters import EMISSION_FLOOR, DiscoveryParameters, ReleaseRuleParameters
+from .parameters import DiscoveryParameters, ReleaseRuleParameters
 from .search import BlockSearch, SearchSummary
 
 # The symmetric cell band orders no states; name its fixed forward convention for policy audits.
@@ -173,7 +173,6 @@ def _release_kernel(
     partners,
     weights,
 ):
-    floor = EMISSION_FLOOR
     k, length = haplotypes.shape
     probability = np.full((k, length), 0.5, dtype=np.float64)
     supporters = np.zeros((k, length), dtype=np.int64)
@@ -193,17 +192,17 @@ def _release_kernel(
                 g0 = likelihoods[sample, site, 0]
                 g1 = likelihoods[sample, site, 1]
                 g2 = likelihoods[sample, site, 2]
-                cost_cap = -math.log(max(g0, g1, g2, floor)) + 2.0 * penalty
+                cost_cap = -math.log(max(g0, g1, g2)) + 2.0 * penalty
                 if partner == founder:
-                    cost0 = -math.log(max(g0, floor))
-                    cost1 = -math.log(max(g2, floor))
+                    cost0 = -math.log(g0)
+                    cost1 = -math.log(g2)
                 elif partner < k:
                     partner_allele = haplotypes[partner, site]
-                    cost0 = -math.log(max(likelihoods[sample, site, partner_allele], floor))
-                    cost1 = -math.log(max(likelihoods[sample, site, partner_allele + 1], floor))
+                    cost0 = -math.log(likelihoods[sample, site, partner_allele])
+                    cost1 = -math.log(likelihoods[sample, site, partner_allele + 1])
                 else:
-                    cost0 = -math.log(max(g0, g1, floor)) + penalty
-                    cost1 = -math.log(max(g1, g2, floor)) + penalty
+                    cost0 = -math.log(max(g0, g1)) + penalty
+                    cost1 = -math.log(max(g1, g2)) + penalty
                 contribution = min(cost0, cost_cap) - min(cost1, cost_cap)
                 evaluated[founder] += 1
                 if abs(contribution) > cell_tie:

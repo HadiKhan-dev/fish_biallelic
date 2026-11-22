@@ -5,8 +5,9 @@ so one workspace serves every fit of a block search (thousands of starts). Missi
 depth) contribute nothing: zero log emissions, zero unknown-copy cost, and a sample without any
 observed site is forced to the unknown-unknown state.
 
-Per-site costs of a sample s at site l (lambda = unknown_copy_penalty, floor 1e-12):
-* genotype g: -log max(GL[s, l, g], 1e-12) (``log_probs`` holds the logarithm);
+Per-site costs of a sample s at site l (lambda = unknown_copy_penalty), GL the block's mixed likelihoods (the
+run's outlier rate against the cohort law, science.shared.observation, so every GL is positive and no floor applies):
+* genotype g: -log GL[s, l, g] (``log_probs`` holds the logarithm);
 * both copies unknown: the best genotype plus 2 lambda (``cost_ww``), the per-cell cap of the
   H step's costs;
 * one known copy with allele h and one unknown copy: the best genotype in {h, h + 1} plus lambda.
@@ -29,7 +30,7 @@ from numba import prange
 from ....core.concurrency import ThreadSource, thread_count
 from ....core.kernels import kernel
 from ....core.ties import BlockQuanta, block_scale, fixed_policy
-from ..parameters import EMISSION_FLOOR, FixedKModelParameters
+from ..parameters import FixedKModelParameters
 
 # Cache bounds by entry count (one block's search stays far below them).
 FIT_CACHE_ENTRIES = 4096
@@ -67,12 +68,11 @@ _PATTERN_INITIAL_SLOTS = 64
     nogil=True,
 )
 def _observed_log_emissions(likelihoods, observed, penalty):
-    """log max(GL, 1e-12) at observed cells (0 elsewhere) and the unknown-unknown cost per cell
-    (0 at unobserved cells)."""
+    """log GL at observed cells (0 elsewhere) and the unknown-unknown cost per cell (0 at unobserved cells). GL are
+    the block's mixed likelihoods (module docstring): positive."""
     n, length, _ = likelihoods.shape
     log_probs = np.empty((n, length, 3), dtype=np.float64)
     cost_ww = np.empty((n, length), dtype=np.float64)
-    floor = EMISSION_FLOOR
     for s in prange(n):
         for l in range(length):
             if not observed[s, l]:
@@ -83,10 +83,7 @@ def _observed_log_emissions(likelihoods, observed, penalty):
                 continue
             maximum = -math.inf
             for genotype in range(3):
-                value = likelihoods[s, l, genotype]
-                if value < floor:
-                    value = floor
-                log_value = math.log(value)
+                log_value = math.log(likelihoods[s, l, genotype])
                 log_probs[s, l, genotype] = log_value
                 if log_value > maximum:
                     maximum = log_value

@@ -13,6 +13,7 @@ from ...contracts.roles import record_field
 from ...core.concurrency import ThreadSource
 from ...core.errors import InvariantError
 from ...core.progress import Progress
+from ..shared.observation import mix_likelihoods
 from ...core.ties import inverse_permutation, run_sample_order
 from .diagnostics import BlockDiagnostics
 from .panel import FixedKSolution, restricted
@@ -27,7 +28,8 @@ class BlockEvidence:
 
     block, site_start: block index and its first contig site; positions: int64[L];
     kept: bool[L] discovery sites; likelihoods: float64[N, L, 3] normalised GLs (zero depth
-    exactly 1/3); observed: bool[N, L] positive depth (False for excluded samples).
+    exactly 1/3); observed: bool[N, L] positive depth (False for excluded samples);
+    cohort: float64[L, 3] the sites' cohort genotype frequencies (science.shared.cohort), the outlier law.
     sample_ids: the samples' names: the search runs in the run's canonical
     sample order (core.ties.run_sample_order), so its result does not depend on the input order.
     None means the evidence is already in canonical order.
@@ -43,6 +45,9 @@ class BlockEvidence:
     observed: np.ndarray | PairArray = record_field("obs", axes=("N", "L"), units="flag", dtype="bool")
     sample_ids: tuple[str, ...] | None = record_field(
         "obs", axes=("N",), units="identity", dtype="tuple[str]|None", default=None
+    )
+    cohort: np.ndarray | None = record_field(
+        "state", axes=("L", "3"), units="probability", dtype="float64", default=None
     )
 
     @property
@@ -62,6 +67,7 @@ def block_evidence(evidence: ContigEvidence, block: int) -> BlockEvidence:
         likelihoods=slice_likelihoods(evidence.likelihoods, start, stop),
         observed=slice_observed(evidence.observed, start, stop),
         sample_ids=tuple(evidence.sample_ids),
+        cohort=None if evidence.cohort_frequencies is None else evidence.cohort_frequencies[start:stop],
     )
 
 
@@ -127,6 +133,7 @@ def discover_block(
     evidence: BlockEvidence,
     config: DiscoveryParameters,
     *,
+    outlier_rate: float,
     reverse: bool = False,
     keep: tuple[str, ...] = (),
     diagnostics: BlockDiagnostics | None = None,
@@ -141,6 +148,10 @@ def discover_block(
     ``map_work`` is ordered, with one native thread per concurrent cavity candidate. ``progress``: the block's
     partial-progress capability (core.progress): its search snapshots its state at expansion boundaries
     (search.SearchState.run) and a resumed block continues from the saved one.
+    ``outlier_rate``: the run's genotype outlier rate before the calibration barrier (``outlier_rate_blocks``); the
+    search and the release score every genotype law against the block's mixed likelihoods (science.shared.observation),
+    so a discordant cell costs at most about -log(eps B). 0 scores the likelihoods themselves. The likelihoods are
+    read at face value (no evidence scale: the owner's decision of 16 November 2026, docs/methods/observation.md).
     """
     if not evidence.informative:
         return None
@@ -149,6 +160,10 @@ def discover_block(
         if isinstance(evidence.likelihoods, np.ndarray)
         else gather_likelihoods(evidence.likelihoods, slice(None))
     )
+    if outlier_rate > 0.0:
+        if evidence.cohort is None:
+            raise InvariantError("a block scored with outliers needs its sites' cohort genotype frequencies")
+        likelihoods = mix_likelihoods(likelihoods, evidence.cohort, outlier_rate)
     kept = evidence.kept
     observed = dense_observed(evidence.observed)
     result = search_block(

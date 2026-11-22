@@ -67,6 +67,11 @@ class ContigEvidence:
     discovery_sites: NDArray[np.bool_] = record_field("state", axes=("L",), units="1", dtype="bool")
     founder_excluded: NDArray[np.bool_] = record_field("state", axes=("N",), units="1", dtype="bool")
     block_spans: NDArray[np.int64] = record_field("state", axes=("B", "2"), units="site", dtype="int64")
+    cohort_frequencies: NDArray[np.float64] | None = record_field(
+        "state", axes=("L", "3"), units="probability", dtype="float64", default=None, kw_only=True
+    )
+    """Per-site cohort genotype frequencies (science.shared.cohort), computed once by the evidence stage: the outlier law
+    of every stage's observation model (science.shared.observation). None only on records built outside the stage."""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sample_ids", tuple(map(str, self.sample_ids)))
@@ -83,6 +88,8 @@ class ContigEvidence:
         if spans.ndim != 2 or spans.shape[1] != 2:
             spans = spans.reshape(-1, 2)
         object.__setattr__(self, "block_spans", frozen_array(spans, np.int64))
+        if self.cohort_frequencies is not None:
+            object.__setattr__(self, "cohort_frequencies", frozen_array(self.cohort_frequencies, np.float64))
 
     @property
     def n_samples(self) -> int:

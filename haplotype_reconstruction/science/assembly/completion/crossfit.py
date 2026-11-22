@@ -37,7 +37,8 @@ from haplotype_reconstruction.core.errors import InvariantError
 
 from ..alleles import site_posterior
 from . import dosage_statistics, support
-from .observation import UNIFORM_TOLERANCE, carrier_probability, normalised_evidence, row_classes, unordered_pairs
+from .observation import UNIFORM_TOLERANCE, carrier_probability, centred_evidence, row_classes, unordered_pairs
+from ...shared.emissions import CENTRED_FLOOR
 from .parameters import CrossFitParameters
 
 
@@ -128,11 +129,9 @@ def content_fold_plan(observed: np.ndarray, seed: int, depth_keys=None) -> FoldP
 
 
 def _log_emission(evidence, observed, config):
-    """float64[N, L, 3] robust log emissions max(log((1 - mix) P + mix/3), floor), 0 where unobserved."""
-    robust = (1.0 - config.uniform_mix) * normalised_evidence(evidence) + config.uniform_mix / 3.0
-    with np.errstate(divide="ignore"):
-        log_emission = np.log(robust)
-    np.maximum(log_emission, config.log_floor, out=log_emission)
+    """float64[N, L, 3] robust log emissions max(log L~, CENTRED_FLOOR) of the centred view, 0 where unobserved."""
+    log_emission = np.log(centred_evidence(evidence))
+    np.maximum(log_emission, CENTRED_FLOOR, out=log_emission)
     log_emission[~observed] = 0.0
     return log_emission
 
@@ -364,7 +363,7 @@ def crossfit_block(
     informative_count = np.zeros(evidence.shape[0], dtype=np.int64)
     counts: np.ndarray = np.zeros(len(site_posterior.SUMMARY_FIELDS), dtype=np.int64)
     guard_skipped = 0
-    informative = np.any(observed & (np.ptp(normalised_evidence(evidence), axis=2) > UNIFORM_TOLERANCE), axis=1)
+    informative = np.any(observed & (np.ptp(centred_evidence(evidence), axis=2) > UNIFORM_TOLERANCE), axis=1)
     absent_training = []
     for fold in (0, 1):
         heldout = np.flatnonzero(folds == fold)

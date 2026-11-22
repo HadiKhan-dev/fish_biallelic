@@ -13,6 +13,14 @@ depth = 5.0
 cohorts = [40, 80, 160]
 founders = {left = 3, right = 3}
 
+[simulation.reads]
+# Short paired-end reads: 150 bp mates of ~375 bp fragments, so neighbouring sites share reads; 1 % of reads at a
+# homozygous site show the other allele.
+read_length_bp = 150
+fragment_mean_bp = 375.0
+fragment_sd_bp = 150.0
+error_rate = 0.01
+
 [simulation.genome]
 contigs = ["c1", "c2"]
 length_bp = 1000000

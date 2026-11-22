@@ -10,7 +10,8 @@ import numpy as np
 from ...core.errors import InvariantError
 from ...core.numerics import ordered_sum
 from . import m1
-from .parameters import SELECTIVE_FRONTIER_ULPS, SELECTIVE_SUM_ULPS, PedigreeParameters
+from .numerical_parameters import SELECTIVE_FRONTIER_ULPS, SELECTIVE_SUM_ULPS
+from .parameters import PedigreeParameters
 
 
 class SearchCounts(TypedDict):
@@ -56,6 +57,7 @@ def search_batch(
     markers: np.ndarray,
     config: PedigreeParameters,
     score: Callable[[np.ndarray], np.ndarray],
+    units: np.ndarray | None = None,
 ) -> SearchBatch:
     """Certify B, the complete genome gate and all b in bulk exact-query phases.
 
@@ -73,7 +75,8 @@ def search_batch(
     cutoff = best.copy()
     local = np.full((contigs, batch), -np.inf)
     total_upper = outward_sum(upper)
-    shift = m1.LOG_FLOOR * float(m1.temperature(np.sum(markers), config))
+    # the genome floor's band: T of the whole genome (B2: the summed effective units; m1.temperature)
+    shift = m1.LOG_FLOOR * float(m1.temperature(np.sum(markers), config, None if units is None else np.sum(units)))
     counts = dict(global_queries=0, local_max_queries=0, rounds=0)
 
     def query(mask, kind):
@@ -154,7 +157,7 @@ def search_batch(
                 missing = parents[~known[j, c, parents]]
                 if not np.all(upper[j, c, missing] < local[j, c]):
                     raise InvariantError("selected M1 local maximum is not certified")
-    temp = m1.temperature(markers, config)
+    temp = m1.temperature(markers, config, units)
     floors = np.full_like(local, -np.inf)
     for c in range(batch):
         if np.isfinite(best[c]):

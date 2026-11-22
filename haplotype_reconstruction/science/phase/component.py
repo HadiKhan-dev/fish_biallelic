@@ -35,6 +35,7 @@ from ..painting.api import (
     binned_emissions,
     design_effect,
     gather_sites,
+    mix_window,
     state_alt_probabilities,
     unpack_emissions,
 )
@@ -99,6 +100,9 @@ class PhaseWorkspace:
     release_batch: int | None = record_field(
         "diagnostic", units="samples", dtype="int | None", stored=False, default=None
     )
+    apply_read_state: Callable[[int, np.ndarray], None] | None = record_field(
+        "diagnostic", units="1", dtype="Callable[[int, np.ndarray], None] | None", stored=False, default=None
+    )
 
 
 def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False, windowed: bool = False) -> np.ndarray:
@@ -120,6 +124,7 @@ def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False
     if windowed:
         return _windowed_emissions(inputs, selected, probabilities).reshape(samples, states, states, -1)
     gl, observed = gather_sites(inputs.observations.likelihoods, inputs.observations.observed, selected)
+    gl = mix_window(gl, inputs.observations.cohort_frequencies[selected], painted.robustness_epsilon)
     emissions = binned_emissions(
         gl,
         observed,
@@ -127,7 +132,6 @@ def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False
         painted.states.background_frequency,
         painted.bins.starts,
         painted.bins.stops,
-        robustness_epsilon=painted.robustness_epsilon,
         log_floor=painted.emission_log_floor,
     )
     emissions /= design_effect(
@@ -157,6 +161,7 @@ def _windowed_emissions(inputs: PhaseComponentInputs, selected: np.ndarray, prob
             gl, observed = gather_sites(
                 inputs.observations.likelihoods, inputs.observations.observed, selected[left:right], slice(n, n + 1)
             )
+            gl = mix_window(gl, inputs.observations.cohort_frequencies[selected[left:right]], painted.robustness_epsilon)
             raw = binned_emissions(
                 gl,
                 observed,
@@ -164,7 +169,6 @@ def _windowed_emissions(inputs: PhaseComponentInputs, selected: np.ndarray, prob
                 background[left:right],
                 starts[first:last] - left,
                 stops[first:last] - left,
-                robustness_epsilon=painted.robustness_epsilon,
                 log_floor=painted.emission_log_floor,
             )
             raw /= design_effect(
@@ -249,14 +253,16 @@ def _release_sites(inputs, bin_edges, bins):
     return indices, site_bins[indices], alleles[:, columns[indices]]
 
 
-def _uncertainty(model, inputs, site_bins, site_alleles, site_gl, map_work=None):
+def _uncertainty(model, inputs, site_bins, site_alleles, site_gl, site_cohort, map_work=None):
     """Allele uncertainty with fixed chunk and carrier addition order (FP14).
 
     ``map_work`` runs the fixed chunks concurrently.
     """
     epsilon = inputs.painting.robustness_epsilon
     excluded = inputs.observations.excluded
-    evidence = allele_evidence(model.X, site_bins, site_alleles, site_gl, excluded, epsilon, map_work=map_work)
+    evidence = allele_evidence(
+        model.X, site_bins, site_alleles, site_gl, excluded, epsilon, site_cohort, map_work=map_work
+    )
     prior = allele_prior(inputs.refit.prior_ones, inputs.refit.prior_called)
     return AlleleUncertainty(evidence, flip_probabilities(evidence, site_alleles, prior), prior)
 
@@ -345,7 +351,7 @@ def _release_work(jobs, workspace):
 
 def _release_arguments(model, inputs, sites, breaks, uncertainty, parameters, workspace):
     """Every sample's release inputs from one fixed solve, in run order."""
-    site_bins, alleles, site_gl = sites
+    site_bins, alleles, site_gl, site_cohort = sites
     break_bins, tie_cuts = breaks
     # The solve's window copies of its alleles and flips, made once and shared by all its samples.
     shared = shared_windows(site_bins, alleles, uncertainty.flips) if workspace.windowed else None
@@ -356,6 +362,7 @@ def _release_arguments(model, inputs, sites, breaks, uncertainty, parameters, wo
             site_bins,
             alleles,
             site_gl[sample],
+            site_cohort,
             break_bins[sample],
             tie_cuts[sample],
             uncertainty.evidence,
@@ -391,19 +398,19 @@ def phase_component(
 
 
 def _phase_component(inputs, parameters, workspace):
-    if workspace.memo is None:
+    rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
+
+    def solve():
         emissions = component_emissions(inputs, windowed=workspace.windowed)
-        rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
-        models, parents = _solve_models(inputs, parameters, emissions, rates, workspace.map_work, workspace.concurrent)
+        if workspace.apply_read_state is not None:
+            workspace.apply_read_state(inputs.component, emissions)
+        return _solve_models(inputs, parameters, emissions, rates, workspace.map_work, workspace.concurrent)
+
+    if workspace.memo is None:
+        models, parents = solve()
     else:
-        rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
-
-        def solve():
-            emissions = component_emissions(inputs, windowed=workspace.windowed)
-            return _solve_models(inputs, parameters, emissions, rates, workspace.map_work, workspace.concurrent)
-
         models, parents = workspace.memo((inputs.component, "solve"), solve)
-        emissions = models[0].E
+    emissions = models[0].E
     model, mirror = models
     bin_edges = component_bin_edges(inputs.painting, inputs.refit.positions)
     junctions, withheld, pairing, break_bins, tie_cuts = _forced_breaks(inputs, models, parents, bin_edges)
@@ -413,15 +420,18 @@ def _phase_component(inputs, parameters, workspace):
         if workspace.prepare_likelihoods is None
         else workspace.prepare_likelihoods(inputs.observations, site_indices, site_bins)
     )
+    # The released sites' cohort genotype frequencies: the outlier law of the release's site model (A12).
+    site_cohort = np.ascontiguousarray(inputs.observations.cohort_frequencies[site_indices], dtype=np.float64)
     # Each solve's fixed evidence chunks run concurrently; chunk boundaries, not the worker count, fix the sums.
     chunks = workspace.map_work
     uncertainty = tuple(
-        _uncertainty(solved, inputs, site_bins, site_alleles, site_gl, map_work=chunks) for solved in models
+        _uncertainty(solved, inputs, site_bins, site_alleles, site_gl, site_cohort, map_work=chunks)
+        for solved in models
     )
     releases = _sample_releases(
         models,
         inputs,
-        (site_bins, site_alleles, site_gl),
+        (site_bins, site_alleles, site_gl, site_cohort),
         (break_bins, tie_cuts),
         uncertainty,
         parameters,
@@ -445,6 +455,7 @@ def _phase_component(inputs, parameters, workspace):
         rates.theta_m,
         starts,
         parameters.phase_posterior,
+        map_work=workspace.map_work or map,
     )
     result = PhaseComponentResult(
         cast(
@@ -559,16 +570,21 @@ def phase_contig(
         pairing_rows.append(pairing_row)
         ties = tie_break_bins((painted,), component.observations.positions, state.parents, bin_edges)
         indices = lo + state.result.site_indices
-        for sample, agreed in enumerate(state.result.agreed):
+
+        def write_sample(sample, state=state, ties=ties, indices=indices, lo=lo):
+            agreed = state.result.agreed[sample]
             tie_bins = ties[sample]
             joins = set(state.withheld.get(sample, ()))
-            tie_breaks += len(tie_bins)
-            withheld_joins += len(joins - tie_bins)
             a, b = state.result.releases[0][sample], state.result.releases[1][sample]
-            tie_breaks -= len(set(state.tie_cuts[sample]) - set(a.set_breaks) - set(b.set_breaks))
+            bridged_ties = set(state.tie_cuts[sample]) - set(a.set_breaks) - set(b.set_breaks)
             calls[sample, indices] = agreed.calls
             undetermined[sample, indices] = np.where(agreed.undetermined, 3, 0)
             breaks[sample].extend(lo + int(state.result.site_indices[i]) - 1 for i in agreed.set_starts)
+            return len(tie_bins) - len(bridged_ties), len(joins - tie_bins)
+
+        for sample_ties, sample_joins in (workspace.map_work or map)(write_sample, range(n)):
+            tie_breaks += sample_ties
+            withheld_joins += sample_joins
         chain_parts.append((index, state.result.chains))
     sizes = np.asarray([len(e) - 1 for e in all_edges], dtype=np.int64)
     offsets = np.r_[0, np.cumsum(sizes)].astype(np.int64)
@@ -582,15 +598,22 @@ def phase_contig(
             chain_source[row, left:right] = chain.source
             chain_support[row, left:right] = chain.support
             chain_reset[row, left:right] = chain.reset
-    called = phased = unphased = sets = 0
-    for sample in range(n):
+    def sample_counts(sample):
         row = calls[sample]
         het = (row[:, 0] >= 0) & (row[:, 1] >= 0) & (row[:, 0] != row[:, 1])
         und = het & (undetermined[sample] > 0)
-        called += int(np.sum(row >= 0))
-        phased += int(np.sum(het & ~und))
-        unphased += int(np.sum(und))
-        sets += phase_set_count((het & ~und)[None, :], component_ids, [breaks[sample]])
+        phased = het & ~und
+        return (
+            int(np.sum(row >= 0)), int(np.sum(phased)), int(np.sum(und)),
+            phase_set_count(phased[None, :], component_ids, [breaks[sample]]),
+        )
+
+    called = phased = unphased = sets = 0
+    for c, p, u, count in (workspace.map_work or map)(sample_counts, range(n)):
+        called += c
+        phased += p
+        unphased += u
+        sets += count
     cover, cover_offsets = coverage(tuple(c.painting for c in inputs), positions, n)
     diagnostics = PhaseDiagnostics(
         tuple(histories),

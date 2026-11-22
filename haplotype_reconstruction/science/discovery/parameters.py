@@ -632,7 +632,6 @@ class DiscoveryParameters:
 
 
 # Numerical probability bounds and rounding allowances.
-EMISSION_FLOOR = 1e-12  # Minimum fixed-K emission probability before logarithms.
 RESIDUAL_GEOMETRY_SLACK = 1e-12  # Fractional slack for residual geometry boundary comparisons.
 SIGMOID_SATURATION = 37.0  # Logit where exp(-x) is below 2**-53.
 LOG_ODDS_MAX = math.log((1.0 - np.finfo(np.float64).eps) / np.finfo(np.float64).eps)  # Maximum residual log odds (nats), finite at one minus float64 epsilon.
@@ -668,7 +667,6 @@ __all__ = [
     "ResidualBirthParameters",
     "ReleaseRuleParameters",
     "SearchParameters",
-    "EMISSION_FLOOR",
     "RESIDUAL_GEOMETRY_SLACK",
     "SIGMOID_SATURATION",
     "LOG_ODDS_MAX",

@@ -58,7 +58,7 @@ from numba import prange
 
 from haplotype_reconstruction.core.kernels import kernel
 
-from .emissions import normalised_likelihoods, predictive_likelihood, robust_log_likelihood
+from .emissions import centred_likelihoods, predictive_likelihood, robust_log_likelihood
 from .overloads import overloads_for
 
 # Field indices of a window's meta array.
@@ -97,17 +97,18 @@ def informative_at(ev, kept, s, f):
     """Forward site f carries evidence for sample s: an objective site where its likelihoods are informative."""
     if not kept[f]:
         return False
-    informative, _, _, _ = normalised_likelihoods(ev[s, f, 0], ev[s, f, 1], ev[s, f, 2])
+    informative, _, _, _ = centred_likelihoods(ev[s, f, 0], ev[s, f, 1], ev[s, f, 2])
     return informative
 
 
 @kernel(overloads=overloads_for(__name__, "site_values"), inline="always", nogil=True)
 def site_values(ev, kept, partial, s, f, e):
-    """e[0..6] = the uncentred robust log evidence of the seven pair codes of sample s at forward site f
+    """e[0..6] = the robust log evidence of the seven pair codes of sample s at forward site f (centred view,
+    science.shared.emissions; read relative to CENTER = 0)
     (codes 3-6 only at partial sites); returns False (e untouched) where the site is skipped."""
     if not kept[f]:
         return False
-    informative, p0, p1, p2 = normalised_likelihoods(ev[s, f, 0], ev[s, f, 1], ev[s, f, 2])
+    informative, p0, p1, p2 = centred_likelihoods(ev[s, f, 0], ev[s, f, 1], ev[s, f, 2])
     if not informative:
         return False
     e[0] = robust_log_likelihood(predictive_likelihood(p0, p1, p2, 0))
@@ -267,8 +268,9 @@ def _fill_logs(ev, kept, partial, logs, plogs, pmap, base, s0, s1, c0, c1):
                 logs[r, k, 2] = 0.0
                 continue
             x0, x1, x2 = ev[s, f, 0], ev[s, f, 1], ev[s, f, 2]
-            if not (x0 == x0 and x1 == x1 and x2 == x2 and x0 < 2.0 and x1 < 2.0 and x2 < 2.0):
-                # outside the memo's domain (not a normalised likelihood): computed alone
+            if not (x0 == x0 and x1 == x1 and x2 == x2 and x0 < 1.0e6 and x1 < 1.0e6 and x2 < 1.0e6):
+                # outside the memo's domain (a centred likelihood is at most 1 / min q, far below 1e6, so the
+                # slot hash stays in int64): computed alone
                 informative = site_values(ev, kept, partial, s, f, v)
                 for c in range(7):
                     values_row = v[c] if informative else 0.0
@@ -279,7 +281,7 @@ def _fill_logs(ev, kept, partial, logs, plogs, pmap, base, s0, s1, c0, c1):
                 continue
             h = _memo_slot(x0, x1, x2)
             if not (used[h] and keys[h, 0] == x0 and keys[h, 1] == x1 and keys[h, 2] == x2):
-                informative, p0, p1, p2 = normalised_likelihoods(x0, x1, x2)
+                informative, p0, p1, p2 = centred_likelihoods(x0, x1, x2)
                 if informative:
                     for c in range(7):
                         values[h, c] = robust_log_likelihood(predictive_likelihood(p0, p1, p2, c))

@@ -20,13 +20,12 @@ from ...core.concurrency import ThreadSource
 from ...core.errors import InputError
 from ..shared.material import partition_coordinates
 from .ancestry import apply_sources, composition, fit_sources, source_warnings
-from .frequency import allele_frequency
-from .parameters import AlleleFrequencyParameters, FamilyParameters
+from ..shared.observation import mix_likelihoods
+from .parameters import FamilyParameters
 from .search import FamilyFit, fit
 from .terms import family_terms, scaled_likelihoods
 
 _DEFAULT_FAMILY = FamilyParameters()
-_DEFAULT_FREQUENCY = AlleleFrequencyParameters()
 
 __all__ = [
     "ContigTerms",
@@ -55,6 +54,18 @@ class Evidence(Protocol):
     @property
     def observed(self) -> np.ndarray | PairArray: ...
 
+    @property
+    def cohort_frequencies(self) -> np.ndarray | None: ...
+
+    @property
+    def read_sharing_range(self) -> int: ...
+
+    @property
+    def read_sharing_status(self) -> str: ...
+
+    @property
+    def read_sharing_reach(self) -> int: ...
+
 
 @dataclass(frozen=True)
 class ContigTerms:
@@ -78,6 +89,9 @@ class ContigTerms:
     ancestry_child: np.ndarray | None = None
     ancestry_posterior: np.ndarray | None = None
     ancestry_emission: np.ndarray | None = None  # [N, M, 3]: each ancestry state's probability of the reads
+    # B3's record (ADVICE2 17.3): the evidence's read-sharing status and the reach (bp) of the curve its consumers read
+    read_sharing_status: str = ""
+    read_sharing_reach_bp: int = 0
 
 
 @dataclass(frozen=True)
@@ -111,16 +125,35 @@ class FamilyTerms:
     ancestry_composition: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
 
 
+def spaced_sites(sites: np.ndarray, positions: np.ndarray, reach_bp: int) -> np.ndarray:
+    """``sites`` (ascending indices) without every site closer than ``reach_bp`` to the previous kept one."""
+    if reach_bp <= 0 or len(sites) < 2:
+        return sites
+    keep = np.ones(len(sites), dtype=bool)
+    last = positions[sites[0]]
+    for i in range(1, len(sites)):
+        if positions[sites[i]] - last < reach_bp:
+            keep[i] = False
+        else:
+            last = positions[sites[i]]
+    return sites[keep]
+
+
 def contig_terms(
     evidence: Evidence,
     genetic_map: ChromosomeGeneticMap,
     family_parameters: FamilyParameters,
-    frequency_parameters: AlleleFrequencyParameters = _DEFAULT_FREQUENCY,
     *,
-    map_work=map,
+    outlier_rate: float,
 ) -> ContigTerms:
     """Return C[N,M,9], logpi[M,3], logpost[N,M,3] and the family sites' working-map coordinates; mutate nothing.
-    ``map_work`` (ordered, optional): the allele frequencies' site windows concurrently."""
+
+    The ALT allele frequency of a site is that of its cohort genotype frequencies q (stored with the evidence),
+    p = q1 / 2 + q2: the EM's pseudo-counts keep it inside (0, 1), so no clip is needed. A latent parent's genotype
+    prior stays Hardy-Weinberg at p (a genetic prior, distinct from the observation model's outlier law q, which has no
+    Hardy-Weinberg assumption). The family sites' likelihoods
+    are the mixed likelihoods of the observation model at ``outlier_rate`` (the run's rate before the calibration
+    barrier, science.shared.observation): every transmission law of a child term scores (1 - eps) P + eps B."""
     gl, observed, positions = evidence.likelihoods, evidence.observed, evidence.positions
     if not len(positions):
         n = len(evidence.sample_ids)
@@ -128,17 +161,27 @@ def contig_terms(
             np.empty((n, 0, 9)), np.empty((0, 3)), np.empty((n, 0, 3)), np.empty(0), np.empty(0),
             np.empty((n, 0, 3), dtype=np.float32), np.empty((n, 0), dtype=np.bool_),
         )
-    p = allele_frequency(gl, observed, frequency_parameters, map_work=map_work)
+    cohort = evidence.cohort_frequencies
+    if cohort is None:
+        raise InputError("relatedness needs the evidence's cohort genotype frequencies")
+    p = 0.5 * cohort[:, 1] + cohort[:, 2]
     keep = (np.minimum(p, 1 - p) >= family_parameters.minor_allele_frequency) & (
         observed.mean(axis=0) >= family_parameters.minimum_observed
     )
-    sites = np.flatnonzero(keep)[:: family_parameters.family_site_step]
-    site_likelihoods, site_observed = gather_likelihoods(gl, sites), np.asarray(observed[:, sites], dtype=np.bool_)
+    # The stride is a compute budget, not a dependence estimate (a named exception). Kept sites closer than the contig's
+    # resolved read-sharing range would share reads, so of two such sites the later is dropped (4.21, B3); an
+    # unresolved range arrives as 0 and the stride stays alone (ADVICE2 14.1 item 4).
+    sites = spaced_sites(np.flatnonzero(keep)[:: family_parameters.family_site_step], positions,
+                         int(evidence.read_sharing_range))
+    site_likelihoods = mix_likelihoods(gather_likelihoods(gl, sites), cohort[sites], outlier_rate)
+    site_observed = np.asarray(observed[:, sites], dtype=np.bool_)
     child, prior, post = family_terms(site_likelihoods, site_observed, p[sites], family_parameters)
     site_positions = np.asarray(positions[sites], dtype=np.float64)
     coordinates = np.asarray(genetic_map.cumulative_morgans(site_positions), dtype=np.float64).reshape(-1)
     scaled = scaled_likelihoods(site_likelihoods, site_observed, family_parameters).astype(np.float32)
-    return ContigTerms(child, prior, post, coordinates, site_positions, scaled, site_observed)
+    return ContigTerms(child, prior, post, coordinates, site_positions, scaled, site_observed,
+                       read_sharing_status=str(evidence.read_sharing_status),
+                       read_sharing_reach_bp=int(evidence.read_sharing_reach))
 
 
 def support_axis(

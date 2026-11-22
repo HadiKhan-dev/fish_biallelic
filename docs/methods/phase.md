@@ -7,7 +7,7 @@ The sections below identify semantic units, not separately configurable pipeline
 <a id="fp01"></a>
 ## fp01 Component model inputs: bins, labels and tempered pair emissions (cache or recompute)
 
-Build symmetric pair emissions using the painting record’s estimated robustness_epsilon and its floor and calibrated transition site correlation. Use its packed cache or recompute the same binned emissions and design effect, including empty-information bins. Require painting/pedigree sample alignment. Both solves share these immutable pre-refit emissions; later allele refit does not change this ancestry objective.
+Build symmetric pair emissions using the painting record’s estimated robustness_epsilon and its floor and calibrated transition site correlation. Use its packed cache or recompute the same binned emissions and design effect, including empty-information bins. Require painting/pedigree sample alignment. Both solves share these immutable pre-refit emissions; later allele refit does not change this ancestry objective. For samples sharing reads, the confidence-weighted painting matrices supply a [class-message projection](./family_phase.md#read-class-evidence) to the bin emissions.
 
 Implementation: [contracts/phase.py](../../haplotype_reconstruction/contracts/phase.py), [science/painting/emissions.py](../../haplotype_reconstruction/science/painting/emissions.py), [science/phase/component.py](../../haplotype_reconstruction/science/phase/component.py), [stages/phase/tasks.py](../../haplotype_reconstruction/stages/phase/tasks.py), [science/phase/painting_inputs.py](../../haplotype_reconstruction/science/phase/painting_inputs.py), [stages/phase/records.py](../../haplotype_reconstruction/stages/phase/records.py).
 
@@ -157,7 +157,7 @@ Form the chromosome-wide allele prior from all called refit cells. Accumulate ro
 
 Implementation: [science/phase/allele_evidence.py](../../haplotype_reconstruction/science/phase/allele_evidence.py).
 
-Parameters by name: `FLIP_NEGLIGIBLE`, `FLIP_CEILING`, `PRIOR_BOUNDS`, `EVIDENCE_CHUNK`, `clip`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `FLIP_NEGLIGIBLE`, `FLIP_CEILING`, `PRIOR_BOUNDS`, `EVIDENCE_CHUNK`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N m); O(m); O(S m). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -180,7 +180,7 @@ Mix known label-pair mass with per-copy allele uncertainty and the site-deviatio
 
 Implementation: [science/phase/kernels.py](../../haplotype_reconstruction/science/phase/kernels.py), [science/phase/release_kernels.py](../../haplotype_reconstruction/science/phase/release_kernels.py).
 
-Parameters by name: `site_deviation`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name:. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(m S^2); O(m (4 + 4F + F^2)); O(K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -198,22 +198,22 @@ Cost and scope: O(m). These terms describe the unit’s work/storage dimensions;
 <a id="fp18"></a>
 ## fp18 Gauge-sample anchor partitions and orientation-certainty set ends
 
-For an unlinked sample without child tracks, partition at hard cuts and choose the first confident heterozygous anchor in each interval. Anchor by strict label order and recompute the conditional posterior. End the set at the first later sufficiently heterozygous bin losing orientation certainty; NaN certainty does not trigger that stop. Include pre-anchor bins in the anchored partition and compute orientation medians over whole bins. A partition without an anchor releases no phase.
+For an unlinked sample without child tracks, partition at hard cuts and choose the first confident heterozygous anchor in each interval. Anchor by strict label order and recompute the conditional posterior. End the set at the first later sufficiently heterozygous bin losing orientation certainty; NaN certainty does not trigger that stop. Include pre-anchor bins in the anchored partition and compute orientation medians over whole bins. The orientation certainty uses the set statistic's own site model, a departure `set_site_deviation` against a uniform genotype, rather than the run's outlier rate: under that rate a fully determined common heterozygote caps below `set_posterior`, and every heterozygous bin ended a set on real data. The parameters refuse a `set_posterior` at or above the ceiling (1 − 5d/6)/(1 − 2d/3). A partition without an anchor releases no phase. After each anchor, forward lookahead starts at one bin and doubles after a piece passes the continuation test, up to the bounded work per piece. Each bin uses the same posterior recursion.
 
 Implementation: [science/phase/release.py](../../haplotype_reconstruction/science/phase/release.py).
 
-Parameters by name: `phase_posterior`, `genotype_posterior`, `set_posterior`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `phase_posterior`, `genotype_posterior`, `set_posterior`, `set_site_deviation`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(m_partition S^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="fp19"></a>
 ## fp19 Children-anchored painting-tie gate (B)
 
-For an unlinked sample with children, inspect finite orientation bins immediately before and at/after each tie-only cut. Bridge only when both sides reach the set-posterior threshold. Each solve decides separately and agreement keeps any break either retains. Linked samples and gauge-only samples do not use this gate.
+For an unlinked sample with children, inspect finite orientation bins immediately before and at/after each tie-only cut. Bridge only when both sides reach the set-posterior threshold, with the same set statistic as fp18. Each solve decides separately and agreement keeps any break either retains. Linked samples and gauge-only samples do not use this gate.
 
 Implementation: [science/phase/release.py](../../haplotype_reconstruction/science/phase/release.py).
 
-Parameters by name: `set_posterior`, `genotype_posterior`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `set_posterior`, `set_site_deviation`, `genotype_posterior`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(m S^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

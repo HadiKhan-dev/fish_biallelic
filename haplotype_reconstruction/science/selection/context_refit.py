@@ -79,7 +79,6 @@ def _code_probability(code, background):
             types.Array(types.boolean, 2, "C", readonly=False),
             types.Array(types.int64, 1, "C", readonly=frozen),
             types.Array(types.int64, 1, "C", readonly=frozen),
-            types.float64,
         )
         for frozen in (False, True)
     ),
@@ -87,9 +86,11 @@ def _code_probability(code, background):
     parallel=True,
     nogil=True,
 )
-def _emission_grid(h, gl, observed, starts, stops, mix):
+def _emission_grid(h, gl, observed, starts, stops):
     """Per sample and bin, the summed log emission of every copy-state pair (sites added in
-    ascending order); the per-site background ALT frequency (1 + called ALT) / (2 + called)."""
+    ascending order); the per-site background ALT frequency (1 + called ALT) / (2 + called). ``gl`` are the
+    component's mixed likelihoods (the run's outlier rate against the cohort law, science.shared.observation), so a
+    copy-state pair's site term is log[(1 - eps) P + eps B] up to the cell's own constant (the row's sum)."""
     n, length, _ = gl.shape
     k = len(h)
     s = k + 1
@@ -137,7 +138,7 @@ def _emission_grid(h, gl, observed, starts, stops, mix):
                         p1 = 0.0
                         p2 = qi
                     likelihood = (e[0] * p0 + e[1] * p1 + e[2] * p2) / total if total > 0 else 1 / 3
-                    terms[site - start, term] = np.log((1 - mix) * likelihood + mix / 3)
+                    terms[site - start, term] = np.log(likelihood)
             for i in range(s):
                 for j in range(i, s):
                     value = 0.0
@@ -410,7 +411,7 @@ def refit_component(
     1/2 (diagnostics only). ``claim_threads``: the caller's kernel boundary, called before each kernel (the caller's
     CPU share is re-read there; results do not depend on it)."""
     claim_threads()
-    cavity, background = _emission_grid(h, gl, observed, starts, stops, float(config.emission_mix))
+    cavity, background = _emission_grid(h, gl, observed, starts, stops)
     claim_threads()
     slots = _carrier_weights(cavity, intervals_morgans, float(rate), float(unknown_mass), BACKGROUND_COUNT_BAND)
     if census_key is not None and census_enabled(census_sink):

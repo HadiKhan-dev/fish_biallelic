@@ -11,14 +11,15 @@ from ...core.errors import InputError
 from ...engine.cpu import thread_team
 from ...science.pedigree import family_transmission as science
 from ...science.pedigree import junctions
-from ...science.pedigree.parameters import TRANSMISSION_SWITCH_FLOOR, PedigreeParameters
+from ...science.pedigree.numerical_parameters import TRANSMISSION_SWITCH_FLOOR
+from ...science.pedigree.parameters import PedigreeParameters
 from ..framework import RecordKey, ResourceRequest, Task, TaskKey
 
 PREPARED = "pedigree/prepared"
 
 
 def _mapper(width: int):
-    """The vote's map factory (science.family_transmission.Mapper): map(function, items) -> list in input order, on
+    """The vote's map factory (science.pedigree.family_models.Mapper): map(function, items) -> list in input order, on
     up to ``width`` threads. The fits release the interpreter lock and write no array they share."""
 
     def threaded(function, items):
@@ -43,12 +44,13 @@ def run(
         raise InputError("family transmission request differs from the prepared sample axis")
     parts = [
         (
-            junctions.schedules(c.state_classes, c.named_alleles, c.bin_sizes, reverse=parameters.reverse_conventions),
+            junctions.schedules(c.state_classes, c.named_alleles, c.bin_sizes, reverse=parameters.reverse_conventions,
+                                label_error=c.label_error),
             np.asarray(c.selector_switch_probability, dtype=np.float64),
         )
         for c in prepared.components
     ]
-    delta = parameters.direction.mismatch_probability
+    delta = parameters.direction.mismatch_probability  # the floor of every label's allowance (science.member_allowances)
     plans = [science.component_plan(schedule, theta, parameters) for schedule, theta in parts]
     edges = range(len(request.parents))
 
@@ -65,7 +67,7 @@ def run(
     ]
 
     # A contig often has only a few segments (one requested edge and two 1-Morgan segments on a sibling-rich cross):
-    # the threads left over serve the independent fits inside each segment's search (science.segment_models).
+    # the threads left over serve the independent fits inside each segment's search (the family transmission model search).
     width = max(1, int(threads) // max(1, len(jobs)))
 
     def fit(job: tuple[int, int, int]) -> tuple[float, float, float]:

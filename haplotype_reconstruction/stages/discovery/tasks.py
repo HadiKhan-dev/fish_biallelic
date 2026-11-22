@@ -87,6 +87,7 @@ def execute_block(
     evidence: BlockEvidence,
     parameters: DiscoveryParameters,
     *,
+    outlier_rate: float,
     ties: TieSettings = _DEFAULT_TIES,
     diagnostics: DiagnosticOptions = _DEFAULT_DIAGNOSTICS,
     threads: int = 1,
@@ -111,6 +112,7 @@ def execute_block(
         result = discover_block(
             evidence,
             parameters,
+            outlier_rate=outlier_rate,
             reverse=ties.reverse,
             keep=ties.keep,
             diagnostics=collector,
@@ -156,6 +158,7 @@ def discovery_tasks(
     *,
     file: CheckpointFile,
     identities: dict[str, str],
+    outlier_rate: float,
     ties: TieSettings = _DEFAULT_TIES,
     diagnostics: DiagnosticOptions = _DEFAULT_DIAGNOSTICS,
     dependencies: tuple[TaskKey, ...] = (),
@@ -195,7 +198,9 @@ def discovery_tasks(
                 key,
                 execute_block,
                 (file, derivation, block, parameters),
-                kwargs=dict(ties=ties, diagnostics=diagnostics),
+                kwargs=dict(
+                    ties=ties, diagnostics=diagnostics, outlier_rate=outlier_rate
+                ),
                 depends_on=(plan_key,),
                 inputs=(RecordKey(contig, "evidence"), RecordKey(contig, PLAN)),
                 outputs=(RecordKey(contig, block_key(block.block)), RecordKey(contig, diagnostic_key(block.block))),
@@ -256,10 +261,14 @@ def run(
     evidence = required_product(reader, records, "evidence", contig)
     founder = evidence.founder_view()
     blocks = tuple(block_evidence(founder, index) for index in range(len(founder.block_spans)))
+    from ..observation import records as observation_records
+
+    observed = observation_records.load(store, reader.manifest)
     tasks = discovery_tasks(
         contig,
         blocks,
         resolved.parameters.discovery,
+        outlier_rate=float(observed["outlier_rate_blocks"]),
         file=store.contig(contig),
         identities=discovery_records.expected(store, reader.manifest, product="discovery", contig=contig).identities,
         ties=ties,

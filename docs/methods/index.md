@@ -30,10 +30,15 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [EC24](evidence.md#ec24) — Core
 - [EC25](evidence.md#ec25) — Core
 - [EC26](evidence.md#ec26) — Core
+- [EC28](evidence.md#ec28) — Core
 
 ## [Genetic coordinates](genetic_map.md)
 
 - [EC27](genetic_map.md#ec27) — Core
+
+## [Observation pilot](observation.md)
+
+- [OB01](observation.md#ob01) — Core
 
 ## [Relatedness](relatedness.md)
 
@@ -299,6 +304,7 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [FR04](refit.md#fr04) — Core
 - [FR05](refit.md#fr05) — Core
 - [FR06](refit.md#fr06) — Core
+- [FR07](refit.md#fr07) — Core
 
 ## [Family phase](phase.md)
 

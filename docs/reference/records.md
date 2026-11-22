@@ -182,6 +182,7 @@ Source: [haplotype_reconstruction/contracts/assembly.py](../../haplotype_reconst
 | `gl` | `NDArray[np.float32]` | evidence | ('S', 'L', '3') | 1 | float32 | True | `required` |
 | `offsets` | `NDArray[np.int64]` | state | ('n+1',) | site | int64 | True | `required` |
 | `samples` | `NDArray[np.int64]` | state | ('S',) | 1 | int64 | True | `required` |
+| `cohort` | `NDArray[np.float64] &#124; None` | state | ('L', '3') | probability | float64 | True | `None` |
 
 ## assembly.ReleaseFamily
 
@@ -410,6 +411,7 @@ Source: [haplotype_reconstruction/contracts/assembly.py](../../haplotype_reconst
 | `levels` | `tuple[LevelRecord, ...]` | report | () | 1 | tuple[LevelRecord, ...] | True | `required` |
 | `release_alternatives` | `tuple[ReleaseFamily, ...]` | call | () | 1 | tuple[ReleaseFamily, ...] | True | `required` |
 | `prepared` | `tuple[PreparedPanel, ...]` | call | () | 1 | tuple[PreparedPanel, ...] | False | `()` |
+| `exchange` | `Mapping[str, Any] &#124; None` | call | () | 1 | Mapping[str, Any] &#124; None | False | `None` |
 | `schema` | `int` | diagnostic | () | 1 | int | True | `1` |
 
 ## assembly.WeakJunction
@@ -867,6 +869,7 @@ Source: [haplotype_reconstruction/contracts/evidence.py](../../haplotype_reconst
 | `discovery_sites` | `NDArray[np.bool_]` | state | ('L',) | 1 | bool | True | `required` |
 | `founder_excluded` | `NDArray[np.bool_]` | state | ('N',) | 1 | bool | True | `required` |
 | `block_spans` | `NDArray[np.int64]` | state | ('B', '2') | site | int64 | True | `required` |
+| `cohort_frequencies` | `NDArray[np.float64] &#124; None` | state | ('L', '3') | probability | float64 | True | `None` |
 
 ## evidence.FixedFitDetails
 
@@ -1451,6 +1454,7 @@ Source: [haplotype_reconstruction/contracts/painting.py](../../haplotype_reconst
 | `member_sets` | `tuple[tuple[int, ...], ...]` | call | () | 1 | tuple[int] | True | `required` |
 | `switch_counts` | `NDArray[np.int64]` | call | ('N',) | 1 | int64 | True | `required` |
 | `packed_emissions` | `NDArray[np.float64] &#124; None` | state | ('N', 'S*(S+1)/2', 'B') | nats | float64 | False | `None` |
+| `label_error` | `NDArray[np.float32] &#124; None` | report | ('N', 'B', '3') | probability | float32 | True | `None` |
 
 ## painting.RelabelMove
 
@@ -1722,7 +1726,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `pattern_fallback_samples` | `int` | diagnostic | () | 1 | int | True | `required` |
 | `log_e_upper` | `np.ndarray &#124; None` | state | ('D',) | nats | float64 | True | `None` |
 | `log_weight` | `float` | state | () | 1 | float | True | `float('nan')` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `2` |
+| `certifiable` | `np.ndarray &#124; None` | state | ('D',) | 1 | bool | True | `None` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
 
 ## pedigree.PedigreeCalls
 
@@ -2031,6 +2036,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `log_e` | `np.ndarray` | state | ('D',) | nats | float64 | True | `required` |
 | `observed_sites` | `np.ndarray` | obs | ('D',) | count | int64 | True | `required` |
 | `log_e_upper` | `np.ndarray &#124; None` | state | ('D',) | nats | float64 | True | `None` |
+| `certifiable` | `np.ndarray &#124; None` | state | ('D',) | 1 | bool | True | `None` |
 
 ## pedigree.CountDiagnostic
 
@@ -2067,6 +2073,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `log_e` | `np.ndarray` | call | ('D',) | nats | float64 | True | `required` |
 | `observed_sites` | `np.ndarray` | obs | ('D',) | 1 | int64 | True | `required` |
 | `log_e_upper` | `np.ndarray &#124; None` | call | ('D',) | nats | float64 | True | `None` |
+| `certifiable` | `np.ndarray &#124; None` | call | ('D',) | 1 | bool | True | `None` |
 
 ## pedigree.Decision
 
@@ -2625,6 +2632,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `log_e_lower` | `np.ndarray &#124; None` | report | ('D',) | nats | float64 | True | `None` |
 | `log_e_upper` | `np.ndarray &#124; None` | report | ('D',) | nats | float64 | True | `None` |
 | `log_e_exact` | `np.ndarray &#124; None` | report | ('D',) | 1 | bool | True | `None` |
+| `certifiable` | `np.ndarray &#124; None` | report | ('D',) | 1 | bool | True | `None` |
 
 ## pedigree.BlockSummaryView
 
@@ -2842,15 +2850,30 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `one_change` | `np.ndarray` | state | ('B-1',) | 1 | float64 | True | `required` |
 | `two_changes` | `np.ndarray` | state | ('B-1',) | 1 | float64 | True | `required` |
 
-## pedigree.SourceFactors
+## pedigree.SourceLaws
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `initial` | `np.ndarray` | state | ('N', 'S', 'S') | 1 | float64 | True | `required` |
-| `right_weight` | `np.ndarray` | state | ('N', 'B-1', 'S', 'S') | 1 | float64 | True | `required` |
+| `pair_mass` | `np.ndarray` | state | ('N', 'B', 'F') | probability | float64 | True | `required` |
+| `pi` | `np.ndarray` | state | ('N', 'B', 'S') | probability | float64 | True | `required` |
+| `diagonal_flow` | `np.ndarray` | state | ('N', 'B-1', 'S') | probability | float64 | True | `required` |
+| `outgoing_flow` | `np.ndarray` | state | ('N', 'B-1', 'S') | probability | float64 | True | `required` |
+| `incoming_flow` | `np.ndarray` | state | ('N', 'B-1', 'S') | probability | float64 | True | `required` |
+| `background_alt` | `np.ndarray` | state | ('N', 'M') | probability | float64 | True | `required` |
 | `available` | `np.ndarray` | state | ('N',) | 1 | bool | True | `required` |
+
+## pedigree.ChildReads
+
+Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
+
+| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
+|---|---|---|---|---|---|---|---|
+| `offsets` | `np.ndarray` | state | ('N+1',) | 1 | int64 | True | `required` |
+| `initial` | `np.ndarray` | state | ('N', 'C') | probability | float64 | True | `required` |
+| `operator` | `np.ndarray` | state | ('K', 'C', 'C') | probability | float32 | True | `required` |
+| `ratio` | `np.ndarray` | state | ('K', '4', 'C') | 1 | float32 | True | `required` |
 
 ## pedigree.PreparedComponent
 
@@ -2863,7 +2886,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `bin_sizes` | `np.ndarray` | state | ('B',) | 1 | int64 | True | `required` |
 | `anchored_states` | `np.ndarray` | state | ('S',) | 1 | bool | True | `required` |
 | `transition` | `HammingTransition` | state | () | 1 | HammingTransition | True | `required` |
-| `factors` | `SourceFactors` | state | () | 1 | SourceFactors | True | `required` |
+| `sources` | `SourceLaws` | state | () | 1 | SourceLaws | True | `required` |
 | `robustness_epsilon` | `float` | state | () | 1 | float64 | True | `required` |
 | `selector_switch_probability` | `np.ndarray` | state | ('B-1',) | 1 | float64 | True | `required` |
 | `genotype_likelihoods` | `np.ndarray` | state | ('N', 'M', '3') | probability | float64 | True | `required` |
@@ -2871,6 +2894,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `state_classes` | `np.ndarray` | state | ('N', 'B', '2') | 1 | int16 | True | `required` |
 | `information_exponent` | `np.ndarray` | state | ('N', 'B') | 1 | float64 | True | `required` |
 | `selector_fallback_bp` | `np.ndarray &#124; None` | state | ('B-1',) | bp | float64 | True | `None` |
+| `label_error` | `np.ndarray &#124; None` | state | ('N', 'B', '3') | probability | float32 | True | `None` |
+| `child_reads` | `ChildReads &#124; None` | state | () | 1 | ChildReads &#124; None | True | `None` |
 
 ## pedigree.PreparedChromosome
 
@@ -2883,7 +2908,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `components` | `tuple[PreparedComponent, ...]` | state | ('components',) | 1 | tuple[PreparedComponent, ...] | True | `required` |
 | `omitted_reason` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
 | `configured_morgans` | `float` | state | () | Morgans | float64 | True | `float('nan')` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `4` |
+| `effective_units` | `float` | state | () | 1 | float64 | True | `float('nan')` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `6` |
 
 ## pedigree.ChromosomeScores
 
@@ -2953,6 +2979,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `floors` | `np.ndarray` | state | ('C', 'N') | nats | float64 | True | `required` |
 | `markers` | `np.ndarray` | obs | ('C',) | 1 | float64 | True | `required` |
 | `eligible_counts` | `np.ndarray` | state | ('N',) | 1 | int64 | True | `required` |
+| `units` | `np.ndarray &#124; None` | state | ('C',) | 1 | float64 | True | `None` |
 
 ## pedigree.ScreenBatchCounts
 
@@ -3079,6 +3106,7 @@ Source: [haplotype_reconstruction/contracts/phase.py](../../haplotype_reconstruc
 | `likelihoods` | `np.ndarray` | evidence | ('N', 'L', '3') | 1 | float64 | True | `required` |
 | `observed` | `np.ndarray` | evidence | ('N', 'L') | 1 | bool | True | `required` |
 | `excluded` | `np.ndarray` | call | ('N',) | 1 | bool | True | `required` |
+| `cohort_frequencies` | `np.ndarray` | state | ('L', '3') | probability | float64 | True | `required` |
 
 ## phase.PhaseStates
 
@@ -3523,6 +3551,17 @@ Source: [haplotype_reconstruction/contracts/refit.py](../../haplotype_reconstruc
 | `sample_ids` | `tuple[str, ...]` | obs | ('N',) | 1 | str | True | `required` |
 | `components` | `tuple[ComponentRefit, ...]` | call | ('C',) | 1 | ComponentRefit | True | `required` |
 | `excluded_samples` | `tuple[str, ...]` | state | () | 1 | str | True | `required` |
+| `class_cells` | `np.ndarray &#124; None` | report | ('7',) | 1 | int64 | True | `None` |
+| `class_positive` | `np.ndarray &#124; None` | report | ('7',) | 1 | int64 | True | `None` |
+| `class_discordance` | `np.ndarray &#124; None` | report | ('7',) | 1 | float64 | True | `None` |
+| `class_penalty` | `np.ndarray &#124; None` | report | ('7',) | nats | float64 | True | `None` |
+| `class_bound` | `np.ndarray &#124; None` | report | ('7',) | 1 | bool | True | `None` |
+| `class_changed` | `np.ndarray &#124; None` | report | ('7',) | 1 | int64 | True | `None` |
+| `class_filled` | `np.ndarray &#124; None` | report | ('7',) | 1 | int64 | True | `None` |
+| `guard_sites` | `int` | report | () | 1 | int64 | True | `0` |
+| `eligible_remaining` | `int` | report | () | 1 | int64 | True | `0` |
+| `refused_by_support` | `int` | report | () | 1 | int64 | True | `0` |
+| `eligible_after_fills` | `int` | report | () | 1 | int64 | True | `0` |
 
 ## relatedness.RecombinationRateEstimate
 
@@ -3606,6 +3645,9 @@ Full-sib families with aligned parent-slot/support and half-sib tables. Families
 | `support_units` | `int` | diagnostic | () | 1 | int | True | `0` |
 | `search` | `str` | state | () | 1 | str | True | `''` |
 | `search_margin` | `float` | diagnostic | () | nats | float | True | `float('nan')` |
+| `read_sharing_status` | `tuple[str, ...]` | diagnostic | ('C',) | 1 | str | True | `()` |
+| `read_sharing_reach_bp` | `tuple[int, ...]` | diagnostic | ('C',) | bp | tuple[int, ...] | True | `()` |
+| `site_spacing_bp` | `tuple[float, ...]` | diagnostic | ('C',) | bp | tuple[float, ...] | True | `()` |
 | `rate` | `RecombinationRateEstimate &#124; None` | diagnostic | () | 1 | RecombinationRateEstimate | True | `None` |
 | `sources` | `SourceStructure &#124; None` | diagnostic | () | 1 | SourceStructure | True | `None` |
 
@@ -3981,6 +4023,8 @@ Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstru
 | `systematic_site` | `np.ndarray &#124; None` | obs | ('L',) | 1 | bool &#124; None | True | `None` |
 | `spurious` | `np.ndarray &#124; None` | obs | ('L',) | 1 | bool &#124; None | True | `None` |
 | `structure` | `StructureTruth &#124; None` | obs | () | 1 | StructureTruth &#124; None | True | `None` |
+| `injected_alleles` | `np.ndarray &#124; None` | obs | ('N', 'L', '2') | 1 | int8 &#124; None | True | `None` |
+| `injected_mask` | `np.ndarray &#124; None` | obs | ('N', 'L') | 1 | bool &#124; None | True | `None` |
 | `schema` | `int` | diagnostic | () | 1 | int | True | `SCHEMA` |
 
 ## pedigree.PedigreeTable

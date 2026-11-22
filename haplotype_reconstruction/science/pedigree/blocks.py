@@ -20,7 +20,7 @@ import numpy as np
 
 from ...contracts.pedigree import MapBlock
 from ..shared.material import haldane_coordinates
-from .parameters import MaterialParameters
+from .material_parameters import MaterialParameters
 
 __all__ = ["ScorePlacement", "component_length", "pieces", "cut_list"]
 

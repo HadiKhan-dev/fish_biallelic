@@ -3,8 +3,8 @@
 Each sample is a diploid pair of founder copies inside one block. Between adjacent emission sites at most one
 of the two copies switches founder (relative zero/one-switch weights of a per-meiosis recombination fraction,
 normalised to row mass 1). A two-state quality indicator follows a continuous-distance Markov process: in the
-normal state the pair emits through its predictive class (``linker.emissions``), in the error state a
-uniformly drawn genotype (the mean of the three genotype likelihoods); ancestry transitions apply in both
+normal state the pair emits through its predictive class (``linker.emissions``), in the error state a genotype
+redrawn from the cohort's genotype frequencies (the outlier law: 0 in the centred view); ancestry transitions apply in both
 states. Each block starts the quality indicator at stationarity and marginalises it at the opposite end; the
 backward scan is the adjoint of the same operator (not a reversed heuristic).
 
@@ -602,11 +602,9 @@ class BlockScans:
         values[invalid] = 0.0
         weights = np.exp(values)
         del values, invalid
-        # The log-sum-exp keeps the common observation scale (only the first three classes are genotypes).
-        # NumPy 2.5's reduce stubs omit the plain allocating overload (np.ufunc: same object, generic type).
-        self.error_logs = np.ascontiguousarray(
-            cast(np.ufunc, np.logaddexp).reduce(log_emissions[:, :, :3].astype(np.float64), axis=2) - math.log(3.0)
-        )
+        # In an error tract the genotype is redrawn from the cohort (the outlier law): its likelihood in the centred
+        # view is sum_g q(g) L~(g) = 1, a log emission of 0 at every site.
+        self.error_logs = np.zeros(log_emissions.shape[:2], dtype=np.float64)
         error_weights = np.exp(self.error_logs)
         invalid_emission |= np.any(~np.isfinite(error_weights) | (error_weights <= 0), axis=1)
         self.invalid_emission = invalid_emission

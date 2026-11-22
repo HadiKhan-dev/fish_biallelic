@@ -13,7 +13,7 @@ from typing import Any
 from ...contracts.payload import from_payload, to_payload
 from ...contracts.relatedness import RelatednessFamilies
 from ...core.errors import InputError
-from ...science.relatedness.parameters import AlleleFrequencyParameters, FamilyParameters, RateParameters
+from ...science.relatedness.parameters import FamilyParameters, RateParameters
 from ...store.container import CheckpointFile, RecordInfo
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy
@@ -54,20 +54,20 @@ def identity(
     inputs: tuple[EvidenceInput, ...],
     sample_ids: tuple[str, ...],
     parameters: FamilyParameters,
-    frequency: AlleleFrequencyParameters,
+    observation_identity: str,
     rate: RateParameters = _DEFAULT_RATE,
     *,
     numerical_policy: NumericalPolicy | None = None,
     reverse: bool = False,
 ) -> str:
-    """The deterministic scientific derivation; contigs retain their supplied order."""
+    """The deterministic scientific derivation; contigs retain their supplied order. ``observation_identity``: the
+    run's observation product (its outlier rate prices the family sites' discordant genotypes)."""
     return _bound_identity(
         tuple(item.contig for item in inputs),
         sample_ids,
         parameters,
-        frequency,
         rate,
-        upstream_identities(inputs),
+        dict(upstream_identities(inputs), observation=observation_identity),
         numerical_policy=numerical_policy,
         reverse=reverse,
     )
@@ -77,7 +77,6 @@ def _bound_identity(
     contigs: tuple[str, ...],
     sample_ids: tuple[str, ...],
     parameters: FamilyParameters,
-    frequency: AlleleFrequencyParameters,
     rate: RateParameters,
     upstream: Mapping[str, str],
     *,
@@ -88,7 +87,6 @@ def _bound_identity(
         code=code_dependency_identity(CODE_ROOTS),
         parameters=dict(
             families=parameters,
-            frequency=frequency,
             rate=rate,
             sample_ids=sample_ids,
             contigs=contigs,
@@ -125,10 +123,7 @@ def expected(
     contigs = tuple(manifest["contigs"])
     upstream = bound_upstream(store, manifest) if upstream is None else upstream
     parameters = FamilyParameters(**manifest["parameters"]["relatedness"])
-    # A run manifest records only configurable stage parameters; allele-frequency estimation is not configurable,
-    # so a run-level request rebuilds the derivation with its defaults (task manifests record them explicitly).
-    frequency = AlleleFrequencyParameters(**manifest["parameters"].get("allele_frequency", {}))
-    # The rate estimator's constants are not configurable either (rl20).
+    # The rate estimator's constants are not configurable (rl20): a run-level request rebuilds them as defaults.
     rate = from_payload(RateParameters, manifest["parameters"].get("rate", to_payload(RateParameters())))
     reverse = bool(manifest["ties"]["reverse"])
     return Reader(
@@ -136,7 +131,6 @@ def expected(
             contigs,
             tuple(manifest["sample_ids"]),
             parameters,
-            frequency,
             rate,
             upstream,
             reverse=reverse,

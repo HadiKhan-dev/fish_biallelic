@@ -40,8 +40,12 @@ def allele_prior(ones: int, called: int) -> float:
     return float(np.log(share / (1.0 - share)))
 
 
-def _robust_log(gl, eps):
-    return np.log((1.0 - eps) * np.asarray(gl, dtype=np.float64) + eps / 3.0)
+def _robust_log(gl, cohort, eps):
+    """log of the mixed likelihoods (1 - eps) L + eps B, B = q . L (science.shared.observation); gl [..., L, 3],
+    cohort [L, 3]."""
+    gl = np.asarray(gl, dtype=np.float64)
+    background = np.einsum("...g,...g->...", gl, np.broadcast_to(cohort, gl.shape))
+    return np.log((1.0 - eps) * gl + eps * background[..., None])
 
 
 def _terms(lab0, lab1, alleles_0, alleles_1, lg):
@@ -69,12 +73,14 @@ def allele_evidence(
     site_gl: np.ndarray,
     excluded: np.ndarray,
     eps: float,
+    cohort: np.ndarray,
     *,
     map_work=None,
 ) -> np.ndarray:
     """float64 [S, m]: E(x, j), the summed carrier evidence for allele 1 of every state at the component's released
     sites. X int64 [N, 2, B] (the solve's MAP labels), site_bin int64 [m], alleles int8 [S, m], site_gl float32
-    [N, m, 3], excluded bool [N] (kept out of the founder evidence), eps the robust mixture.
+    [N, m, 3], excluded bool [N] (kept out of the founder evidence), eps the run's outlier rate and cohort float64
+    [m, 3] the sites' cohort genotype frequencies (the outlier law).
 
     Each EVIDENCE_CHUNK of sites sums carrier terms in kernels.evidence_terms, in homologue-then-sample order.
     The kernel releases the GIL; ``map_work(function, items)`` (ordered, optional) runs disjoint fixed chunks
@@ -92,7 +98,7 @@ def allele_evidence(
     def chunk(lo: int) -> None:
         hi = min(m, lo + EVIDENCE_CHUNK)
         bins = site_bin[lo:hi]
-        lg = _robust_log(site_gl[rows, lo:hi], eps)
+        lg = _robust_log(site_gl[rows, lo:hi], cohort[lo:hi], eps)
         part = np.zeros((S, hi - lo))
         evidence_terms(
             np.ascontiguousarray(X0[:, bins]),
@@ -131,12 +137,14 @@ def own_terms(
     excluded: bool,
     evidence: np.ndarray,
     logit_prior: float,
+    cohort: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
     """One sample's own pair at the released sites: (own_state int64 [2, m] (-1: none), own_flip float64 [2, m]),
     the labels of its MAP pair (labels int64 [2, m]) whose evidence holds its reads, and their flip probabilities with
     its direct term removed, conditional on the fitted carriers and panel. A founder-excluded sample has none. ``gl``
     [m, 3] is its site likelihood,
-    ``eps`` the robust mixture, ``evidence`` [S, m] the solve's E."""
+    ``eps`` the run's outlier rate, ``evidence`` [S, m] the solve's E, ``cohort`` [m, 3] the sites' cohort genotype
+    frequencies."""
     m = labels.shape[1]
     state = np.full((2, m), -1, dtype=np.int64)
     flip = np.zeros((2, m))
@@ -145,7 +153,7 @@ def own_terms(
     cols = np.arange(m)
     a0 = alleles[labels[0], cols]
     a1 = alleles[labels[1], cols]
-    e0, v0, e1, v1 = _terms(labels[0], labels[1], a0, a1, _robust_log(gl, eps))
+    e0, v0, e1, v1 = _terms(labels[0], labels[1], a0, a1, _robust_log(gl, cohort, eps))
     for t, (lab, a, e, valid) in enumerate(((labels[0], a0, e0, v0), (labels[1], a1, e1, v1))):
         if not valid.any():
             continue

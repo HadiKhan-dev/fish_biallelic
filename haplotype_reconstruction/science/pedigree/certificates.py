@@ -9,8 +9,8 @@ from numba import prange
 
 from ...core.kernels import kernel
 from .forward import site_likelihood
-from .kernels.signatures import OVERLOADS
-from .parameters import CERTIFICATE_GL_ULPS
+from .kernels.bounds import OVERLOADS
+from .numerical_parameters import CERTIFICATE_GL_ULPS
 
 EPS = np.finfo(float).eps
 

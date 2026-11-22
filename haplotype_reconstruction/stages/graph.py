@@ -129,8 +129,17 @@ def build_graph(
     for c in order:
         evidence = _key("evidence", c)
         nodes.append(Node(evidence, (init,), (f"payload:{c}", "EvidenceParameters")))
+    # The run's observation pilot (the outlier rate) is pooled over the analysed contigs, like the painting
+    # calibration; relatedness and every discovery read its product. Every contig's strict fits bind every analysed
+    # contig's evidence (the pilot's block counts are shared out over the run's blocks).
+    piloted = tuple(c for c in order if c in analysis.included)
+    evidence_keys = tuple(_key("evidence", e) for e in piloted)
+    for c in piloted:
+        nodes.append(Node(_key("observation_fits", c), evidence_keys))
+    observation = _key("observation")
+    nodes.append(Node(observation, tuple(_key("observation_fits", c) for c in piloted)))
     relatedness = _key("relatedness")
-    nodes.append(Node(relatedness, tuple(_key("evidence", c) for c in order), ("maps",)))
+    nodes.append(Node(relatedness, tuple(_key("evidence", c) for c in order) + (observation,), ("maps",)))
     for c in order:
         ev, discovery = _key("evidence", c), _key("discovery", c)
         initial, l1, l2 = (_key("selection", c, r) for r in ("initial", "l1", "l2"))
@@ -139,7 +148,7 @@ def build_graph(
         maps = (f"map:{c}",)
         nodes.extend(
             (
-                Node(discovery, (ev,)),
+                Node(discovery, (ev, observation)),
                 Node(initial, (discovery, ev, relatedness) if adopt_rate else (discovery, ev), maps),
                 Node(context1, (initial, ev), maps),
                 Node(l1, (discovery, initial, context1), maps),
@@ -147,7 +156,11 @@ def build_graph(
                 Node(l2, (discovery, l1, context2), maps),
                 Node(assembly, (l2, ev), maps),
                 Node(painting, (assembly, ev, _key("calibration")), maps),
-                Node(refit, (painting, ev)),
+                # 4.21 A7 (N0run): the contig's gain histogram, then its moves under the run's class priors
+                Node(_key("refit_histogram", c), (painting, ev)),
+                Node(refit, (painting, ev, _key("refit_priors"))),
+                # 4.21 P (B1): the reference decode on the refit founders, read by the pedigree
+                Node(_key("repaint", c), (refit, painting, ev, _key("calibration")), maps),
             )
         )
     # The run-level painting calibration is pooled over the analysed contigs (the reconstruction axis), like the
@@ -156,17 +169,23 @@ def build_graph(
     assemblies = tuple(_key("assembly", c) for c in calibrated)
     for c in calibrated:
         nodes.append(Node(_key("calibration_robustness", c), assemblies))
-    nodes.append(Node(_key("calibration_outlier"), tuple(_key("calibration_robustness", c) for c in calibrated)))
+    # the two midpoint rates around the pooled grid maximum: every contig's grid fits decide them (ADVICE2 14.1(6))
+    robustness = tuple(_key("calibration_robustness", c) for c in calibrated)
+    for c in calibrated:
+        nodes.append(Node(_key("calibration_refine", c), robustness))
+    nodes.append(Node(_key("calibration_outlier"), tuple(_key("calibration_refine", c) for c in calibrated)))
     for c in calibrated:
         nodes.append(Node(_key("calibration_divisor", c), (_key("calibration_outlier"), _key("assembly", c))))
     nodes.append(
         Node(_key("calibration"), (_key("calibration_outlier"),) + tuple(_key("calibration_divisor", c) for c in calibrated))
     )
+    # the founder refit's class priors pool every analysed contig's gain histogram (ADVICE2 16.2, N0run frozen by G7')
+    nodes.append(Node(_key("refit_priors"), tuple(_key("refit_histogram", c) for c in calibrated)))
     pedigree = _key("pedigree")
     nodes.append(
         Node(
             pedigree,
-            (relatedness,) + tuple(_key("painting", c) for c in analysis.included)
+            (relatedness,) + tuple(_key("repaint", c) for c in analysis.included)
             + tuple(_key("evidence", c) for c in analysis.included),
             ("maps", "relatedness/families"),
         )
@@ -227,9 +246,9 @@ def workflow_cut(
         raise SettingsError(f"unknown contigs: {sorted(wanted - set(graph.contigs))}")
     requested = tuple(c for c in graph.contigs if c in wanted)
     scatter = requested
-    if step == "run" and graph.analysis is not None:
-        # Run cuts spend reconstruction only on the included axis. Evidence is
-        # retained separately because relatedness still consumes the configured genome.
+    if step in {"run", "pedigree"} and graph.analysis is not None:
+        # Run and pedigree cuts reconstruct only the included axis. Relatedness
+        # still consumes evidence from every configured contig.
         scatter = tuple(c for c in requested if c in graph.analysis.included)
     if max_contigs is not None:
         if step != "run" or max_contigs < 0:
@@ -256,14 +275,25 @@ def workflow_cut(
         # The painting calibration needs the final assembly of every analysed contig: a run that reaches painting
         # keeps that closure even when its own selection is narrower.
         barrier = set(graph.closure([_key("calibration")])) if _key("calibration") in selected else set()
+        # Likewise the observation pilot needs every analysed contig's evidence and pilot.
+        if _key("observation") in selected:
+            barrier |= set(graph.closure([_key("observation")]))
         selected = {
             k for k in selected
             if k.scope == "run" or k.scope in scatter or (k.stage == "evidence" and k.scope in requested) or k in barrier
         }
-        for node in graph.nodes:
-            if node.key.stage in {"relatedness", "refit"} and set(node.dependencies) <= selected:
-                if node.key.scope == "run" or node.key.scope in scatter:
-                    selected.add(node.key)
+        # early relatedness and refits whose inputs are in the cut, to a fixed point: a contig's refit needs the run's
+        # priors, which need every analysed contig's histogram (4.21 A7)
+        early = {"relatedness", "refit", "refit_histogram", "refit_priors", "repaint"}
+        while True:
+            added = {
+                node.key for node in graph.nodes
+                if node.key.stage in early and node.key not in selected and set(node.dependencies) <= selected
+                and (node.key.scope == "run" or node.key.scope in scatter)
+            }
+            if not added:
+                break
+            selected |= added
     else:
         stages = {name for name, stage in STAGES.items() if step in stage.steps}
         if not stages:
@@ -272,7 +302,7 @@ def workflow_cut(
             raise SettingsError(f"{step} requires one contig")
         selected = {k for k in keys if k.stage in stages and (k.scope == "run" or k.scope in scatter)}
     if step == "reconstruct" and not calibrated:
-        selected = {k for k in selected if k.stage not in {"painting", "refit"}}
+        selected = {k for k in selected if k.stage not in {"painting", "refit", "refit_histogram", "repaint"}}
     prerequisites = {p for n in graph.nodes if n.key in selected for p in n.dependencies} - selected
     return Cut(
         step,
@@ -383,8 +413,8 @@ def execution_options(
     """Translate ENG-03 early nodes and ENG-23 contig costs into executor policy.
 
     Chain costs are application-supplied size estimates, never measured pressure.
-    Phase size estimates may be supplied separately. Early ready refits
-    and the relatedness gather precede ordinary chain work. Ready recombination
+    Phase size estimates may be supplied separately. The observation pilot (it gates relatedness and every
+    discovery), then early ready refits and the relatedness gather precede ordinary chain work. Ready recombination
     precedes export; both consume immutable phase products on any free worker.
     These priorities/leases add no model edge or scientific identity input.
     """
@@ -402,8 +432,10 @@ def execution_options(
         phase_priorities = {c: (scale - 1.0) * value / phase_total for c, value in phase_costs.items()}
     priorities = {
         key: (
-            3 * scale
-            if key.stage == "refit"
+            4 * scale
+            if key.stage in ("observation_fits", "observation")
+            else 3 * scale
+            if key.stage in ("refit", "refit_histogram", "refit_priors", "repaint")
             else 2 * scale
             if key.stage == "relatedness"
             else scale
@@ -414,7 +446,9 @@ def execution_options(
         )
         for key in cut.nodes
     }
-    chain_stages = {name for name, stage in STAGES.items() if "reconstruct" in stage.steps} - {"painting", "refit"}
+    chain_stages = {name for name, stage in STAGES.items() if "reconstruct" in stage.steps} - {
+        "painting", "refit", "refit_histogram"
+    }
     chains = tuple(
         ChainPlan(c, costs[c], tuple(key for key in cut.nodes if key.scope == c and key.stage in chain_stages))
         for c in graph.contigs
@@ -536,7 +570,7 @@ def stage_kernel_modules(task: Task) -> tuple[str, ...]:
     modules = code_dependency_identity((*numerical_roots, "core.ties"), pinned=False).modules
     science = spec.kernels
     if task.key.stage == "selection" and task.key.round in {"initial", "l1", "l2"}:
-        science = ("selection", "assembly.evidence", "shared.emissions")
+        science = ("selection", "assembly.evidence", "shared.emissions", "shared.observation")
         if task.key.round != "initial":
             science += ("assembly.alleles",)
         else:

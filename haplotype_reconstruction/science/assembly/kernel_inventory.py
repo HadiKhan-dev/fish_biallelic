@@ -6,7 +6,7 @@ closure, so a bounded replay does not silently omit join or polish kernels.
 The engine owns parallel compilation, cache publication and admission.
 """
 
-from . import pairs
+from . import exchange, pairs
 from .join import certify, emissions, objective, pair_segments, proposals, splice
 from .linker import emissions as linker_emissions
 from .linker import kernels as linker_kernels
@@ -19,6 +19,7 @@ from .refinement import proposals as refinement_proposals
 # static code identities and runtime preload inventories on the same boundary.
 MODULES = (
     pairs,
+    exchange,
     certify,
     emissions,
     objective,

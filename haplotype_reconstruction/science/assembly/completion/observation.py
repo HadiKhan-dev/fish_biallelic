@@ -17,7 +17,7 @@ from numba import types
 
 from haplotype_reconstruction.core.kernels import kernel
 
-# Normalised genotype evidence whose range (max - min over the three genotypes) is at most this is
+# Centred genotype evidence whose range (max - min over the three genotypes) is at most this is
 # uniform: the sample is not informative at the site.
 from .parameters import UNIFORM_TOLERANCE as UNIFORM_TOLERANCE
 
@@ -30,14 +30,10 @@ def unordered_pairs(founders: int) -> np.ndarray:
     )
 
 
-def normalised_evidence(evidence: np.ndarray) -> np.ndarray:
-    """float64[N, L, 3] genotype likelihoods scaled to sum to one over the three genotypes; exactly
-    1/3 where they sum to zero (no evidence)."""
-    values = np.asarray(evidence, dtype=np.float64)
-    totals = np.sum(values, axis=2, keepdims=True)
-    result: np.ndarray = np.full(values.shape, 1.0 / 3.0, dtype=np.float64)
-    np.divide(values, totals, out=result, where=totals > 0)
-    return result
+def centred_evidence(evidence: np.ndarray) -> np.ndarray:
+    """float64[N, L, 3] the centred view of assembly's evidence (science.assembly.evidence), never renormalised: a
+    pair law p scores log sum_g p(g) L~(g) against the cohort law (exactly 0 for a sample without evidence)."""
+    return np.ascontiguousarray(evidence, dtype=np.float64)
 
 
 @kernel(
@@ -79,4 +75,4 @@ def row_classes(alleles: np.ndarray) -> tuple[tuple[int, ...], ...]:
     return tuple(tuple(members) for members in classes)
 
 
-__all__ = ["unordered_pairs", "normalised_evidence", "carrier_probability", "row_classes"]
+__all__ = ["unordered_pairs", "centred_evidence", "carrier_probability", "row_classes"]

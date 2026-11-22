@@ -22,15 +22,15 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 Cost and scope: O(N L) decoded evidence per active contig and O(N M) retained selected-site tables; concatenation can temporarily retain both source and combined arrays.
 
 <a id="rl02"></a>
-## rl02 Hardy-Weinberg EM allele frequency per site
+## rl02 Allele frequency per site from the cohort genotype law
 
-Iterate the Hardy–Weinberg allele-frequency EM for its fixed schedule, using the declared floors/clips and sample-order sums. Count every sample in the denominator, including neutral missing observations. Preserve the left-to-right arithmetic of genotype contributions and frequency updates.
+Read the site's cohort genotype frequencies q stored with the evidence (the observation model's outlier law, fitted once by the evidence stage over the founder view without a Hardy-Weinberg assumption) and take the ALT allele frequency p = q1 / 2 + q2. The EM's pseudocounts keep p inside (0, 1), so no clip is applied. A latent parent's genotype prior stays Hardy-Weinberg at p: a genetic prior, distinct from the outlier law, which has none (4.21 A).
 
-Implementation: [science/relatedness/frequency.py](../../haplotype_reconstruction/science/relatedness/frequency.py).
+Implementation: [science/relatedness/run.py](../../haplotype_reconstruction/science/relatedness/run.py), with the law from [science/shared/cohort.py](../../haplotype_reconstruction/science/shared/cohort.py).
 
-Parameters by name: `iterations`, `clip`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: none of its own. The cohort law's pseudocounts and tolerance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(6 · N · L_c). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(L_c) per contig: the stored law is read, not refitted.
 
 <a id="rl03"></a>
 ## rl03 Site selection and thinning (family sites)
@@ -62,7 +62,7 @@ For each family/site, add the parent terms to its member-sum state, log-sum over
 
 Implementation: [science/relatedness/family_kernels.py](../../haplotype_reconstruction/science/relatedness/family_kernels.py).
 
-Parameters by name: `initial`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name:. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(9 M); O(18 M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

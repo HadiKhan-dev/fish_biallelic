@@ -178,6 +178,13 @@ class ContigTruth:
     systematic_site: np.ndarray | None = record_field("obs", axes=("L",), units="1", dtype="bool | None", default=None)
     spurious: np.ndarray | None = record_field("obs", axes=("L",), units="1", dtype="bool | None", default=None)
     structure: StructureTruth | None = record_field("obs", units="1", dtype="StructureTruth | None", default=None)
+    # Gate G1i (ADVICE2 11.4): the alleles after the injected replacement and its mask; None for a clean simulation.
+    # Reading (R) evaluates against ``alleles`` (the original); reading (M) evaluates released genotypes and phase
+    # against these.
+    injected_alleles: np.ndarray | None = record_field(
+        "obs", axes=("N", "L", "2"), units="1", dtype="int8 | None", default=None
+    )
+    injected_mask: np.ndarray | None = record_field("obs", axes=("N", "L"), units="1", dtype="bool | None", default=None)
     schema: int = schema_field(SCHEMA)
 
     def __post_init__(self) -> None:
@@ -299,6 +306,10 @@ def truth_record(truth: ContigTruth) -> dict:
         result.pop("structure")
     else:
         result["structure"] = truth.structure.__dict__
+    # Without G1i's injection the record is the released one (no keys)
+    if truth.injected_mask is None:
+        result.pop("injected_alleles")
+        result.pop("injected_mask")
     return result
 
 

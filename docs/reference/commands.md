@@ -115,7 +115,7 @@ Gather relatedness from every contig's evidence.
 
 ## reconstruct
 
-Assemble one contig; also paint and refit after run calibration exists.
+Assemble one contig; also paint it (and record its refit histogram) after run calibration.
 
 | Argument | Arity | Default | Choices | Help |
 |---|---|---|---|---|
@@ -170,7 +170,7 @@ Calibrate painting across all final assemblies.
 
 ## pedigree
 
-Gather the genome-wide pedigree.
+Refit every contig under the run's class priors, then gather the genome-wide pedigree.
 
 | Argument | Arity | Default | Choices | Help |
 |---|---|---|---|---|

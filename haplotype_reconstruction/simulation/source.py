@@ -383,7 +383,17 @@ def contig_read_inputs(task: ContigSimulation) -> ReadInputs:
 
     hap0 = np.array([gather(individual[0]) for individual in task.offspring], dtype=np.int8)
     hap1 = np.array([gather(individual[1]) for individual in task.offspring], dtype=np.int8)
+    injected = None
+    if task.read_model.injected_outlier_rate > 0:
+        # G1i: ordered genotypes replaced before any read is drawn (simulation/injection.py, its own streams)
+        from .injection import inject
+
+        original = (hap0, hap1)
+        hap0, hap1, injected = inject(hap0, hap1, task.read_model.injected_outlier_rate,
+                                      task.read_model.injected_outlier_pattern, task.seed, tuple(task.sample_ids))
     inputs = read_inputs(hap0, hap1, task.positions, task.depth, task.read_model, rng)
+    if injected is not None:
+        inputs = replace(inputs, original0=original[0], original1=original[1], injected=injected)
     if task.structure is None:
         return inputs
     paralog = paralog_sites(task.structure, task.positions)
@@ -413,7 +423,13 @@ def contig_result(
     truth = ContigTruth(
         sample_ids=task.sample_ids,
         positions=task.positions,
-        alleles=np.ascontiguousarray(np.stack((inputs.hap0, inputs.hap1), axis=2), dtype=np.int8),
+        # the original alleles (ancestry); with G1i's injection the replaced ones and the mask beside them
+        alleles=np.ascontiguousarray(np.stack(
+            (inputs.hap0, inputs.hap1) if inputs.injected is None else (inputs.original0, inputs.original1), axis=2
+        ), dtype=np.int8),
+        injected_alleles=None if inputs.injected is None else np.ascontiguousarray(
+            np.stack((inputs.hap0, inputs.hap1), axis=2), dtype=np.int8),
+        injected_mask=inputs.injected,
         painting=truth_painting(task.offspring, task.positions),
         crossovers=task.crossovers,
         source_haplotypes=task.panel.alleles,

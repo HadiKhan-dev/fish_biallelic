@@ -71,6 +71,8 @@ class ReadModel:
     and ALT reads ~ Binomial(depth, p_g) with p = (error_rate, heterozygote_alt_probability,
     1 - error_rate). read_length_bp > 0 draws paired-end fragments instead (insert length
     Normal(fragment_mean_bp, fragment_sd_bp)), so sites closer than a fragment share reads.
+    In either mode, uncalled_base_probability independently removes each covered base from
+    REF/ALT counts after the allele draw. Configured depth precedes this thinning.
     site_depth_cv adds a mean-one lognormal site factor shared by samples; a positive
     site_depth_window_bp shares that factor within fixed physical windows instead. Independent
     mean-one gamma cell factors give count variance mu + count_dispersion * mu**2 conditional
@@ -133,10 +135,24 @@ class ReadModel:
     )
     reference_pull: float = record_field("obs", units="1", dtype="float64", default=generating.REFERENCE_PULL)
     foreign_read_share: float = record_field("obs", units="1", dtype="float64", default=generating.FOREIGN_READ_SHARE)
+    # Gate G1i (ADVICE2 11.4): ordered genotypes replaced before reads at this rate (per pattern: simulation/injection.py)
+    injected_outlier_rate: float = record_field("obs", units="1", dtype="float64", default=0.0)
+    injected_outlier_pattern: str = record_field("obs", units="1", dtype="str", default="uniform")
+    uncalled_base_probability: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.UNCALLED_BASE_PROBABILITY
+    )
 
     def __post_init__(self):
+        if not 0 <= self.injected_outlier_rate < 0.5:
+            raise SettingsError("injected_outlier_rate must be in [0, 0.5)")
+        if self.injected_outlier_pattern not in ("uniform", "heterogeneous", "clustered", "misspecified"):
+            raise SettingsError("injected_outlier_pattern must be uniform, heterogeneous, clustered or misspecified")
+        if self.injected_outlier_pattern == "heterogeneous" and self.injected_outlier_rate > 0.19:
+            raise SettingsError("heterogeneous injected_outlier_rate must be at most 0.19 (heavy samples at 10 r / 1.9)")
         if not 0 < self.error_rate < 0.5:
             raise SettingsError("generating error_rate must be between zero and 0.5")
+        if not 0 <= self.uncalled_base_probability <= 1:
+            raise SettingsError("uncalled_base_probability must be in [0, 1]")
         if not math.isfinite(self.depth_cv) or self.depth_cv < 0:
             raise SettingsError("depth_cv must be finite and nonnegative")
         if not math.isfinite(self.site_depth_cv) or self.site_depth_cv < 0:
@@ -182,6 +198,8 @@ class ReadModel:
             raise SettingsError("long_read_mean_bp must be finite and nonnegative")
         if self.long_read_mean_bp and self.read_length_bp:
             raise SettingsError("long_read_mean_bp and read_length_bp select different samplers; set one")
+        if self.long_read_mean_bp and self.uncalled_base_probability:
+            raise SettingsError("uncalled_base_probability applies only to the paired-end and independent-site samplers")
         if self.long_read_mean_bp and self.long_read_mean_bp < generating.LONG_READ_MIN_BP:
             raise SettingsError(f"long_read_mean_bp must be at least {generating.LONG_READ_MIN_BP} bp")
         for name in ("long_read_length_sigma", "read_quality_sd", "context_factor"):

@@ -1,6 +1,6 @@
-"""Expose the discovery science that local selection reuses.
+"""Expose the discovery science that local selection and the observation pilot reuse.
 
-Owns only the declared selection-to-discovery boundary.
+Owns only the declared selection-to-discovery and observation-to-discovery boundaries.
 Method: docs/methods/discovery.md. The fitter retains ordered
 workspace history; the cavity scorer and allele release read the final membership.
 This module must not schedule work, read records or introduce a second implementation.
@@ -9,10 +9,11 @@ This module must not schedule work, read records or introduce a second implement
 from ...core.ties import BlockQuanta
 from .cavity import CavityWorkspace, score_solutions
 from .fixed_k.fit import fit_panels, prepare_workspace
-from .fixed_k.workspace import search_bytes
+from .fixed_k.workspace import bin_layout, search_bytes
 from .panel import FixedKSolution, deduplicate, log_haplotype_set_count, panel_key, solution_tie_mask, unique_rows
 from .parameters import DiscoveryParameters
 from .release import release_alleles
+from .run import BlockEvidence, discover_block
 
 __all__ = [
     "prepare_workspace",
@@ -29,4 +30,7 @@ __all__ = [
     "FixedKSolution",
     "BlockQuanta",
     "DiscoveryParameters",
+    "bin_layout",
+    "BlockEvidence",
+    "discover_block",
 ]

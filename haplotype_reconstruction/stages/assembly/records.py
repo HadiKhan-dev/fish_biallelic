@@ -488,23 +488,33 @@ def decode_refined(payload: Mapping[str, Any]) -> RefinedLevel:
 
 
 def encode_product(product: AssemblyProduct) -> dict:
-    return dict(
+    """The final product's record. ``exchange`` (stages.assembly.exchange.encode_exchange and its report): the
+    prepared rows the diplotype exchange appended after completion; the product's founder paths may point at them.
+    The completion's own record keeps the prepared panels as completion wrote them."""
+    payload = dict(
         schema=SCHEMA,
         components=encode_components(product.components),
         levels=[encode_level(item) for item in product.levels],
         release_alternatives=encode_families(product.release_alternatives),
     )
+    if product.exchange is not None:
+        payload["exchange"] = dict(product.exchange)
+    return payload
 
 
 def decode_product(payload: Mapping[str, Any], *, prepared: Sequence[PreparedPanel] = ()) -> AssemblyProduct:
     require_schema(payload, SCHEMA)
     from haplotype_reconstruction.contracts.assembly import AssemblyProduct
 
+    from .exchange import apply_exchange
+
     return AssemblyProduct(
         decode_components(payload["components"]),
         tuple(decode_level(r) for r in payload["levels"]),
         decode_families(payload["release_alternatives"]),
-        tuple(prepared),
+        # the completion's prepared panels with the product's exchange rows appended
+        apply_exchange(prepared, payload.get("exchange")) if len(prepared) else tuple(prepared),
+        payload.get("exchange"),
     )
 
 
@@ -564,6 +574,10 @@ class Reader:
             result = decode_product(payload, prepared=prepared)
             return result if self.product == "assembly" else materialise(result.components, result.prepared)
         components = decode_components(payload["components"])
+        if "exchange" in payload:  # the final product read as stage panels
+            from .exchange import apply_exchange
+
+            prepared = apply_exchange(prepared, payload["exchange"])
         return materialise(components, prepared)
 
 

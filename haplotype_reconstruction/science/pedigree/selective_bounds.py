@@ -14,12 +14,8 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import certificates as kernel
-from .parameters import (
-    SELECTIVE_BOUND_GROUP_BINS,
-    SELECTIVE_BOUND_ULPS,
-    SELECTIVE_UPPER_STATE_FACTOR,
-    SELECTIVE_UPPER_ULPS,
-)
+from .numerical_parameters import SELECTIVE_BOUND_ULPS, SELECTIVE_UPPER_STATE_FACTOR, SELECTIVE_UPPER_ULPS
+from .workspace_parameters import SELECTIVE_BOUND_GROUP_BINS
 
 
 @dataclass

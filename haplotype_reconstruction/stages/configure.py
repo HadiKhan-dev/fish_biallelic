@@ -126,7 +126,8 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
     from ..science.discovery.parameters import DiscoveryParameters
     from ..science.evidence.parameters import EvidenceParameters
     from ..science.painting.parameters import PaintingParameters
-    from ..science.pedigree.parameters import MapScaleParameters, PedigreeParameters
+    from ..science.pedigree.map_scale_parameters import MapScaleParameters
+    from ..science.pedigree.parameters import PedigreeParameters
     from ..science.phase.parameters import PhaseParameters
     from ..science.recombination.parameters import RecombinationParameters
     from ..science.refit.parameters import RefitParameters
@@ -154,7 +155,7 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
         DiscoveryParameters(),
         SelectionParameters(),
         AssemblyParameters(),
-        PaintingParameters(),
+        PaintingParameters(read_classes=settings.painting.read_classes),
         FamilyParameters(
             rate_estimate=settings.genetic_map.rate_estimate, source_populations=settings.input.source_populations
         ),

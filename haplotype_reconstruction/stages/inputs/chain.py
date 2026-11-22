@@ -23,6 +23,7 @@ def _chain_evidence(reader, store, contig: str) -> tuple[Any, Any, Any, Any]:
     from ...contracts.evidence import ContigEvidence
     from ...science.assembly.evidence import DEPTH_ROWS, AssemblyEvidenceSource, depth_row_keys
     from ..evidence import records as evidence_records
+    from ..observation import records as observation_records
 
     request = evidence_records.result_reader(store, reader.manifest, product="evidence", contig=contig)
     if request is None:
@@ -62,6 +63,7 @@ def _chain_evidence(reader, store, contig: str) -> tuple[Any, Any, Any, Any]:
         founder.discovery_sites,
         request.identity,
         depth_keys,
-        bool(evidence.discovery_sites.all() and not evidence.founder_excluded.any()),
+        cohort=evidence.cohort_frequencies,
+        outlier_rate=observation_records.outlier_rate_blocks(reader, store),
     )
     return request, evidence, founder, source

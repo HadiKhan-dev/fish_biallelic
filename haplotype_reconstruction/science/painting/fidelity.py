@@ -35,7 +35,7 @@ Parameters (rho, a, b) are estimated per component by EM over all its eligible s
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from numba import prange, types
@@ -292,6 +292,8 @@ _OVERLOADS = {
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
             types.boolean,
             types.boolean,
+            types.boolean,
+            types.boolean,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -304,6 +306,8 @@ _OVERLOADS = {
             types.float64,
             types.float64,
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
+            types.boolean,
             types.boolean,
             types.boolean,
         ),
@@ -320,6 +324,8 @@ _OVERLOADS = {
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
             types.boolean,
             types.boolean,
+            types.boolean,
+            types.boolean,
         ),
     ),
     "masses_from_pairs": (
@@ -328,6 +334,13 @@ _OVERLOADS = {
             types.Array(types.int64, 3, "C", readonly=False, aligned=True),
             types.Array(types.int64, 3, "C", readonly=False, aligned=True),
             types.Array(types.int32, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int32, 2, "C", readonly=False, aligned=True),
+        ),
+    ),
+    "label_errors": (
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int32, 3, "C", readonly=False, aligned=True),
             types.Array(types.int32, 2, "C", readonly=False, aligned=True),
         ),
     ),
@@ -737,12 +750,17 @@ def _transposed_parts(
 
 
 @kernel(overloads=_OVERLOADS["_chain_kernel"], cache=True, parallel=True, nogil=True)
-def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a, b, eligible, want_masses, emission_masses):
+def _chain_kernel(
+    emissions, labels, fids, error_of, capable, initial, theta, a, b, eligible, want_masses, emission_masses,
+    label_masses, bin_likelihood,
+):
     """Exact scaled forward-backward of the chain, per eligible sample: expected label changes per edge (both
     tracks); expected error-run starts and ends and kept faithful and kept error transitions of anchored labels that
     stay, and label moves into an anchored label's error and faithful states (summed over edges); the first bin's
-    expected anchored tracks in error and faithful; the log-likelihood; and (``want_masses``) the posterior masses of
-    every label pair with both tracks faithful, float64[N, S*S, B]."""
+    expected anchored tracks in error and faithful; the log-likelihood; (``want_masses``) the posterior masses of
+    every label pair with both tracks faithful, float64[N, S*S, B]; and (``bin_likelihood``) the log-likelihood's
+    per-bin terms float64[N, B], the log normaliser of the scaled forward step at bin b, log P(x_b | x_1..x_b-1): the
+    log-likelihood is their sum in bin order (0 for an ineligible sample)."""
     n_samples, n_pairs, n_bins = emissions.shape
     n = len(labels)
     n_labels = len(capable)
@@ -756,7 +774,12 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
     first_error = np.zeros(n_samples)
     first_faithful = np.zeros(n_samples)
     log_likelihood = np.zeros(n_samples)
-    faithful_mass = np.zeros((n_samples if want_masses or emission_masses else 0, n_labels * n_labels, n_bins))
+    # with label_masses the second half holds every label pair's mass summed over all fidelity states (an error track
+    # keeps its label: the painting's label-error statistic, ADVICE2 11.1)
+    faithful_mass = np.zeros(
+        (n_samples if want_masses or emission_masses else 0, n_labels * n_labels * (2 if label_masses else 1), n_bins)
+    )
+    bin_log_likelihood = np.zeros((n_samples if bin_likelihood else 0, n_bins))
     for sample in prange(n_samples):
         if not eligible[sample]:
             continue
@@ -779,7 +802,10 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
         for p in range(n_pairs):
             forward[0, p] = math.exp(forward[0, p] - top)
         scale = np.sum(forward[0])
-        log_likelihood[sample] += top + math.log(scale)
+        term = top + math.log(scale)
+        log_likelihood[sample] += term
+        if bin_likelihood:
+            bin_log_likelihood[sample, 0] = term
         forward[0] /= scale
         for bin_index in range(1, n_bins):
             log_stay, log_move, fidelity, stationary = _log_terms(theta[bin_index - 1], n_labels, a, b)
@@ -803,7 +829,10 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
                         emissions[sample, z1 * n + z2, bin_index] - top
                     )
             scale = np.sum(forward[bin_index])
-            log_likelihood[sample] += top + math.log(scale)
+            term = top + math.log(scale)
+            log_likelihood[sample] += term
+            if bin_likelihood:
+                bin_log_likelihood[sample, bin_index] = term
             forward[bin_index] /= scale
         backward = np.ones(n_pairs)
         weight = np.empty(n_pairs)
@@ -837,6 +866,8 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
                         faithful_mass[sample, i * n_labels + j, bin_index] += mass
                     elif fids[first] == 0 and fids[second] == 0:
                         faithful_mass[sample, pair, bin_index] += mass
+                    if label_masses:
+                        faithful_mass[sample, n_labels * n_labels + pair, bin_index] += mass
             if bin_index == 0:
                 continue
             edge = bin_index - 1
@@ -993,6 +1024,7 @@ def _chain_kernel(emissions, labels, fids, error_of, capable, initial, theta, a,
         first_faithful,
         log_likelihood,
         faithful_mass,
+        bin_log_likelihood,
     )
 
 
@@ -1007,14 +1039,19 @@ def chain_statistics(
     *,
     want_masses: bool = False,
     emission_masses: bool = False,
+    label_masses: bool = False,
+    bin_likelihood: bool = False,
 ):
     """(label changes float64[N, B - 1], error-run starts [N], ends [N], kept faithful [N], kept error [N], moves into
     an anchored error state [N] and faithful state [N], first-bin anchored tracks in error [N] and faithful [N],
     log-likelihood [N], faithful label-pair masses [N, S*S, B]) of the structured
-    emissions (see _chain_kernel). With emission_masses=True the last output instead carries normalized
-    emission-label masses, mapping each error track separately to BACKGROUND. Existing modes are unchanged."""
+    emissions (see _chain_kernel). With emission_masses=True the masses output instead carries normalized
+    emission-label masses, mapping each error track separately to BACKGROUND. With label_masses=True (and
+    want_masses) the masses output has S*S more rows: every label pair's mass summed over all fidelity states (ADVICE2
+    11.1). With bin_likelihood=True a twelfth output follows: the log-likelihood's per-bin terms [N, B] (the
+    calibration's material units, ADVICE2 11.2). Existing modes are unchanged."""
     capable = np.ascontiguousarray(capable, dtype=np.int64)
-    return _chain_kernel(
+    result = _chain_kernel(
         np.ascontiguousarray(emissions),
         tracks.labels,
         tracks.fidelity,
@@ -1027,7 +1064,10 @@ def chain_statistics(
         np.ascontiguousarray(eligible, dtype=np.bool_),
         bool(want_masses),
         bool(emission_masses),
+        bool(label_masses),
+        bool(bin_likelihood),
     )
+    return result if bin_likelihood else result[:11]
 
 
 @kernel(overloads=_OVERLOADS["masses_from_pairs"], cache=True, parallel=True, nogil=True)
@@ -1082,6 +1122,60 @@ def masses_from_pairs(faithful_mass, masks, other_masks, public_ids, local_keys)
     return qf, qaf
 
 
+@kernel(overloads=_OVERLOADS["label_errors"], cache=True, parallel=True, nogil=True)
+def label_errors(label_mass, paths, local_keys):
+    """(u float64 [N, B], v float64 [N, 2, B]): the label-error statistic of the released labels ``paths`` (ADVICE2
+    11.1), from ``label_mass`` [N, S*S, B] the posterior mass of every ordered label pair summed over all fidelity
+    states (an error track keeps its label). With c_0, c_1 the released labels' local classes in a bin:
+    u = 1 - mass of pairs whose classes are the multiset {c_0, c_1} (the released pair is wrong); for c_0 != c_1,
+    v_t = 1 - mass of pairs carrying c_t (track t's label is wrong); for c_0 == c_1 = c, v_0 = v_1 = 1 - (1/2) sum of
+    mass x min(copies of c, 2) (the expected share of the two released copies that are wrong: dosage-aware).
+    Independent bins (parallel over sample and bin)."""
+    n_samples, n_pairs, n_bins = label_mass.shape
+    n_labels = local_keys.shape[1]
+    u = np.empty((n_samples, n_bins))
+    v = np.empty((n_samples, 2, n_bins))
+    for task in prange(n_samples * n_bins):
+        sample, b = task // n_bins, task % n_bins
+        c0 = local_keys[b, paths[sample, 0, b]]
+        c1 = local_keys[b, paths[sample, 1, b]]
+        total = 0.0
+        pair = 0.0
+        first = 0.0
+        second = 0.0
+        dose = 0.0
+        for i in range(n_labels):
+            k1 = local_keys[b, i]
+            for j in range(n_labels):
+                m = label_mass[sample, i * n_labels + j, b]
+                if m == 0.0:
+                    continue
+                k2 = local_keys[b, j]
+                total += m
+                if (k1 == c0 and k2 == c1) or (k1 == c1 and k2 == c0):
+                    pair += m
+                if c0 != c1:
+                    if k1 == c0 or k2 == c0:
+                        first += m
+                    if k1 == c1 or k2 == c1:
+                        second += m
+                else:
+                    dose += m * ((1.0 if k1 == c0 else 0.0) + (1.0 if k2 == c0 else 0.0))
+        if total <= 0.0:
+            u[sample, b] = np.nan
+            v[sample, 0, b] = np.nan
+            v[sample, 1, b] = np.nan
+            continue
+        u[sample, b] = min(1.0, max(0.0, 1.0 - pair / total))
+        if c0 != c1:
+            v[sample, 0, b] = min(1.0, max(0.0, 1.0 - first / total))
+            v[sample, 1, b] = min(1.0, max(0.0, 1.0 - second / total))
+        else:
+            v[sample, 0, b] = min(1.0, max(0.0, 1.0 - 0.5 * dose / total))
+            v[sample, 1, b] = v[sample, 0, b]
+    return u, v
+
+
 # ---------------------------------------------------------------------------------------------- the copying model
 
 
@@ -1100,6 +1194,33 @@ class ChainModel:
     trajectory: tuple[tuple[float, float, float, float], ...] = record_field(
         "diagnostic", axes=(), dtype="tuple[tuple[float, float, float, float]]", units="nats", default=()
     )
+    fitted_log_likelihood: float = record_field(
+        "diagnostic", axes=(), dtype="float64", units="nats", default=float("nan"), kw_only=True
+    )
+    """The log-likelihood of the tempered emissions at the returned (rounded) values, one pass after the last update
+    (estimate_chain with final_likelihood; NaN otherwise): the calibration's support curve of the eight-update fit is
+    evaluated at the fit it returns, not before its last update (ADVICE2 14.1 item 6)."""
+    fitted_sample_log_likelihood: np.ndarray | None = record_field(
+        "diagnostic", axes=("N",), dtype="float64", units="nats", default=None, kw_only=True
+    )
+    """Its per-sample terms (0 for an ineligible sample), the same pass: A11's per-sample rates (ADVICE2 14.1 item 9)."""
+    fitted_bin_log_likelihood: np.ndarray | None = record_field(
+        "diagnostic", axes=("B",), dtype="float64", units="nats", default=None, kw_only=True
+    )
+    """Its per-bin terms summed over the samples, the same pass: bin b's term is log P(x_b | x_1..x_b-1), the log
+    normaliser of the scaled forward step, so the terms of a stretch of bins are that stretch's share of the
+    likelihood (the calibration's material units, ADVICE2 11.2). Each bin's sum over the samples is correctly rounded
+    (ordered_sum), the same on any sample batch; the bins together give fitted_log_likelihood up to rounding. None
+    without final_likelihood."""
+    fitted_counts: tuple[float, ...] = record_field(
+        "diagnostic", axes=(), dtype="tuple[float, float, float]", units="1", default=(), kw_only=True
+    )
+    """The same pass's expected (label changes, anchored track-bins in a faithful state, anchored track-bins in an error
+    state), summed over the eligible samples' tracks: the regime of the returned fit, so that a change of regime
+    between the calibration's candidate outlier rates is visible (ADVICE2 11.2: per-rate switch counts and error-track
+    occupancy; error occupancy = error bins / (faithful + error bins), among anchored track-bins). A bin is counted by
+    the transition that reaches it (kept, started or ended on the same label, or a move into the state) or as the first
+    bin. Empty without final_likelihood."""
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -1222,7 +1343,9 @@ def model_for(
     )
 
 
-def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config, *, site_correlation: float) -> ChainModel:
+def estimate_chain(
+    raw_batches, capable: np.ndarray, morgans: np.ndarray, config, *, site_correlation: float, final_likelihood: bool = False
+) -> ChainModel:
     """EM estimate of (rho, a, b) over all eligible samples of a component. ``raw_batches()`` yields (tempered label
     emissions float64[n, S*S, B], eligible bool[n]) batch by batch, for every sample; it is called once per update.
 
@@ -1251,11 +1374,16 @@ def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config
         sample_statistics = []
         tracks = 0
         for raw, eligible in raw_batches():
-            emissions = structured_emissions(raw, tracks_states)
-            (c, s, e, kf, ke, into_error, into_faithful, first_error, first_faithful, ll, _) = chain_statistics(
-                emissions, tracks_states, capable, theta, entry, exit_, eligible
-            )
-            del emissions
+            if hasattr(raw, "read"):          # read state carried (painting.read_decode)
+                from .read_decode import chain_statistics as read_chain_statistics
+                statistics = read_chain_statistics(raw, tracks_states, capable, theta, entry, exit_, eligible)
+                (c, s, e, kf, ke, into_error, into_faithful, first_error, first_faithful, ll, _) = statistics
+            else:
+                emissions = structured_emissions(raw, tracks_states)
+                (c, s, e, kf, ke, into_error, into_faithful, first_error, first_faithful, ll, _) = chain_statistics(
+                    emissions, tracks_states, capable, theta, entry, exit_, eligible
+                )
+                del emissions
             sample_statistics.append((c, s, e, kf, ke, into_error, into_faithful, first_error, first_faithful, ll))
             tracks += 2 * int(np.count_nonzero(eligible))
         if tracks == 0:
@@ -1280,7 +1408,7 @@ def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config
             entry, exit_ = fidelity_update(tuple(counts), (entry, exit_))
         trajectory.append((rate, entry, exit_, log_likelihood))
     step = float(config.estimate_grid)
-    return model_for(
+    model = model_for(
         morgans,
         n_labels,
         _round_log(rate, step, *RATE_BOUNDS),
@@ -1288,6 +1416,42 @@ def estimate_chain(raw_batches, capable: np.ndarray, morgans: np.ndarray, config
         _round_log(exit_, step, *EXIT_BOUNDS),
         site_correlation,
         trajectory,
+    )
+    if not final_likelihood:
+        return model
+    # one more exact forward-backward pass, at the returned values (the calibration's support curve, ADVICE2 14.1(6))
+    parts, regime, bins = [], [], []
+    theta = switch_probabilities(morgans, model.rate, n_labels)  # writable, as in the updates
+    for raw, eligible in raw_batches():
+        if hasattr(raw, "read"):
+            from .read_decode import chain_statistics as read_chain_statistics
+            statistics = read_chain_statistics(
+                raw, tracks_states, capable, theta, model.entry, model.exit, eligible, bin_likelihood=True
+            )
+        else:
+            emissions = structured_emissions(raw, tracks_states)
+            statistics = chain_statistics(
+                emissions, tracks_states, capable, theta, model.entry, model.exit, eligible, bin_likelihood=True
+            )
+            del emissions
+        parts.append(statistics[9])
+        bins.append(statistics[11])
+        c, starts, ends, kept_faithful, kept_error, into_error, into_faithful, first_error, first_faithful = statistics[:9]
+        # per sample (the same values on any batch size): label changes, anchored faithful bins, anchored error bins
+        faithful_bins = kept_faithful + ends + into_faithful + first_faithful
+        error_bins = kept_error + starts + into_error + first_error
+        regime.append(np.stack((c.sum(axis=1), faithful_bins, error_bins), axis=1))
+    per_sample = np.concatenate(parts).astype(np.float64) if parts else np.zeros(0)
+    fitted = ordered_sum(per_sample) if parts else 0.0
+    rows = np.concatenate(regime, axis=0) if regime else np.zeros((0, 3))
+    counts = tuple(float(ordered_sum(np.ascontiguousarray(rows[:, k]))) for k in range(3)) if parts else (0.0, 0.0, 0.0)
+    # each bin's term summed over the samples, correctly rounded: the same on any sample batch
+    per_bin = (
+        ordered_sum(np.concatenate(bins, axis=0), axis=0) if bins else np.zeros(len(morgans) + 1)
+    ).astype(np.float64)
+    return replace(
+        model, fitted_log_likelihood=float(fitted), fitted_sample_log_likelihood=per_sample, fitted_counts=counts,
+        fitted_bin_log_likelihood=per_bin,
     )
 
 
@@ -1300,6 +1464,11 @@ def label_paths(
     """int32[N, 2, B] Viterbi labels of the (tempered) label emissions ``raw`` [N, S*S, B] under ``model``. The mirrored
     convention expands the reversed label emissions directly, so one expanded table (8 S'^2 B bytes per sample) is
     alive at a time (viterbi_track_states would copy the expanded table)."""
+    if hasattr(raw, "read"):
+        # a read-state batch reaching label continuity's painted-switch comparison: label continuity compares
+        # relabellings on the emissions without read state throughout (its part emissions are built without it), so
+        # its check uses the batch's scalar part too; the painting's own decode goes through painting.read_decode
+        raw = raw.raw
     tracks = track_states(capable)
     capable = np.ascontiguousarray(capable, dtype=np.int64)
     if not reverse:
@@ -1368,11 +1537,15 @@ def decode_candidates(
     return paths, masks, counts, other_paths
 
 
-def release_posteriors(raw, model: ChainModel, capable, paths, other_paths, public_ids, local_keys):
-    """qF and qAF float64[N,B], the smaller faithful Viterbi-pair mass over both conventions."""
+def release_posteriors(
+    raw, model: ChainModel, capable, paths, other_paths, public_ids, local_keys, *, errors: bool = False
+):
+    """qF and qAF float64[N,B], the smaller faithful Viterbi-pair mass over both conventions; with ``errors`` also the
+    label-error statistic (u [N, B], v [N, 2, B]) of the released convention's labels ``paths`` (label_errors), from
+    the same forward-backward pass."""
     tracks = track_states(capable)
     emissions = structured_emissions(raw, tracks)
-    *_, faithful_mass = chain_statistics(
+    *_, masses = chain_statistics(
         emissions,
         tracks,
         capable,
@@ -1381,12 +1554,21 @@ def release_posteriors(raw, model: ChainModel, capable, paths, other_paths, publ
         model.exit,
         np.ones(raw.shape[0], dtype=np.bool_),
         want_masses=True,
+        label_masses=bool(errors),
     )
     del emissions
-    return masses_from_pairs(
-        faithful_mass,
+    width = len(capable) * len(capable)
+    qf, qaf = masses_from_pairs(
+        np.ascontiguousarray(masses[:, :width]),
         np.left_shift(np.int64(1), paths.astype(np.int64)),
         np.left_shift(np.int64(1), other_paths.astype(np.int64)),
         np.ascontiguousarray(public_ids),
         np.ascontiguousarray(local_keys),
     )
+    if not errors:
+        return qf, qaf
+    u, v = label_errors(
+        np.ascontiguousarray(masses[:, width:]), np.ascontiguousarray(paths, dtype=np.int32),
+        np.ascontiguousarray(local_keys, dtype=np.int32),
+    )
+    return qf, qaf, u, v

@@ -123,9 +123,10 @@ serial execution. The available clean stop points are relatedness, discovery and
 painting. They are cuts of the same graph, not alternative models. Contig-subset
 commands cannot satisfy a genome-wide prerequisite by omitting its other contigs.
 The painting's outlier rate and evidence strengths are estimated once per run from
-every analysed contig's final assembly, so a run restricted with `--contigs` or
+every analysed contig's final assembly. A run restricted with `--contigs` or
 `--max-contigs` that reaches painting first assembles every analysed contig and
-calibrates; painting and refit then stay restricted to the selected contigs.
+calibrates, then paints and publishes gain histograms for the selected contigs.
+The run-wide refit priors require the histograms of all analysed contigs.
 For parallel jobs on shared storage, use the [workflow commands](workflow.md).
 
 ## Resume and source identity

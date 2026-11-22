@@ -98,11 +98,34 @@ Cost and scope: O(N L_s S^2/2); O(N B S'^2); O(B). These terms describe the unit
 
 Decode both conventions with the structured two-track Viterbi recurrence. Apply the same-label/fidelity and label-change candidate rules before centring scores. Ties use the declared Viterbi policy and traceback convention; the decoder does not replace them with a generic argmax.
 
-Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py).
+The read-state search keeps one history per ordered track-pair state, with its log score and normalized
+read-class vector $v$. For each destination it ranks the retained predecessors by their prefix score plus
+the copying transition and $\log(v M \mathbf{1})$, where $M$ is the destination bin's read matrix for that
+pair. The destination's scalar emission and matrix log scale are common to those contenders. The reverse
+convention uses transposed copying transitions and read matrices. Its last contraction weights the original
+first bin by the first-site class law, and the track initial law also enters at that bin. Copying bounds and
+the largest coefficient of the contraction skip contenders outside the tie band. The search is exact over the
+current one-history candidates when it finishes within $(C+1)S'$ inspected predecessors per destination. This
+is the number of class-specific leaders plus a scalar leader for each second source track. When the exact
+search needs more work, keep its visited candidates and all predecessors sharing either founder label with
+the destination, subject to the same safe pruning. For each second source track, also consider the
+scalar copying leader under the usual tie preference and the first source track maximizing each of the
+$C$ prefix class masses after copying. Also consider the scalar copying leader along each first source track.
+Rank their union by the original full marginal score and apply the predecessor preference within the tie band.
+The shortlist can omit a source that changes both founder labels. The highest score before tie selection
+corresponds to at least $1/C$ of the unrestricted peak mass, including the prefix and copying weights.
+This compares the same one-history input for a single step. The complete traceback has no such bound.
+
+Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py) and [science/painting/read_chain.py](../../haplotype_reconstruction/science/painting/read_chain.py).
 
 Parameters by name: `VITERBI_TIE`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(n B S'^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: The scalar path search is O(n B S′²). The read-state search contracts each destination's C-by-C
+matrix in O(n B S′² C²). It computes each needed column of class leaders once per sample and bin,
+for O(C S′²) preprocessing work. At each of O(S′²) destinations the bounded scan, shared-label pairs and class leaders
+require O(C S′) candidate visits. The O(C) marginal score therefore bounds traceback work by
+O(n B C² S′³), cubic in the founder count for fixed class width. Backpointers and active class vectors
+use O(B S′² + S′² C) space per sample apart from the input matrices.
 
 <a id="pr10"></a>
 ## pr10 Parsimonious track order of decoded paths and painted switch counts
@@ -177,6 +200,14 @@ Cost and scope: Per-sample label-continuity memory is O(S²(B + links)) plus swi
 
 Use left/right max-product messages to score exact label transpositions at each link. Separate unaffected states from affected rows/columns, then sum per-sample gains in canonical order. The screen ranks repair candidates but makes no released ancestry call.
 
+With the read state enabled, the screen and provisional switch counts use scalar bin-part emissions. The
+final verification decodes the proposed row order with the full read-state builder and compares its switches
+with the scalar baseline count. The candidate check budget below bounds the search. In paired replays across
+famhs, longbc, seed, bc8, std and TroMau (57 contigs), screening with path-strength read matrices and checking
+both panels with the read-state decoder produced identical ordered row maps, genotype calls and painting
+switch counts. The read-aware arm's selected held-out log score on TroMau was 526 nats lower at the same
+divisor.
+
 Implementation: [science/painting/label_continuity.py](../../haplotype_reconstruction/science/painting/label_continuity.py).
 
 Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
@@ -232,11 +263,42 @@ Cost and scope: O(N² B) per contig in NumPy row passes over pairs, O(P + N B) m
 ## Run-level painting calibration
 
 After the final assembly of every analysed contig is published, reference-resolution
-calibration fits each component for each `robustness_grid` value with r = 0.
-The first run reduction sums the last recorded trajectory log likelihood across
-components and contigs, selecting the largest sum, with ties to the smaller value.
-The trajectory records the likelihood before its final EM update, as in the copying
-estimator. No emission cache crosses candidate values.
+calibration fits each component for each `robustness_grid` value with r = 0 (independent one-CPU tasks).
+Each fit's score is its log-likelihood at the returned (rounded) values, one forward-backward pass after its last
+update: the support curve of the eight-update fit (4.21, ADVICE2 14.1 item 6). Once every contig's grid fits exist,
+each contig also fits the two rates at the geometric midpoints around the pooled grid maximum (a refinement step of
+its own in the graph). The run reduction sums the scores across components and contigs over the grid and its
+midpoints and selects the largest sum, with ties to the smaller rate; the estimate, its plain support set and the
+curvature read these sums only. The uncertainty's clusters are the pedigree's equal-material units
+([material units](pedigree.md#material-units), the run's `MaterialParameters`; 4.21 C10). Each fit also keeps, per
+informative component (one with an eligible sample), the per-bin terms of its log-likelihood summed over the samples
+(bin b's term is log P(x_b | x_1..x_b-1), the log normaliser of the scaled forward step, so a stretch of bins carries
+its share of the likelihood) and each bin's working-map coordinate, built as the pedigree builds its axis (the
+cumulative Haldane distance of the per-edge switch probabilities of the working map between bin centres, clipped at
+`switch_clip`). The genome axis places these components, analysed contigs in configured order and components in map
+order, at the running sum of the lengths before them (gaps add nothing) and is cut into units of `unit_morgans`
+working Morgans: a bin at a cut belongs to the unit on its right, a final piece shorter than `tail_morgans` joins the
+unit before it, empty units are omitted, units straddle components and contigs, and no chain restarts at a cut. A
+unit's curve is the sum of its bins' terms. With theta = log rate, the refined maximum's unequal-gap three-point
+derivatives give each unit's score g_u and the sum's curvature H; the variance inflation is d = max(1, J / H),
+J = U / (U - 1) sum_u (g_u - mean g)^2 over the occupied units, and the inflated support set is
+{rate : 2 [l(best) - l(rate)] <= 3.84 d} (a log-likelihood loss of at most 1.92 d nats): a support set, never an
+interval; no consumer receives an uncertainty. At fixed true parameters, conditional score increments are martingale
+differences under the model; here J / H is a working dispersion adjustment from finite differences of the
+nuisance-refitted eight-update support curve, and independent unit scores and coverage are not established. The floor d >= 1 means
+duplicated evidence keeps the set only where J / H >= 1; at the floor duplication narrows it. It is unresolved below
+`assessable_morgans` working Morgans of informative material (the axis length; no count of chromosomes, contigs or
+components enters), with one occupied unit, a boundary maximum, a non-positive curvature, two competing modes (a
+support set that is not contiguous), or an inflated set that fills the grid or touches a bound. A flat plain set is
+"not identified" and the run uses the observation pilot's rate. Each sample's own rate, the maximum of its per-sample
+terms summed over contigs (flagged at the grid's top), is published for the pedigree exclusion's per-dyad allowance
+(A11). Every rate also keeps the regime of its returned fits, so that a change of regime between rates is visible:
+the expected label changes and the error-track occupancy (the share of anchored track-bins in an error state), per
+contig and pooled. The exported `painting/calibration.json` carries the profile (estimate, boundary, sets, d, curvature H and
+score variance J, occupied units and working Morgans, uncertainty state and reason), the material units (each unit's
+working Morgans and curve over the grid), the pooled regime, every contig's rows, per-sample rows and regime rows over
+the grid and its midpoints, and the sample identifiers that label the per-sample rates. No emission cache
+crosses candidate values.
 
 With this outlier rate fixed, each contig evaluates every `divisor_grid` value and
 `calibration_folds` fold. Fold f hides the f-th of `calibration_folds` contiguous near-equal
@@ -286,10 +348,120 @@ cache only when the two strengths are equal and otherwise rebuilds the emissions
 `Painting.emission_divisor` records the confidence divisor and `Painting.path_divisor` the
 path divisor. With equal divisors there is one fit and one set of emissions.
 
+With the read state (`read_classes` > 1) the divisor step differs (`science/painting/read_calibration.py`).
+The path divisor is fixed at `path_divisor`. The confidence divisor is chosen from `confidence_grid`
+(1 to 16) by each sample's held-out log probability of the hidden part of every reference window
+given the rest of its data under the read-state chain, summed over folds and contigs; the choice is
+the smallest divisor whose paired difference to the best, summed over samples, is within one
+standard error. These fits run on a declared amount of genetic map, `calibration_morgans`
+(10 Morgans): the analysed contigs in configured order, whole, accumulated until their working-map
+length (between each contig's first and last evidence position) reaches the budget, or every
+contig when the run has less. The other contigs publish empty divisor records. The
+`read_confidence` record lists the material's contigs, their Morgans and the budget, and whether
+the best divisor is the grid's largest. The outlier-rate step uses every analysed contig.
+
+An inferred library whose fitted covariance curve gives zero intermittent loss gets a second check on its own
+read depths. At each adjacent spacing from 1 to 5 bp, the sum of squared depth differences divided by the sum
+of the two depths estimates one minus called-read overlap. A depth-weighted line estimates its limit at zero
+spacing. Four distinct nearby markers spanning at most 10 bp supply a separate moment check on the same
+observations. For an inner
+depth Y, adjacent depths L and R, and fourth depth F, let V=(Y−L)(Y−R) and T=V(Y−F). The ratio of the sum of
+V to the sum of Y estimates the same conditional loss as the paired contrast. The root of q(1+q)=u, for
+u=sum(3V+T)/(2 sum Y), estimates the ordinary loss under homogeneous independent thinning. Both inner sites
+contribute. Heterogeneous read qualities separate these targets slightly and require u−v−v² ≥ 0 for v=sum V/sum Y.
+
+The paired and four-marker estimates must each exceed zero by the read-sharing detection multiplier times
+their uncertainty. The variance condition and the agreement of paired and three-marker estimates must hold
+within that multiplier. The loss check borrows this conservative multiplier. The read-sharing family-wise
+test count covers sharing detection and library splitting. Each loss contrast uses the larger delete-sample
+or delete-1-Mb-block standard error.
+The same short-gap endpoints must also show extra sample-specific depth variance under a separable Poisson
+model. At each endpoint the check subtracts scaled cross-sample depth products from the within-sample
+factorial second moment. The scale uses each sample's whole-contig depth. Cross-sample products remove
+common site intensity in expectation under the model. A site shared by two pairs contributes twice.
+The check recomputes the scale after each deletion, using the same sample and physical-block uncertainty
+rule. Blocks without short pairs still contribute to the whole-contig depth. The excess must exceed zero
+by the same multiplier times its uncertainty. Sample-specific effects other than regional intensity can
+also contribute to this excess. Sparse or contradictory observations use the covariance fit.
+A supported correction sets loss to the measured paired intercept and fits unit nonnegative covering masses on the existing
+read-length grid using squared adjacent depth differences at real, depth-weighted gaps. The offset and
+allele-evidence chains then consume that library's corrected loss and shape, including the implied covering
+depth. The per-library calibration report records the decision, contrasts, support and uncertainty.
+The working estimate assumes local continuity of the underlying coverage intensity and a contiguous common
+footprint at very short gaps. Independent-site observations and whole-cell dropout can violate those assumptions.
+
+Whether the run uses the read state is decided from the data first (`stages/painting/read_state.py`).
+Every analysed contig's read-sharing estimate (evidence stage) is tested, and the samples are grouped
+into sequencing libraries by divisive splits tested the same way. All these tests share one
+family-wise level: a library shares reads when some lag bin's excess exceeds z* standard errors,
+z* = Φ⁻¹(1 − α / M), with α = `sharing_detection_alpha` (1 %) and M every one-sided test the
+procedure can make, fixed before any test is read: each contig's lag bins that hold site pairs, once
+for the all-sample estimate and four times for each of at most 2^`library_levels` − 1 candidate
+splits (the parts' difference in both directions and each part's own estimate). Counting only the
+all-sample bins accepts a split of std's chr18 on noise. The count does not correct for the split
+being chosen from the same depths: two-means partitions of one library give contrasts above z*, and
+the material survival difference (`library_survival_tolerance`) is what rejects them. Samples in
+libraries without sharing bypass the read state; when no library of the run shares reads, the whole
+run takes `read_classes` = 1 (the calibration above and the paintings the pedigree reads). The
+calibration records α, M, z*, the route, each library's largest excess / SE with its signed margin
+to z*, winning lag bin and usable bins, and each candidate split's sizes, contrast and margin. The
+run log warns when a library's largest excess / SE, or a split's deciding contrast, lies within a
+factor of two of z*: the decision is close to the detection edge (a simulated library with
+independent reads and regional depth variation reaches z* + 0.005 on one contig).
+
+Mixed-technology painting can have higher genotype error for long-read samples on some chromosomes.
+With the earlier decoder, the same 30 ONT samples had 0.05280% genotype error in the 5× ONT/PE150
+simulation and 0.00579% in the pure ONT control. Chromosomes 8 and 20 accounted for 87.1% of the mixed ONT
+errors in that comparison. On the saved mixed inputs, replay with the destination-aware decoder gave
+0.09390% genotype error in fine painting and 0.10685% in the reference repaint for the ONT samples.
+The mixed replay released 92 of 98 true Tier B parent edges and had zero false parent edges, including
+partial calls.
+
+At clean calls with qAF ≥ 0.999, the saved simulations recorded 623 label errors in `seed`
+and 2,012 in `std`, compared with posterior expectations of 78 and 429, respectively.
+
+### Adaptive loss offsets
+
+The depth-only chain infers the number of covering reads lost to deletions or third-base calls at
+each evidence site. For positive fitted loss, its pilot width starts from the upper Poisson quantile
+(tail probability `loss_pilot_tail`) of stationary lost depth at the library's highest mean covering
+depth. The pilot adds `loss_pilot_extra_offsets` for depth jumps and bounds the result to 13–33
+offsets by default. All observed depths in the span, including those between selected sites,
+condition the pilot. Each site keeps at least `offsets` (three by default) and discards only an
+upper tail with pilot posterior mass at most `loss_span_tail` divided by the number of evidence
+sites in the span. The union bound limits the discarded path probability within the finite pilot
+to `loss_span_tail` (0.0001 by default).
+
+A second forward–backward pass conditions the depth chain on these supports. The site marginals
+weight the allele likelihoods and the adjacent joint laws weight the class operators. The builder
+uses one joint-law scratch matrix per sample, independent of span length, and computes the retained
+site and edge laws in parallel across samples. Zero fitted loss bypasses the pilot because all
+posterior mass sits at offset zero. The wider-support checks include observed depth jumps and
+high-loss cases and compare both site and edge laws.
+
+The read model uses the fitted overlap for each adjacent pair of evidence sites and averages over read
+age within the retained state. Between selected sites it composes the intervening depth-conditioned
+operators. This approximation can propagate allele evidence across a span that no single molecule could
+cover. With fixed 30 kb reads, one called read at each of three sites, mean covering depth one, zero loss
+and a 1% base-error probability, the model gives final REF probability 0.713 after an initial REF at
+positions 0, 15 and 30 kb. The molecule reference gives 0.500. The calculation uses the middle site's
+depth and skips its allele evidence. At positions 0, 7.5 and 15 kb, the endpoints have positive overlap
+and the probabilities are 0.909 and 0.884, respectively.
+
+A zero-overlap span reset would replace the composed operator with the target class law when consecutive
+selected sites skip an evidence site and their separation reaches the longest positively weighted length
+in the library's fitted distribution. The fine painting had zero such spans across famhs, longbc, seed,
+bc8, std and TroMau. The six paired reset replays agreed with their controls on released genotypes and
+switches.
+
 Single-value grids skip their corresponding calibration fits. The setting
 robustness_grid=(0.01,), divisor_grid=(10.9,), and both bin sizes 100 gives r=0.1 for both
 strengths and reproduces the 4.19 painting.
 Every fine and reference painting depends on the final run calibration identity and
 uses the same estimates; the reference painting has its own copying-chain fit after
-the fine painting's label-continuity outcome. Pedigree consumes reference paintings;
-founder refit, phase, recombination, export and evaluation consume fine paintings.
+the fine painting's label-continuity outcome. After the founder refit, the reference
+decode is repeated on the refit's founders with the same parameters, calibration,
+evidence and map, and with the fine painting's label-continuity outcome passed without
+row maps (the refit's panels already carry them): painting/refit_reference. Pedigree
+consumes that second reference painting; founder refit, phase, recombination, export
+and evaluation consume fine paintings.

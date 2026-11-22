@@ -13,6 +13,7 @@ from numba import prange, types
 from ...contracts.likelihoods import gather_likelihoods, readonly
 from ...contracts.painting import state_alt_probabilities
 from ...core.kernels import kernel
+from ..shared.observation import mix_likelihoods
 from .parameters import EMISSION_RESCALE_BELOW, INFORMATIVE_SPREAD, PaintingParameters
 
 # Supported lazy kernel signatures.
@@ -24,6 +25,10 @@ _OVERLOADS = {
         ),
         (
             types.Array(types.float64, 3, "C", readonly=True, aligned=True),
+            types.Array(types.boolean, 2, "C", readonly=True, aligned=True),
+        ),
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 2, "C", readonly=True, aligned=True),
         ),
     ),
@@ -48,7 +53,6 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.float64,
-            types.float64,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -58,7 +62,6 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.float64,
-            types.float64,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -67,7 +70,6 @@ _OVERLOADS = {
             types.Array(types.float64, 1, "C", readonly=True, aligned=True),
             types.Array(types.int64, 1, "C", readonly=True, aligned=True),
             types.Array(types.int64, 1, "C", readonly=True, aligned=True),
-            types.float64,
             types.float64,
         ),
         (
@@ -78,7 +80,6 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.float64,
-            types.float64,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=True, aligned=True),
@@ -87,7 +88,6 @@ _OVERLOADS = {
             types.Array(types.float64, 1, "C", readonly=True, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
-            types.float64,
             types.float64,
         ),
         (
@@ -98,8 +98,19 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=True, aligned=True),
             types.Array(types.int64, 1, "C", readonly=True, aligned=True),
             types.float64,
-            types.float64,
         ),
+    ) + tuple(
+        # Phase mixes GLs into writable storage while borrowing the observation flags and background.
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.boolean, 2, "C", readonly=True, aligned=True),
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=True, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=readonly, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=readonly, aligned=True),
+            types.float64,
+        )
+        for readonly in (False, True)
     ),
     "pack_emissions": (
         (
@@ -134,7 +145,7 @@ def _window_inputs(readonly: bool) -> tuple:
 
 # The score helper is inlined into both emission kernels; its declarations only serve the compilation audit.
 _OVERLOADS["_pair_bin_score"] = tuple(
-    (*_window_inputs(readonly), *(types.int64,) * 7, types.float64, types.float64, types.float64)
+    (*_window_inputs(readonly), *(types.int64,) * 7, types.float64, types.float64)
     for readonly in (False, True)
 )
 # tempered_into passes every input as a read-only view and the batch's outputs writable: one argument type.
@@ -143,7 +154,6 @@ _OVERLOADS["_tempered_into"] = (
         *_window_inputs(True),
         *(types.Array(types.int64, 1, "C", readonly=True, aligned=True),) * 4,
         *(types.int64,) * 6,
-        types.float64,
         types.float64,
         types.float64,
         types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -203,7 +213,10 @@ class SharedEmissions:
         self.served = 0
 
     def __call__(self, likelihoods, observed, sites, samples, alt_probability, background_frequency, bin_starts,
-                 bin_stops, config, *, robustness_epsilon, site_correlation, parts=None):
+                 bin_stops, config, *, robustness_epsilon, site_correlation, parts=None, columns=None):
+        # ``columns``: a resident copy's contig columns (contig_columns), forwarded to the builder; a sample range is
+        # always built from the same source, so the range in the key identifies it.
+        source_columns = {} if columns is None else {"columns": columns}
         for entry in self.kept:
             (e_samples, e_epsilon, e_alt, e_starts, e_stops, e_parts, sums, flags, informative, extra) = entry
             if (
@@ -219,7 +232,7 @@ class SharedEmissions:
         else:
             sums, flags, informative = self.builder(
                 likelihoods, observed, sites, samples, alt_probability, background_frequency, bin_starts, bin_stops,
-                config, robustness_epsilon=robustness_epsilon, site_correlation=0.0, parts=parts,
+                config, robustness_epsilon=robustness_epsilon, site_correlation=0.0, parts=parts, **source_columns,
             )
             self.builds += 1
             counts = np.add.reduceat(informative.astype(np.int64), np.asarray(bin_starts, dtype=np.int64), axis=1)
@@ -322,7 +335,6 @@ def _pair_bin_score(
     start,
     stop,
     site_offset,
-    robustness_epsilon,
     floor_probability,
     uniform_log,
 ):
@@ -349,7 +361,9 @@ def _pair_bin_score(
         likelihood = (
             likelihoods[sample, site, 0] * p0 + likelihoods[sample, site, 1] * p1 + likelihoods[sample, site, 2] * p2
         )
-        probability = (1.0 - robustness_epsilon) * likelihood + robustness_epsilon / 3.0
+        # The likelihoods are the caller's mixed likelihoods (the run's outlier rate against the cohort law,
+        # science.shared.observation): the outlier mixture is already in them.
+        probability = likelihood
         if probability < floor_probability:  # also p <= 0; NaN propagates
             probability = floor_probability
         count += 1
@@ -364,9 +378,7 @@ def _pair_bin_score(
 
 
 @kernel(overloads=_OVERLOADS["_emission_kernel"], cache=True, parallel=True, nogil=True)
-def _emission_kernel(
-    likelihoods, observed, alt_probability, background_frequency, bin_starts, bin_stops, robustness_epsilon, log_floor
-):
+def _emission_kernel(likelihoods, observed, alt_probability, background_frequency, bin_starts, bin_stops, log_floor):
     """float64[N, S*S, B] binned log emissions, one task per sample x unordered pair.
 
     The ordered states (a, b) and (b, a) have equal emissions (the genotype law
@@ -407,7 +419,6 @@ def _emission_kernel(
                 bin_starts[bin_index],
                 bin_stops[bin_index],
                 0,
-                robustness_epsilon,
                 floor_probability,
                 uniform_log,
             )
@@ -432,7 +443,6 @@ def _tempered_into(
     last_bin,
     left,
     bins_per_reference_window,
-    robustness_epsilon,
     log_floor,
     correlation,
     raw,
@@ -496,7 +506,6 @@ def _tempered_into(
                 part_starts[part] - left,
                 part_stops[part] - left,
                 left,
-                robustness_epsilon,
                 floor_probability,
                 uniform_log,
             )
@@ -523,10 +532,10 @@ def tempered_into(
     informative: np.ndarray,
     sample_offset: int,
     *,
-    robustness_epsilon: float,
     site_correlation: float,
 ) -> None:
-    """Temper one whole-bin window of a batch into ``raw``/``flags``/``informative`` (_tempered_into)."""
+    """Temper one whole-bin window of a batch into ``raw``/``flags``/``informative`` (_tempered_into); ``values`` are
+    the window's mixed likelihoods (mix_window)."""
     _tempered_into(
         readonly(values, np.float64),
         readonly(seen, np.bool_),
@@ -542,7 +551,6 @@ def tempered_into(
         int(bins[1]),
         int(left),
         int(config.reference_snps_per_bin // config.snps_per_bin),
-        float(robustness_epsilon),
         float(config.emission_log_floor),
         float(site_correlation),
         raw,
@@ -560,14 +568,14 @@ def binned_emissions(
     bin_starts: np.ndarray,
     bin_stops: np.ndarray,
     *,
-    robustness_epsilon: float,
     log_floor: float,
     sample_block: int = 0,
     before_block=None,
 ) -> np.ndarray:
     """float64[N, S*S, B] log emissions of contiguous site runs [bin_starts, bin_stops).
 
-    ``likelihoods`` float64[N, L, 3] normalised GL rows and ``observed``
+    ``likelihoods`` float64[N, L, 3] the caller's mixed likelihoods (mix_window: the outlier rate against the cohort
+    law) and ``observed``
     bool[N, L] at the component's selected sites; ``alt_probability``
     float64[C, L] and ``background_frequency`` float64[L] from the states.
     O(N S^2 L / 2). ``sample_block`` > 0 evaluates that many samples at a time
@@ -579,7 +587,6 @@ def binned_emissions(
         np.ascontiguousarray(background_frequency, dtype=np.float64),
         np.ascontiguousarray(bin_starts, dtype=np.int64),
         np.ascontiguousarray(bin_stops, dtype=np.int64),
-        float(robustness_epsilon),
         float(log_floor),
     )
     n_samples = likelihoods.shape[0]
@@ -637,6 +644,7 @@ __all__ = [
     "tempered_window",
     "tempered_into",
     "tempered_emissions",
+    "mix_window",
 ]
 
 
@@ -665,7 +673,19 @@ class EmissionBuilder(Protocol):
         robustness_epsilon: float,
         site_correlation: float,
         parts: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]: ...
+        columns: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``robustness_epsilon``: the outlier rate at which the builder mixes each gathered window of likelihoods
+        against the cohort genotype frequencies it was built with (mix_window); the kernels score the mixed
+        likelihoods as they are. ``columns``: when ``likelihoods`` and ``observed`` are a resident copy, the contig
+        column of each of its columns; contig-wide per-site arrays are read at contig_columns(sites, columns)."""
+        ...
+
+
+def mix_window(values: np.ndarray, cohort: np.ndarray, epsilon: float) -> np.ndarray:
+    """A gathered window's mixed likelihoods (1 - eps) L + eps B, B = q . L (science.shared.observation), with
+    ``cohort`` float64[L_w, 3] the cohort genotype frequencies of the window's sites."""
+    return mix_likelihoods(values, cohort, epsilon)
 
 
 def tempered_window(
@@ -678,11 +698,11 @@ def tempered_window(
     whole_bin_starts: np.ndarray,
     config: PaintingParameters,
     *,
-    robustness_epsilon: float,
     site_correlation: float,
     part_bins: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Temper complete bins or parts by the whole reference window's design effect, in site order.
+    """Temper complete bins or parts by the whole reference window's design effect, in site order. ``values`` are the
+    window's mixed likelihoods (mix_window).
 
     All indices are local to this whole-bin window. Returned emissions and informative
     masks are owned; inputs are unchanged. Cost O(samples * selected sites * S**2).
@@ -708,10 +728,17 @@ def tempered_window(
         np.empty((n_samples, n_sites), dtype=np.bool_),
         informative,
         0,
-        robustness_epsilon=robustness_epsilon,
         site_correlation=site_correlation,
     )
     return raw, informative
+
+
+def contig_columns(sites: np.ndarray, columns: np.ndarray | None) -> np.ndarray:
+    """The contig evidence columns of ``sites``: ``sites`` themselves, or, when they index a resident copy of the
+    contig columns ``columns`` (painting's component and label-continuity copies, resident_columns), ``columns[sites]``.
+    Contig-wide per-site arrays (the cohort frequencies, read counts, positions) are read at these columns."""
+    sites = np.asarray(sites, dtype=np.int64)
+    return sites if columns is None else np.asarray(columns, dtype=np.int64)[sites]
 
 
 def tempered_emissions(
@@ -725,16 +752,23 @@ def tempered_emissions(
     bin_stops: np.ndarray,
     config: PaintingParameters,
     *,
+    cohort: np.ndarray,
     robustness_epsilon: float,
     site_correlation: float,
     parts: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    columns: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Resident-array emissions, observed and informative masks for a contiguous sample batch.
 
-    Parts use their whole reference window's design effect. No storage or live resource access;
-    a stage can provide an equivalent EmissionBuilder over physical windows.
+    ``cohort`` float64[L, 3] the contig's cohort genotype frequencies (bind it, e.g. with functools.partial, to make
+    an EmissionBuilder); the gathered window is mixed at ``robustness_epsilon`` (mix_window). Parts use their whole
+    reference window's design effect. No storage or live resource access; a stage can provide an equivalent
+    EmissionBuilder over physical windows. ``columns`` (contig_columns): when ``likelihoods`` and ``observed`` are a
+    resident copy of some contig columns, the contig column of each of the copy's columns; None when ``sites`` are
+    contig columns.
     """
     values, flags = gather_sites(cast(np.ndarray, likelihoods), cast(np.ndarray, observed), sites, samples)
+    values = mix_window(values, np.asarray(cohort)[contig_columns(sites, columns)], robustness_epsilon)
     starts, stops = (bin_starts, bin_stops) if parts is None else parts[:2]
     raw, informative = tempered_window(
         values,
@@ -745,7 +779,6 @@ def tempered_emissions(
         stops,
         bin_starts,
         config,
-        robustness_epsilon=robustness_epsilon,
         site_correlation=site_correlation,
         part_bins=None if parts is None else parts[2],
     )

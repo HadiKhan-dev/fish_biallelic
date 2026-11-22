@@ -27,8 +27,8 @@ import numpy as np
 
 from ...contracts.pedigree import JunctionEvidence, Orientation
 from ...core.kernels import kernel
-from .kernels.signatures import OVERLOADS
-from .parameters import (
+from .kernels.decision import OVERLOADS
+from .numerical_parameters import (
     DIRECTION_COIN_SHARE_GRID,
     DIRECTION_RELIABILITY_GRID,
     ORDER_MINIMUM_UNIT_WEIGHT,

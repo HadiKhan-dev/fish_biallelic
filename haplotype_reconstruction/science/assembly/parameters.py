@@ -23,7 +23,7 @@ class LinkerParameters:
     max_sites: linking proxies keep at most this many sites per input component (a stride over
         its usable sites); emissions marginalise unknown alleles at partial sites.
     max_iterations: maximum updates per gap fit (convergence may stop earlier).
-    robustness: genotype emission mixture P = (1 - r) P(g | pair) + r / 3, with a numerical likelihood floor.
+    Genotype emissions: the centred view (the run's outlier rate against the cohort law; science.shared.emissions).
     error_fraction, error_tract_bp: the within-block error-tract model of the micro HMM (a
         fraction of copying in error tracts of this mean length).
     min_log_probability, pseudo_count, uniform_mix: M-step regularisation (log floor of a
@@ -50,14 +50,6 @@ class LinkerParameters:
             "role": "state", "axes": (), "dtype": "int64", "stored": True,
             "units": "updates/gap fit",
             "provenance": "At most 50 EM updates per gap fit; convergence may stop earlier.",
-        },
-    )
-    robustness: float = field(
-        default=0.01,
-        metadata={
-            "role": "state", "axes": (), "dtype": "float64", "stored": True,
-            "units": "probability",
-            "provenance": "Uniform genotype mixture weight 0.01, limiting sensitivity to incompatible evidence.",
         },
     )
     error_fraction: float = field(
@@ -310,7 +302,6 @@ BRANCH_LIMIT = 16
 # Linker probability floors and log-range bounds (docs/methods/assembly.md#aj07).
 LINKER_THETA_CAP = 0.5
 LINKER_THETA_FLOOR = 1e-15
-LINKER_EMISSION_FLOOR = 1e-300
 LINKER_MIN_SCALED_MASS = 1e-250
 LINKER_MAX_LOG_RANGE = 500.0
 # Cost/route only: existing execution lanes and block-product routing.

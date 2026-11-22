@@ -13,21 +13,26 @@ if TYPE_CHECKING:
 
 import time
 
+import numpy as np
+
 from ...contracts.evidence import ContigEvidence
 from ...contracts.painting import Painting
 from ...contracts.refit import FounderRefit
+from ...contracts.roles import require_schema
 from ...core.errors import InvariantError
 from ...core.ties import TieSettings
 from ...science.refit.parameters import RefitParameters
-from ...science.refit.run import refit_chromosome, summary
+from ...science.refit.refit import AcceptancePriors
+from ...science.refit.run import chromosome_histogram, refit_chromosome, run_priors, summary
 from ...store.container import CheckpointFile
-from ...store.protocol import claim, mark_complete, publish
+from ...store.protocol import claim, mark_complete, publish, read_items
+from ...store.store import CheckpointStore
 from ..framework import RecordKey, ResourceRequest, Task
 from . import records
 
 _DEFAULT_TIES = TieSettings()
 
-__all__ = ["run_contig", "task"]
+__all__ = ["run_contig", "task", "histogram_task", "priors_task"]
 
 
 def run_contig(
@@ -42,8 +47,10 @@ def run_contig(
     evidence_identity: str | None = None,
     ties: TieSettings = _DEFAULT_TIES,
     threads: int = 1,
+    priors: AcceptancePriors | None = None,
 ) -> FounderRefit:
-    """Resume or refit; reject mismatched payload/sample axes before any science."""
+    """Resume or refit; reject mismatched payload/sample axes before any science. ``priors``: the run's class
+    priors (record founder_refit/priors); None only for a one-contig call outside the graph."""
     if painting_identity is not None or evidence_identity is not None:
         if painting_identity is None or evidence_identity is None:
             raise InvariantError("refit needs both painting and evidence source identities")
@@ -61,7 +68,7 @@ def run_contig(
                 raise InvariantError("completed refit claim has no product")
         else:
             wall, cpu = time.perf_counter(), time.process_time()
-            result = refit_chromosome(painting, evidence, parameters, reverse=ties.reverse)
+            result = refit_chromosome(painting, evidence, parameters, reverse=ties.reverse, priors=priors)
             publish(
                 file,
                 "founder_refit/diagnostics",
@@ -94,12 +101,26 @@ def run(
     from ..refit.tasks import run_contig
     from ..refit import records
 
+    from ...store.protocol import resume
+
     reader, store = task_inputs(root)
+    file = store.contig(contig)
+    expected = records.expected(store, reader.manifest, product="refit", contig=contig).identity
+    request = records.expected(store, reader.manifest, product="priors")
+    saved = resume(store.run, request.key, request.identity)
+    if saved is None:
+        raise InvariantError("founder refit requires the run's class priors")
+    existing = read_items(file, records.FOUNDER_REFIT, expected, ("schema",))
+    if existing is not None:
+        require_schema(existing.payload, records.SCHEMA)
+        mark_complete(file, "founder_refit", {name: expected for name in (
+            records.FOUNDER_REFIT, records.SUMMARY, records.IDENTITY
+        )})
+        return expected
     painting = required_product(reader, painting_records, "painting", contig)
     evidence = required_dense_evidence(reader, contig)
-    expected = records.expected(store, reader.manifest, product="refit", contig=contig).identity
     run_contig(
-        store.contig(contig),
+        file,
         expected,
         painting,
         evidence,
@@ -107,14 +128,94 @@ def run(
         payload_identity=evidence.payload_identity,
         ties=ties,
         threads=team,
+        priors=_decode_priors(saved.payload),
     )
     return expected
 
 
+def _encode_priors(priors: AcceptancePriors) -> dict:
+    return dict(schema=records.SCHEMA, classes=tuple(int(c) for c in priors.classes), cells=priors.cells,
+                positive=priors.positive, coefficient=priors.coefficient, penalty=priors.penalty, bound=priors.bound,
+                floor=float(priors.floor))
+
+
+def _decode_priors(payload) -> AcceptancePriors:
+    return AcceptancePriors(
+        tuple(int(c) for c in payload["classes"]), np.asarray(payload["cells"]), np.asarray(payload["positive"]),
+        np.asarray(payload["coefficient"]), np.asarray(payload["penalty"]), np.asarray(payload["bound"]),
+        float(payload["floor"]),
+    )
+
+
+def histogram_run(root: str, contig: str, resolved: ResolvedConfiguration, *, team: int = 1) -> str:
+    """Pass 1 of the refit (ADVICE2 12.2): the contig's start-state gain histogram by carrier class."""
+    from ..painting import records as painting_records
+
+    reader, store = task_inputs(root)
+    request = records.expected(store, reader.manifest, product="histogram", contig=contig)
+    file = store.contig(contig)
+    with claim(file, request.key, request.identity, blocking=False) as needed:
+        if needed:
+            painting = required_product(reader, painting_records, "painting", contig)
+            evidence = required_dense_evidence(reader, contig)
+            histogram = chromosome_histogram(painting, evidence, resolved.parameters.founder_refit)
+            publish(file, request.key, request.identity, dict(schema=records.SCHEMA, histogram=histogram))
+    return request.identity
+
+
+def priors_run(root: str, resolved: ResolvedConfiguration, *, team: int = 1) -> str:
+    """The run's class priors (N0run, frozen by gate G7', ADVICE2 16.2): every analysed contig's histogram summed
+    (exact integer counts, any order) and pooled run-wide by the 4,096-cell rule."""
+    from ...contracts.contigs import AnalysisContigs
+    from ...store.protocol import resume
+
+    reader, store = task_inputs(root)
+    manifest = reader.manifest
+    request = records.expected(store, manifest, product="priors")
+    with claim(store.run, request.key, request.identity, blocking=False) as needed:
+        if needed:
+            histograms = []
+            for c in AnalysisContigs.from_manifest(manifest).included:
+                part = records.expected(store, manifest, product="histogram", contig=c)
+                saved = resume(store.contig(c), part.key, part.identity)
+                if saved is None:
+                    raise InvariantError(f"refit priors require every analysed contig's histogram ({c})")
+                histograms.append(np.asarray(saved.payload["histogram"]))
+            publish(store.run, request.key, request.identity, _encode_priors(run_priors(histograms)))
+    return request.identity
+
+
 def task(key, context: StageRun) -> Task:
-    """Declare the production founder-refit action and its published record spellings."""
+    """Declare the production founder-refit action and its published record spellings (the histogram and priors
+    stages of the same module dispatch on the key's stage)."""
+    if key.stage == "refit_histogram":
+        return histogram_task(key, context)
+    if key.stage == "refit_priors":
+        return priors_task(key, context)
+    names = (records.FOUNDER_REFIT, records.SUMMARY, records.IDENTITY)
+    # Checking a published refit uses only record headers. Independent contigs
+    # can check them on separate workers while fresh refits retain their teams.
+    existing = CheckpointStore(context.root).contig(key.scope).has(records.FOUNDER_REFIT)
     return Task(
         key, run, (context.root, key.scope, context.resolved, context.ties),
-        outputs=tuple(RecordKey(key.scope, name) for name in ("founder_refit", "founder_refit/summary", "identity/founder_refit")),
+        outputs=tuple(RecordKey(key.scope, name) for name in names),
+        resources=ResourceRequest(1, 1 if existing else context.cores), thread_argument="team",
+    )
+
+
+def histogram_task(key, context: StageRun) -> Task:
+    """A contig's refit histogram (pass 1)."""
+    return Task(
+        key, histogram_run, (context.root, key.scope, context.resolved),
+        outputs=(RecordKey(key.scope, records.HISTOGRAM),),
         resources=ResourceRequest(1, context.cores), thread_argument="team",
+    )
+
+
+def priors_task(key, context: StageRun) -> Task:
+    """The run's refit class priors."""
+    return Task(
+        key, priors_run, (context.root, context.resolved),
+        outputs=(RecordKey("run", records.PRIORS),),
+        resources=ResourceRequest(1, 1), thread_argument="team",
     )

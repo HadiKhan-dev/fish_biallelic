@@ -67,6 +67,9 @@ def fit_batches(planned: ResamplingPlan, alternatives: int) -> tuple[tuple[FitTa
 
 
 def _fit_batch_attached(inputs: DecisionInputs, tasks: tuple[FitTask, ...]) -> tuple[FitResult, ...]:
+    # The graph already scatters independent draw batches at one core each. A fit's sweeps depend on prior
+    # sweeps, and attaching the shared input and returning fits count toward wall time. On TroMau this was
+    # 55.9 CPU s over 89.2 summed task s. Famhs used 88.9 CPU s over 117.0 summed task s.
     with thread_team(1):
         return tuple(evaluate_task(inputs, task) for task in tasks)
 

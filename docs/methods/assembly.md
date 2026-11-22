@@ -244,11 +244,11 @@ Cost and scope: O(S m K^2). These terms describe the unit’s work/storage dimen
 <a id="aj05"></a>
 ## aj05 Linker observation model (proxies, emission sites, pair codes, robust float32 logs)
 
-Build linkage proxies, selected emission sites and founder-pair codes, then robust float32 log emissions. Keep the model inputs separate from the join objective and from released hard calls. Proxy reduction is a proposal device, not replacement scientific evidence.
+Build linkage proxies, selected emission sites and founder-pair codes, then float32 log emissions of the centred mixed likelihoods at the run's outlier rate against the cohort genotype law (4.21 A: no fixed robustness constant). Keep the model inputs separate from the join objective and from released hard calls. Proxy reduction is a proposal device, not replacement scientific evidence.
 
 Implementation: [science/assembly/linker/emissions.py](../../haplotype_reconstruction/science/assembly/linker/emissions.py), [science/assembly/linker/proxies.py](../../haplotype_reconstruction/science/assembly/linker/proxies.py), [science/assembly/linker/em.py](../../haplotype_reconstruction/science/assembly/linker/em.py).
 
-Parameters by name: `max_sites`, `robustness`, `linker`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `max_sites`, `linker`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(S E C + E K^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

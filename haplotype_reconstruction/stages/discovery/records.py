@@ -68,6 +68,7 @@ def identities(
     contig: str,
     blocks: int,
     evidence_identity: str,
+    observation_identity: str,
     numerical_policy: NumericalPolicy,
     ties: TieSettings,
 ) -> dict[str, str]:
@@ -85,7 +86,10 @@ def identities(
     )
     plain = jsonable(parameters)
     policy = jsonable(numerical_policy)
-    key = (json_digest([code, plain, policy]), contig, int(blocks), evidence_identity, ties.reverse, ties.keep)
+    key = (
+        json_digest([code, plain, policy]), contig, int(blocks), evidence_identity, observation_identity, ties.reverse,
+        ties.keep,
+    )
     cached = _IDENTITIES.get(key)
     if cached is not None:
         return dict(cached)
@@ -96,7 +100,7 @@ def identities(
             code,
             dict(discovery=plain, contig=contig, unit=unit),
             policy,
-            {"evidence": evidence_identity},
+            {"evidence": evidence_identity, "observation": observation_identity},
             ties.reverse,
             ties.keep,
         )))
@@ -196,6 +200,7 @@ def expected(
     Neither stored discovery identities nor a completion marker supply an input.
     """
     from ..evidence import records as evidence_records
+    from ..observation import records as observation_records
 
     if contig is None or contig not in manifest["contigs"]:
         raise InputError("discovery reader requires a bound contig")
@@ -217,6 +222,7 @@ def expected(
         contig=contig,
         blocks=count,
         evidence_identity=request.identity,
+        observation_identity=observation_records.bound_identity(store, manifest),
         numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
         ties=TieSettings(reverse=bool(manifest["ties"]["reverse"]), keep=tuple(manifest["ties"]["keep"])),
     )

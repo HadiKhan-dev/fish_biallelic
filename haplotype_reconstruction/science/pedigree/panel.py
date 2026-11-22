@@ -51,13 +51,15 @@ def robust_screen_values(
     markers: np.ndarray,
     eligibility: ParentEligibility,
     config: PedigreeParameters,
+    units: np.ndarray | None = None,
 ) -> np.ndarray:
     """robust_screen with each child's per-chromosome M1 scores [C, P] of its eligible parents from
-    ``values_of(child, parents)`` (e.g. CompactM1.values), never a dense [C, N, N] array."""
+    ``values_of(child, parents)`` (e.g. CompactM1.values), never a dense [C, N, N] array. ``units``: B2's effective
+    information units per chromosome (m1.temperature), None under the 4.20 rule."""
     panel = config.panel
     output = np.full((n_samples, n_samples), -np.inf, dtype=np.float64)
     weights = chromosome_weights(markers, config)
-    tempering = m1.temperature(markers, config)
+    tempering = m1.temperature(markers, config, units)
     # Caller supplies the fixed genome-floor values; retained entries stay raw.
     for child in np.flatnonzero(eligibility.children):
         parents = np.flatnonzero(eligibility.parents[child])
@@ -96,7 +98,7 @@ def bounded_panel(
     """The capped retained-parent pairs, and counts for the log.
 
     ``compact`` the certified M1 profile (the retained parents of each child), ``bounds`` [C, P] each chromosome's
-    pair bounds in the canonical retained-pair order (``pair_bound.retained_batches``). Every eligible pair of a
+    pair bounds in the canonical retained-pair order (``pair_bound_screen.retained_batches``). Every eligible pair of a
     child's retained parents enters. When a child has more than the nominal per-child cap, it keeps the pairs with
     the largest full-data bound sum_c bound (an upper bound on the pair's full-data M2), including every pair tied with
     the last kept one and every pair whose sum is not a number (a numerical failure is never evidence for exclusion).

@@ -59,6 +59,7 @@ from ...science.selection.parameters import (
 )
 from ...science.selection.rounds import BlockSelection, BlockTask, block_task_bytes, select_task
 from ...science.selection.run import initial_tasks, round_tasks
+from ...science.shared.observation import mix_likelihoods
 from ...store.progress import UnitProgress
 from ...store.protocol import ClaimBusy, claim
 from ...store.store import CheckpointStore
@@ -82,6 +83,7 @@ class FounderEvidence(Protocol):
     positions: np.ndarray
     likelihoods: np.ndarray | CodedLikelihoods
     observed: np.ndarray | PairArray
+    cohort_frequencies: np.ndarray
 
 
 def _run_block(
@@ -90,6 +92,7 @@ def _run_block(
     evidence: FounderEvidence,
     scope: SelectionRecords | None,
     *,
+    outlier_rate: float,
     reverse: bool,
     census_sink: CensusSink | None = None,
     threads: int = 1,
@@ -110,6 +113,8 @@ def _run_block(
                 evidence.likelihoods,
                 evidence.observed,
                 settings,
+                cohort=evidence.cohort_frequencies,
+                outlier_rate=outlier_rate,
                 reverse=reverse,
                 census_sink=census_sink,
                 threads=share_reader(SHARE_REREAD_SECONDS),
@@ -141,6 +146,7 @@ def _run_blocks(
     evidence: FounderEvidence,
     scope: SelectionRecords | None,
     *,
+    outlier_rate: float,
     reverse: bool,
     census_sink: CensusSink | None = None,
     threads: int = 1,
@@ -160,6 +166,7 @@ def _run_blocks(
                 settings,
                 evidence,
                 scope,
+                outlier_rate=outlier_rate,
                 reverse=reverse,
                 census_sink=census_sink,
                 threads=max(1, int(current_budget().threads())),
@@ -195,6 +202,7 @@ def round_expansion(
     settings: BlockSettings,
     evidence: FounderEvidence,
     *,
+    outlier_rate: float,
     scope: SelectionRecords | None = None,
     contig: str = "fixture",
     round_name: str = "initial",
@@ -287,7 +295,11 @@ def round_expansion(
                 TaskKey("selection", f"blocks:{chunk[0].index:06d}", contig, round_name),
                 _run_blocks,
                 args=(tuple(chunk), settings, evidence, scope),
-                kwargs=dict(reverse=reverse, census_sink=census_sink, memo_scope=memo_scope, retain_memos=retain_memos),
+                kwargs=dict(
+                    outlier_rate=outlier_rate, reverse=reverse,
+                    census_sink=census_sink, memo_scope=memo_scope,
+                    retain_memos=retain_memos,
+                ),
                 # Small-cohort chunks may grow within their useful-width cap. At larger sample counts singleton chunks
                 # may grow to the allocation and grouped chunks to their lane team, one thread per 64-sample lane
                 # block (each block re-reads its team). A straggler's chunk starts on its minimum team; any chunk that
@@ -320,7 +332,9 @@ def _run_refit(
     task: ContextRefitTask,
     likelihoods: np.ndarray | CodedLikelihoods,
     observed: np.ndarray,
+    cohort: np.ndarray,
     *,
+    outlier_rate: float,
     reverse: bool,
     census_sink: CensusSink | None = None,
     threads: int = 1,
@@ -334,10 +348,15 @@ def _run_refit(
                 saved = scope.load_refit(task.index)
                 assert saved is not None
                 return saved
-            result = _run_refit(task, likelihoods, observed, reverse=reverse, census_sink=census_sink, threads=threads)
+            result = _run_refit(
+                task, likelihoods, observed, cohort, outlier_rate=outlier_rate,
+                reverse=reverse,
+                census_sink=census_sink, threads=threads,
+            )
             scope.save_refit(result)
             return result
-    gl = gather_likelihoods(likelihoods, task.columns)
+    # The component's mixed likelihoods (the run's outlier rate against the cohort law, science.shared.observation).
+    gl = mix_likelihoods(gather_likelihoods(likelihoods, task.columns), cohort[task.columns], outlier_rate)
     seen = np.ascontiguousarray(observed[:, task.columns])
     with thread_team(default=threads):
         output = refit_component(
@@ -416,6 +435,7 @@ def context_expansion(
     genetic_map: ChromosomeGeneticMap,
     parameters: SelectionParameters,
     *,
+    outlier_rate: float,
     scope: SelectionRecords | None = None,
     contig: str = "fixture",
     round_name: str = "l1",
@@ -449,8 +469,11 @@ def context_expansion(
         Task(
             TaskKey("selection", f"refit:{spec.index:06d}", contig, round_name),
             _run_refit,
-            args=(spec, evidence.likelihoods, observed),
-            kwargs=dict(reverse=reverse, census_sink=census_sink, scope=scope),
+            args=(spec, evidence.likelihoods, observed, evidence.cohort_frequencies),
+            kwargs=dict(
+                outlier_rate=outlier_rate, reverse=reverse, census_sink=census_sink,
+                scope=scope,
+            ),
             outputs=() if scope is None else (RecordKey(contig, scope.key("refit", spec.index)),),
             resources=ResourceRequest(
                 1, max_threads, refit_task_bytes(observed.shape[0], len(spec.columns), len(spec.starts), len(spec.h))
@@ -485,6 +508,7 @@ class SelectionSession:
         [], tuple[Sequence[DiscoveredBlock | None], FounderEvidence]
     ]
     manifest: dict
+    outlier_rate: float
     reverse: bool = False
     max_threads: int = 1
     census_sink: CensusSink | None = None
@@ -532,6 +556,7 @@ def _expand_refit(state: RoundState, assembled: AssemblyResult | AssemblyProduct
         state.evidence,
         session.genetic_map,
         session.parameters,
+        outlier_rate=session.outlier_rate,
         scope=scope,
         contig=session.contig,
         round_name=scope.round_name,
@@ -563,6 +588,7 @@ def _expand_blocks(state: RoundState, proposals: Sequence[ContextProposal] | Non
         blocks,
         settings,
         state.evidence,
+        outlier_rate=session.outlier_rate,
         scope=scope,
         contig=session.contig,
         round_name=scope.round_name,
@@ -725,6 +751,7 @@ def run(
     from ...engine.graph import Expansion, RecordKey, ResultRef, Task, TaskKey
     from ..discovery import records as discovery_records
     from ..evidence import records as evidence_records
+    from ..observation import records as observation_records
     from ..relatedness.working_map import working_maps
     from ..selection.tasks import SelectionSession, selection_round_task
 
@@ -757,6 +784,7 @@ def run(
         census_sink=ties.census,
         max_threads=cores,
         manifest=reader.manifest,
+        outlier_rate=observation_records.outlier_rate_blocks(reader, store),
     )
     child = selection_round_task(
         session,

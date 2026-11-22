@@ -179,6 +179,8 @@ def _convert(kind: str, value, where: str, choices: tuple, cwd: Path):
     if kind == "int":
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             fail("a nonnegative integer")
+        if choices and value not in choices:
+            raise SettingsError(f"{where}: {value!r} is not one of {', '.join(repr(c) for c in choices)}")
         return value
     if kind == "float":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
@@ -583,6 +585,9 @@ def _validate_simulation(config: Settings) -> None:
     require(reads.reference_bias_power > 0, "reference_bias_power must be positive")
     require(0 <= reads.reference_pull <= 1, "reference_pull must be between zero and one")
     require(0 <= reads.foreign_read_share < 1, "foreign_read_share must be in [0, 1)")
+    require(0 <= reads.injected_outlier_rate < 0.5, "injected_outlier_rate must be in [0, 0.5)")
+    require(reads.injected_outlier_pattern in ("uniform", "heterogeneous", "clustered", "misspecified"),
+            "injected_outlier_pattern must be uniform, heterogeneous, clustered or misspecified")
     require(not reads.reference_bias or reads.reference_bias_window_bp > 0,
             "positive reference_bias requires positive reference_bias_window_bp")
     for name in ("substitution_share", "context_sites", "context_convert"):

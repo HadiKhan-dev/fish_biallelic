@@ -12,6 +12,14 @@ seed = 400
 depth = 5.0
 pedigree = "configs/close_families.tsv"
 
+[simulation.reads]
+# Medium-length single reads: lognormal lengths with mean 3 kb and log-SD 0.9 (median 2 kb); per-read Phred quality
+# ~ Normal(20, 4), a mean per-base error of about 1.5 %.
+long_read_mean_bp = 3000.0
+long_read_length_sigma = 0.9
+read_quality_mean = 20.0
+read_quality_sd = 4.0
+
 [simulation.genome]
 contigs = ["c1", "c2"]
 length_bp = 1000000
@@ -30,6 +38,7 @@ size = 500.0
 # Optional call-set artefacts, applied after reads:
 # [simulation.artefacts]
 # preset = "reference_blocks"
+# balance_dispersion = 0.0  # required with long reads (the read model sets the allele balance)
 
 [simulation.stocks.left]
 population = "ancestral"

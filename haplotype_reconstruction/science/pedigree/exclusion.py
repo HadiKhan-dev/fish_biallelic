@@ -13,8 +13,9 @@ from numba import prange
 from ...contracts.pedigree import ExclusionEvidence
 from ...core.errors import InputError
 from ...core.kernels import kernel
-from .kernels.signatures import OVERLOADS
-from .parameters import EXCLUSION_DYAD_BATCH, EXCLUSION_PATTERN_LIMIT, EXCLUSION_TINY
+from .kernels.exclusion import OVERLOADS
+from .numerical_parameters import EXCLUSION_TINY
+from .workspace_parameters import EXCLUSION_DYAD_BATCH, EXCLUSION_PATTERN_LIMIT
 
 MAX_PATTERNS = EXCLUSION_PATTERN_LIMIT
 

@@ -19,10 +19,11 @@ from dataclasses import dataclass
 import numpy as np
 from numba import prange
 
+from ...core.errors import InputError
 from ...core.kernels import kernel
 from ...core.ties import policy
-from .kernels.signatures import OVERLOADS
-from .parameters import JUNCTION_UNREACHABLE_COUNT, JUNCTION_UNREACHABLE_STATE
+from .kernels.decision import OVERLOADS
+from .numerical_parameters import JUNCTION_UNREACHABLE_COUNT, JUNCTION_UNREACHABLE_STATE
 
 
 @kernel(overloads=OVERLOADS["junctions._local_classes"], cache=True, parallel=True, nogil=True)
@@ -285,12 +286,25 @@ class ComponentSchedule:
     callable_bins: np.ndarray
     # int64 [T, B] bin-local class of each whole-component trajectory (PD29 family transmission); None when empty.
     trajectory_classes: np.ndarray | None = None
+    # float64 [N, B, 2] probability that each SCHEDULED homologue's painted label is wrong (the painting's v of the
+    # track whose pooled class it carries; the larger of the two when it carries neither), and float64 [N, B] that
+    # the released pair is wrong (u); zero where a label is unknown or the painting supplied none (ADVICE2 11.1).
+    homologue_error: np.ndarray | None = None
+    pair_error: np.ndarray | None = None
 
 
 def schedules(
-    state_classes: np.ndarray, named_alleles: np.ndarray, bin_sizes: np.ndarray, *, reverse: bool
+    state_classes: np.ndarray,
+    named_alleles: np.ndarray,
+    bin_sizes: np.ndarray,
+    *,
+    reverse: bool,
+    label_error: np.ndarray | None = None,
 ) -> ComponentSchedule:
     """Build a component's schedule, local classes, known-label mask, T and count summaries once.
+
+    ``label_error`` float32 [N, B, 3] (PreparedComponent.label_error, tracks in the order of state_classes) or None
+    sets the schedule's homologue and pair label errors; None gives zeros (every allowance at its floor).
 
     Trajectories are numbered in canonical allele-content order, so painted track order
     and class numbering do not matter. Counts sum the minimum boundary alignment costs
@@ -310,6 +324,8 @@ def schedules(
             1,
             np.zeros(n_samples, dtype=np.int64),
             np.zeros(n_samples, dtype=np.int64),
+            homologue_error=np.zeros((n_samples, n_bins, 2)),
+            pair_error=np.zeros((n_samples, n_bins)),
         )
     order = np.asarray(sorted(range(len(named)), key=lambda row: named[row].tobytes()), dtype=np.int64)
     inverse = np.empty(len(order), dtype=np.int64)
@@ -331,12 +347,37 @@ def schedules(
     straight = np.count_nonzero(pairs[:, :-1] != pairs[:, 1:], axis=2)
     crossed = np.count_nonzero(pairs[:, :-1] != pairs[:, 1:, ::-1], axis=2)
     counts = np.sum(np.minimum(straight, crossed), axis=1, dtype=np.int64)
+    known_pair = np.all(present, axis=2)
+    homologue_error, pair_error = _label_errors(label_error, pooled, classes, known_pair)
     return ComponentSchedule(
         pairs,
         classes,
-        np.all(present, axis=2),
+        known_pair,
         int(len(trajectories)),
         counts,
         np.count_nonzero(present, axis=(1, 2)).astype(np.int64),
         trajectories.astype(np.int64),
+        homologue_error,
+        pair_error,
     )
+
+
+def _label_errors(
+    label_error: np.ndarray | None, pooled: np.ndarray, classes: np.ndarray, known: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """(float64 [N, B, 2], float64 [N, B]): the painting's v moved onto the scheduled homologues by local class (a
+    homologue carrying painted track t's pooled class takes v_t; both tracks carry one class when they agree, and
+    then v_0 = v_1), and u; zero where the pair is not known (the consumers emit nothing there)."""
+    shape = classes.shape
+    if label_error is None:
+        return np.zeros(shape), np.zeros(shape[:2])
+    values = np.nan_to_num(np.asarray(label_error, dtype=np.float64), nan=0.0)
+    if values.shape != (*shape[:2], 3):
+        raise InputError("painting label errors differ from the schedule's sample and bin axes")
+    track = values[..., 1:]
+    first = classes == pooled[..., :1]
+    second = classes == pooled[..., 1:]
+    homologue = np.where(first, track[..., :1], np.where(second, track[..., 1:], track.max(axis=2, keepdims=True)))
+    homologue[~known] = 0.0
+    pair = np.where(known, values[..., 0], 0.0)
+    return np.ascontiguousarray(homologue), np.ascontiguousarray(pair)

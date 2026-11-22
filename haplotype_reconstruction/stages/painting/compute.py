@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from functools import partial
 from typing import Any, Protocol
 
 import numpy as np
@@ -41,6 +42,16 @@ def _packed_bytes(panel, samples, config):
     return 8 * samples * (states.n_states * (states.n_states + 1) // 2) * bins.n_bins
 
 
+def _read_state(builder: Any) -> tuple[Any, np.ndarray | None]:
+    """(the read-state builder behind ``builder`` (science.painting.read_inputs.ReadEmissionBuilder; None for the
+    emissions without read state), the ``columns`` keyword bound around it)."""
+    columns = None
+    while isinstance(builder, partial):
+        columns = builder.keywords.get("columns", columns)
+        builder = builder.func
+    return (builder if hasattr(builder, "sample_bytes") else None), columns
+
+
 def _decoder_bytes(states: PaintingStates, n_bins: int) -> int:
     """Per-sample working bytes of the chain's estimation and decoding (module docstring)."""
     n_track = states.n_states + int(np.sum(states.anchored))
@@ -64,9 +75,10 @@ def decode_component(
     emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     batch_samples: int = 1,
     reverse: bool,
-    emission_builder: EmissionBuilder = emissions.tempered_emissions,
+    emission_builder: EmissionBuilder | None = None,
     progress: PaintingProgress | None = None,
     progress_key: str = "",
+    label_errors: bool = False,
 ) -> ComponentDecoding:
     """Decode every sample of one component (all samples of ``likelihoods``).
 
@@ -82,6 +94,8 @@ def decode_component(
     confidence strength. The packed tempered label
     emissions are kept when they fit ``emission_cache_bytes``. ``reverse``: the run's tie-convention reversal
     (TieSettings.reverse), required so that no caller falls back to the forward convention by omission.
+    ``label_errors``: also the label-error statistic of the decoded labels (fidelity.label_errors; the reference
+    painting, ADVICE2 11.1).
     """
     n_samples = likelihoods.shape[0]
     states, bins = decoding_grid(panel, config)
@@ -112,6 +126,7 @@ def decode_component(
             qf=np.zeros((n_samples, 0)),
             qaf=np.zeros((n_samples, 0)),
             model=None,
+            label_error=np.zeros((n_samples, 0, 3), dtype=np.float32) if label_errors else None,
         )
     if model is None:
         raise InvariantError("a nonempty painting component requires its assembled-panel model")
@@ -126,6 +141,10 @@ def decode_component(
     packed_bytes = 8 * n_samples * n_packed * n_bins
     fixed_bytes = packed_bytes if packed_bytes <= emission_cache_bytes else 0
     bytes_per_sample = _decoder_bytes(states, n_bins)
+    read_state, columns = _read_state(emission_builder)
+    if read_state is not None:      # the batch's read matrices, label-independent parts and their transient inputs
+        selected = emissions.contig_columns(np.asarray(evidence_sites, dtype=np.int64)[states.site_indices], columns)
+        bytes_per_sample += read_state.sample_bytes(selected, n_states, n_bins, confidence_model is not None)
     packed = np.empty((n_samples, n_packed, n_bins)) if fixed_bytes else None
     size = max(1, min(n_samples, int(batch_samples)))
     budget = fixed_bytes + size * bytes_per_sample
@@ -137,6 +156,7 @@ def decode_component(
     qaf = np.empty((n_samples, n_bins))
     support = np.empty((n_samples, 2, n_bins), dtype=np.bool_)
     eligible = np.empty(n_samples, dtype=np.bool_)
+    label_error = np.full((n_samples, n_bins, 3), np.nan, dtype=np.float32) if label_errors else None
     # Progress records hold fixed blocks of PROGRESS_BLOCK_SAMPLES samples, so their keys and contents do not depend on
     # the CPU-sized decode batch: a run and its shell workflow publish the same records, and a resume on another node
     # reuses every block it finds. A batch is skipped when all its samples were restored.
@@ -152,6 +172,8 @@ def decode_component(
             paths[block:end], masks[block:end] = saved["paths"], saved["masks"]
             switch_counts[block:end], qf[block:end], qaf[block:end] = saved["switches"], saved["qf"], saved["qaf"]
             support[block:end], eligible[block:end] = saved["support"], saved["eligible"]
+            if label_error is not None:
+                label_error[block:end] = saved["label_error"]
             done[block:end] = True
             saved_blocks.add(block)
         restored = {start for start in range(0, n_samples, size) if done[start : min(start + size, n_samples)].all()}
@@ -161,17 +183,25 @@ def decode_component(
         states, bins, likelihoods, observed, sites, config, size, emission_builder, robustness_epsilon, site_correlation, skip=restored
     )():
         confident = None
+        scalar = raw.raw if hasattr(raw, "read") else raw          # the label emissions (read state: the scalar part)
         if confidence_model is not None:
-            confident = raw * emissions.confidence_scale(
+            scaled = scalar * emissions.confidence_scale(
                 informative, bins.starts, site_correlation, confidence_model.site_correlation, group
             )[:, None, :]
+            confident = raw.at_confidence(scaled) if hasattr(raw, "read") else scaled
         if packed is not None:
-            emissions.pack_emissions(raw if confident is None else confident, packed, start, n_states)
-        batch_paths, batch_masks, batch_switches, batch_qf, batch_qaf, batch_support = decode_batch(
+            # later stages (pedigree, family phase) read the emissions without read state (the scalar part)
+            emissions.pack_emissions(scalar if confident is None else (confident.raw if hasattr(confident, "read")
+                                     else confident), packed, start, n_states)
+        decoded = decode_batch(
             raw, batch_eligible, batch_observed, informative, states, bins, model, capable,
             local_keys, public_ids, config, reverse=reverse,
-            confidence=None if confident is None else (confidence_model, confident),
+            confidence=None if confident is None else (confidence_model, confident), errors=label_errors,
         )
+        batch_paths, batch_masks, batch_switches, batch_qf, batch_qaf, batch_support = decoded[:6]
+        if label_error is not None:
+            label_error[start:stop, :, 0] = decoded[6]
+            label_error[start:stop, :, 1:] = np.transpose(decoded[7], (0, 2, 1))
         del confident
         qf[start:stop], qaf[start:stop] = batch_qf, batch_qaf
         del raw
@@ -197,6 +227,7 @@ def decode_component(
                         qaf=qaf[block:end],
                         support=support[block:end],
                         eligible=eligible[block:end],
+                        **({} if label_error is None else dict(label_error=label_error[block:end])),
                     ),
                 )
                 saved_blocks.add(block)
@@ -216,6 +247,7 @@ def decode_component(
         qf=qf,
         qaf=qaf,
         model=model,
+        label_error=label_error,
     )
 
 
@@ -226,16 +258,19 @@ def _component_sources(
     sites: np.ndarray,
     config: PaintingParameters,
     budget: int,
-) -> tuple[tuple[Any, Any, np.ndarray], int]:
-    """((likelihoods, observed, panel-site map) to build the component's emissions from, the emission budget left).
+) -> tuple[tuple[Any, Any, np.ndarray, np.ndarray | None], int]:
+    """((likelihoods, observed, panel-site map, contig columns) to build the component's emissions from, the emission
+    budget left).
 
     When the evidence offers resident copies (resident_columns), the component's evidence at its panel
     sites (each sample's genotype-likelihood codes and its likelihood dictionary, far smaller than the emissions) is
     read once into memory, charged to the budget, whenever the copying-model estimate and the decode keep the packed
     emissions they would keep without it (or could not keep them anyway). Every emission build of the component, the
     estimate's, label continuity's and the decode's, is then a parallel in-memory gather and emission kernel instead
-    of a serial read of the stored evidence. The values are the same."""
-    unchanged = (likelihoods, observed, sites), budget
+    of a serial read of the stored evidence. The values are the same. The panel-site map then indexes the copy, and
+    the contig columns (the copy's column -> contig evidence column; None without a copy) are what contig-wide
+    per-site arrays such as the cohort frequencies are read at (emissions.contig_columns)."""
+    unchanged = (likelihoods, observed, sites, None), budget
     if not (hasattr(likelihoods, "resident_columns") and hasattr(observed, "resident_columns")):
         return unchanged
     states = build_states(panel.positions, panel.inference, panel.kept)
@@ -247,7 +282,12 @@ def _component_sources(
     if copy_bytes + (packed if packed <= budget else 0) > budget:
         return unchanged
     copy = likelihoods.resident_columns(sites)
-    resident = (copy, observed.resident_columns(sites, copy), np.arange(len(sites), dtype=np.int64))
+    resident = (
+        copy,
+        observed.resident_columns(sites, copy),
+        np.arange(len(sites), dtype=np.int64),
+        np.asarray(sites, dtype=np.int64),
+    )
     return resident, budget - copy_bytes
 
 
@@ -261,13 +301,14 @@ def paint_chromosome(
     reverse: bool,
     emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     census_sink: Callable[[ties.TieCensus], None] | None = None,
-    emission_builder: EmissionBuilder = emissions.tempered_emissions,
+    emission_builder: EmissionBuilder | None = None,
     model_sink: Callable[[int, fidelity.ChainModel | None], None] | None = None,
     progress: PaintingProgress | None = None,
     label_continuity: tuple[LabelContinuity, ...] | None = None,
     robustness_epsilon: float,
     site_correlation: float,
     confidence_correlation: float | None = None,
+    label_errors: bool = False,
 ) -> Painting:
     """Label continuity, then the painting of every component of one chromosome.
 
@@ -278,8 +319,11 @@ def paint_chromosome(
     continuity and decoding); ``confidence_correlation`` (None = the same) is the run's confidence strength: a second
     fit of the copying model at that strength gives the release posteriors, and later stages read emissions at it.
     A supplied label_continuity fixes the fine painting's
-    row outcome: apply it before fitting this resolution's own chain and do not search again.
+    row outcome: apply it before fitting this resolution's own chain and do not search again. ``emission_builder``
+    (None: resident tempered emissions under the evidence's own cohort law, ``evidence.cohort_frequencies``).
     """
+    if emission_builder is None:
+        emission_builder = partial(emissions.tempered_emissions, cohort=evidence.cohort_frequencies)
     likelihoods = evidence.likelihoods
     observed = evidence.observed
     epsilon = robustness_epsilon
@@ -290,9 +334,30 @@ def paint_chromosome(
         if label_continuity is not None:
             outcome = label_continuity[component_index]
             panel = relabel_rows(panel, outcome.row_maps) if outcome.accepted else panel
-        (component_likelihoods, component_observed, sites), budget = _component_sources(
+        (component_likelihoods, component_observed, sites, columns), budget = _component_sources(
             panel, likelihoods, observed, panel.site_indices(), config, cache_remaining
         )
+        # From a resident copy the builder reads contig-wide per-site arrays at the copy's contig columns.
+        builder = emission_builder if columns is None else partial(emission_builder, columns=columns)
+        # With the read state, the sample batch holds the read matrices of every label pair and bin: batches are
+        # capped so that their read-state working set fits READ_STATE_BATCH_BYTES (read_inputs.ReadEmissionBuilder.
+        # batch_samples; results do not depend on the batch), and a copying-model fit holds its batches only when
+        # their read matrices fit the emission budget beside the packed emissions.
+        component_batch, held_read_bytes = batch_samples, 0
+        read_state, _ = _read_state(emission_builder)
+        if read_state is not None:
+            states, bins = decoding_grid(panel, config)
+            if bins.n_bins:
+                selected = emissions.contig_columns(np.asarray(sites, dtype=np.int64)[states.site_indices], columns)
+                confidence = confidence_correlation is not None and float(confidence_correlation) != float(
+                    site_correlation
+                )
+                component_batch = read_state.batch_samples(
+                    selected, states.n_states, bins.n_bins, confidence, batch_samples
+                )
+                held_read_bytes = component_likelihoods.shape[0] * read_state.matrix_bytes(
+                    states.n_states, bins.n_bins
+                )
         # Progress records (resume after an interruption): the copying model, the label-continuity outcome and each
         # decoded sample batch, each published as soon as it is final and bound to this painting's derivation.
         saved = None if progress is None else progress.load(f"c{component_index}/model")
@@ -307,9 +372,10 @@ def paint_chromosome(
                 config,
                 genetic_map,
                 robustness_epsilon=epsilon, site_correlation=site_correlation,
-                batch_samples=batch_samples,
-                cache_emissions=_packed_bytes(panel, component_likelihoods.shape[0], config) <= budget,
-                emission_builder=emission_builder,
+                batch_samples=component_batch,
+                cache_emissions=_packed_bytes(panel, component_likelihoods.shape[0], config) + held_read_bytes
+                <= budget,
+                emission_builder=builder,
             )
             if progress is not None:
                 progress.save(f"c{component_index}/model", dict(model=None if model is None else to_payload(model)))
@@ -331,10 +397,10 @@ def paint_chromosome(
                 genetic_map,
                 model=model,
                 robustness_epsilon=epsilon, site_correlation=site_correlation,
-                batch_samples=batch_samples,
+                batch_samples=component_batch,
                 reverse=reverse,
                 census_sink=census_sink,
-                emission_builder=emission_builder,
+                emission_builder=builder,
                 emission_cache_bytes=budget,
             )
             if progress is not None:
@@ -355,9 +421,10 @@ def paint_chromosome(
                     config,
                     genetic_map,
                     robustness_epsilon=epsilon, site_correlation=float(confidence_correlation),
-                    batch_samples=batch_samples,
-                    cache_emissions=_packed_bytes(painted, component_likelihoods.shape[0], config) <= budget,
-                    emission_builder=emission_builder,
+                    batch_samples=component_batch,
+                    cache_emissions=_packed_bytes(painted, component_likelihoods.shape[0], config) + held_read_bytes
+                    <= budget,
+                    emission_builder=builder,
                 )
                 if progress is not None:
                     progress.save(
@@ -375,11 +442,12 @@ def paint_chromosome(
             confidence_model=confidence_model,
             robustness_epsilon=epsilon, site_correlation=site_correlation,
             emission_cache_bytes=budget,
-            batch_samples=batch_samples,
+            batch_samples=component_batch,
             reverse=reverse,
-            emission_builder=emission_builder,
+            emission_builder=builder,
             progress=progress,
             progress_key=f"c{component_index}",
+            label_errors=label_errors,
         )
         if decoding.packed_emissions is not None:
             cache_remaining -= decoding.packed_emissions.nbytes

@@ -161,7 +161,7 @@ def _block_data(inputs: JoinInputs, config: LinkerParameters, index: int) -> _Bl
     classes = GENOTYPE_CODES if np.all(alleles >= 0) else PREDICTIVE_CODES
     likelihoods = np.ascontiguousarray(inputs.gl[:, inputs.offsets[index] + sites])
     return _BlockData(
-        log_emissions(likelihoods, float(config.robustness), classes),
+        log_emissions(likelihoods, classes),
         codes,
         np.ascontiguousarray(block.positions[sites], dtype=np.int64),
         int(block.founders),

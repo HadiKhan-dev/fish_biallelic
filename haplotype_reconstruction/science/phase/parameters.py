@@ -36,16 +36,12 @@ class PhaseParameters:
         nats.
       junction_pin_reference_bins: the flank window of that test (reference windows, cut at the relative's own label changes).
     Release (release.py):
-      site_deviation: mixture mass of the release's site model: given its label pair, a sample's ordered alleles at a
-        site are the pair's panel alleles (each with its own leave-one-out flip probability, allele_evidence.py), or
-        with this probability redrawn from a uniform genotype (a label error shorter than a bin, a conversion or
-        mutation; the genotype then changes with probability 2/3 of it). Weighed by the sample's own reads at the
-        site, reads that contradict the labels' genotype lower, withdraw or move the call. A working value chosen on
-        the validation simulations (0.01 unphases 12-13% of phased joins; 3e-4 keeps more genotype errors), not an
-        estimate of an error rate. The panel alleles' own uncertainty is separate: it is each state's
-        capped empirical-Bayes per-copy disagreement with the selected allele, conditional on the fitted carriers
-        and panel, with the sample's direct own likelihood term removed. The copies flip independently; this is not
-        a cross-fitted refit or exact integration over carrier/panel selection or one shared latent allele.
+      The release's site model: given its label pair, a sample's ordered alleles at a site are the pair's panel
+        alleles (each with its own leave-one-out flip probability, allele_evidence.py), or, with the run's outlier
+        rate (estimated at the painting calibration), redrawn from the site's cohort genotype frequencies (ordered
+        weights q0, q1/2, q1/2, q2; science.shared.observation). In 4.20 this was a fixed working value 0.001 against
+        a uniform genotype, chosen on the validation simulations (0.01 unphased 12-13% of phased joins; 3e-4 kept more
+        genotype errors).
       genotype_posterior: a genotype is called where its posterior reaches this value (the painting's tau).
       phase_posterior: a heterozygous call is released phased where its ordered allele posterior reaches this
         value.
@@ -56,10 +52,19 @@ class PhaseParameters:
         whereas a wrong site call misphases one site. A working value chosen on the validation simulations: at 0.99,
         near-ties decided only by the label-switch prior added released long switches in partial-genome designs,
         which 0.999 avoided. Not an estimate of an error rate, nor a calibrated confidence for a whole set; longer
-        sets still carry an upstream identity error over more sites. It must lie below the orientation certainty of a
-        fully determined
-        heterozygous site under the site model, (1 - 5 site_deviation / 6) / (1 - 2 site_deviation / 3)
-        (0.99983 at the default site_deviation), or every bin would end a set.
+        sets still carry an upstream identity error over more sites. The orientation certainty of a fully
+        determined heterozygous site under the release's site model is (1 - eps + eps q1 / 2) / (1 - eps + eps q1),
+        below this value wherever the alternative allele is common (eps 0.0055 on TroMau), so the set statistic uses
+        its own site model, set_site_deviation against a uniform genotype, and never the outlier rate.
+      set_site_deviation: the set statistic's site departure against a uniform genotype (ordered weights 1/3, 1/6,
+        1/6, 1/3), 4.20's working value. It has two jobs: a label pair whose panel alleles cannot produce the reads
+        keeps a 50/50 orientation instead of dropping out of the statistic (with no departure, label uncertainty
+        vanishes exactly where the reads contradict it, and such near-ties released long switches), and the ceiling
+        it gives a fully determined heterozygous site,
+        (1 - 5d/6) / (1 - 2d/3) = 0.99983, must lie above set_posterior, so such a site never ends a set by itself,
+        while near-ties decided by the label prior still do. With the run's outlier rate instead, every confidently
+        heterozygous bin of a gauge sample ended its set on real data (4.21 D3: TroMau sets 40,916 in 4.20 against
+        3.1 M; validation replays lab421/r11/f1).
         Phase sets also break at junction candidates for samples carrying both labels unless a parental homologue
         pins them, and, for samples without a linked parent, at painting tie boundaries (release.py); a sample with
         children keeps a tie break only where its children-anchored orientation certainty at the nearest
@@ -134,16 +139,6 @@ class PhaseParameters:
             "units": "reference windows",
         },
     )
-    site_deviation: float = field(
-        default=1e-3,
-        metadata={
-            "provenance": (
-                "FP16; genotype-departure mixture probability 0.001, a working value chosen on validation "
-                "simulations."
-            ),
-            "units": "probability",
-        },
-    )
     genotype_posterior: float = field(
         default=0.9,
         metadata={
@@ -164,6 +159,16 @@ class PhaseParameters:
             "provenance": (
                 "FP08/FP18-FP19; probability cutoff 0.999 for phase-set continuation; its log odds also gate "
                 "parental pairing moves."
+            ),
+            "units": "probability",
+        },
+    )
+    set_site_deviation: float = field(
+        default=0.001,
+        metadata={
+            "provenance": (
+                "4.20's working site departure against a uniform genotype, kept for the phase-set statistic only "
+                "(4.21 D3: the run's outlier rate capped every common heterozygote below set_posterior)."
             ),
             "units": "probability",
         },
@@ -190,15 +195,14 @@ class PhaseParameters:
                 raise SettingsError(f"family_phase.{name} must lie strictly between 0.5 and 1")
         if self.set_posterior < self.phase_posterior:
             raise SettingsError("family_phase.set_posterior must be at least phase_posterior")
-        ceiling = (1 - 5 * self.site_deviation / 6) / (1 - 2 * self.site_deviation / 3)
-        refused = not self.set_posterior < ceiling
-        if refused:
+        if not 0 < self.set_site_deviation < 0.5:
+            raise SettingsError("family_phase.set_site_deviation must lie strictly between 0 and 0.5")
+        ceiling = (1 - 5 * self.set_site_deviation / 6) / (1 - 2 * self.set_site_deviation / 3)
+        if not self.set_posterior < ceiling:
             raise SettingsError(
-                f"family_phase.set_posterior must lie below {ceiling:.6f}, the orientation certainty of a "
-                f"fully determined heterozygous site at site_deviation {self.site_deviation}"
+                f"family_phase.set_posterior must lie below {ceiling:.6f}, the orientation certainty of a fully "
+                f"determined heterozygous site at set_site_deviation {self.set_site_deviation}"
             )
-        if not 0 < self.site_deviation < 0.5:
-            raise SettingsError("family_phase.site_deviation must lie strictly between 0 and 0.5")
         if not self.junction_pin_nats > 0:
             raise SettingsError("family_phase.junction_pin_nats must be positive")
         if not self.gain_quantum > 0 or not self.tie_quantum >= 0:

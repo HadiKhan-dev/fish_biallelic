@@ -49,8 +49,8 @@ def release_counts(
 
     A target child is released when every eligible candidate was scored, it is safe (eligible,
     informative chromosomes holding enough map units: ``informative`` float64 [N]; no graph conflict) and the
-    candidates that survive exclusion
-    (log E below log(2 N / alpha)) minus those it is the supported parent of form at most one
+    candidates without a certifiable score at or above log(2 N / alpha), minus those it is the supported
+    parent of, form at most one
     sample, equal to both its supported marginal parents and its complete graph parents.
 
     ``withheld``: (parent, child) edges the sibling guard withholds (pedigree.guard). The release uses the final
@@ -63,16 +63,19 @@ def release_counts(
     sample_ids = eligibility.sample_ids
     dyads, log_e, observed_sites, log_e_upper = bounds.dyads, bounds.log_e, bounds.observed_sites, bounds.log_e_upper
     n = len(sample_ids)
-    evidence = {(int(c), int(p)): float(e) for (c, p), e in zip(dyads, log_e, strict=False)}
+    evidence = {(int(c), int(p)): i for i, (c, p) in enumerate(dyads)}
+    certifiable = bounds.certifiable
+    if certifiable is None:
+        certifiable = np.ones(len(dyads), dtype=np.bool_)
+    threshold = exclusion.log_threshold(n, config.exclusion.alpha)
+    excludes = certifiable & (log_e >= threshold)
     outgoing: list[set[int]] = [set() for _ in range(n)]
     for child in range(n):
         for slot in range(2):
             if partial_b.supported[child, slot] and (int(partial_b.parents[child, slot]), child) not in withheld:
                 outgoing[int(partial_b.parents[child, slot])].add(child)
-    threshold = exclusion.log_threshold(n, config.exclusion.alpha)
     if log_e_upper is not None:
-        upper_evidence = {(int(c), int(p)): float(e) for (c, p), e in zip(dyads, log_e_upper, strict=False)}
-        if np.any((log_e < threshold) & (log_e_upper >= threshold) & (log_e != log_e_upper)):
+        if np.any(certifiable & (log_e < threshold) & (log_e_upper >= threshold) & (log_e != log_e_upper)):
             raise InputError("unresolved exclusion interval requires exact refinement")
     state = tier_b.state.copy()
     row = tier_b.row.copy()
@@ -92,7 +95,7 @@ def release_counts(
     for child in sorted({int(c) for c, _ in dyads}):
         candidates = [int(p) for p in np.flatnonzero(eligibility.parents[child])]
         covered = all((child, p) in evidence for p in candidates)
-        compatible = {p for p in candidates if not covered or evidence[child, p] < threshold}
+        compatible = {p for p in candidates if not covered or not excludes[evidence[child, p]]}
         reverse = compatible & outgoing[child]
         survivors = compatible - reverse
         named = {int(p) for p in partial_b.parents[child][partial_b.supported[child]]}
@@ -113,14 +116,11 @@ def release_counts(
         )
         is_released = bool(covered and safe and len(survivors) <= 1 and concordant and not guard_withheld)
         excluded = [evidence[child, p] for p in candidates if covered and p not in compatible]
-        weakest = min(excluded, default=np.nan)
+        weakest = min((float(log_e[i]) for i in excluded), default=np.nan)
         lower_min = upper_min = exact_min = None
         if log_e_upper is not None:
-            excluded_upper = [upper_evidence[child, p] for p in candidates if covered and p not in compatible]
-            exact_min = all(
-                evidence[child, p] == upper_evidence[child, p] for p in candidates if covered and p not in compatible
-            )
-            lower_min, upper_min = weakest, min(excluded_upper, default=np.nan)
+            exact_min = all(log_e[i] == log_e_upper[i] for i in excluded)
+            lower_min, upper_min = weakest, min((float(log_e_upper[i]) for i in excluded), default=np.nan)
             if not exact_min:
                 weakest = np.nan
         records.append(
@@ -175,5 +175,6 @@ def release_counts(
         tuple(release_evidence),
     )
     return CountRelease(
-        final, final_partial, released, tuple(kept_by_child), tuple(records), dyads, log_e, observed_sites, log_e_upper
+        final, final_partial, released, tuple(kept_by_child), tuple(records), dyads, log_e, observed_sites,
+        log_e_upper, bounds.certifiable,
     )

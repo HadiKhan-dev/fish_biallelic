@@ -57,7 +57,7 @@ Choose the empirical histogram range and width, smooth its density, select the d
 
 Implementation: [science/evidence/quality/site_quality.py](../../haplotype_reconstruction/science/evidence/quality/site_quality.py).
 
-Parameters by name: `core_posterior_level`, `histogram_smoothing_bins`, `site_quality`, `clip`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `core_posterior_level`, `histogram_smoothing_bins`, `site_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(M log M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -90,7 +90,7 @@ Fit clean Poisson wrong-allele counts against a negative-binomial artefact class
 
 Implementation: [science/evidence/quality/site_quality.py](../../haplotype_reconstruction/science/evidence/quality/site_quality.py).
 
-Parameters by name: `clean_posterior_level`, `minimum_artefact_separation`, `site_quality`, `clip`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `clean_posterior_level`, `minimum_artefact_separation`, `site_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -130,11 +130,16 @@ Cost and scope: O(N M_in); O(M). These terms describe the unit’s work/storage 
 <a id="ec12"></a>
 ## ec12 Sample QC: carriers, eligible cells, composite fragment weights and regions
 
-Construct carrier thresholds from the clean error law, identify eligible/minor cells and assign complete fragment windows to regions. Weight each cell by its fragment’s complete cell count, including windows spanning processing tiles. Aggregate exact histogram codes; a tile boundary cannot divide the biological fragment weight.
+Construct carrier thresholds from the clean error law, identify eligible/minor cells and assign them to regions.
+Weight each cell by 1 / (1 + Σ phi(distance)) over the other eligible cells of the same sample. The working curve
+uses the bins inside the fitted read-sharing range and any supported weights from the first omitted octave. An
+unresolved fit uses every measured bin. Neighbours across processing tiles are included. The sparse tail is
+computed with moving endpoints in each sample's sorted cells, so wider tail bins increase the tile overlap but
+do not require a loop over each additional pair.
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 
-Parameters by name: `carrier_tail_level`, `fragment_bp`, `artefact_regions`, `initial`, `sample_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `carrier_tail_level`, `artefact_regions`, `sample_quality`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N M_pass). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -163,11 +168,14 @@ Cost and scope: O(N). These terms describe the unit’s work/storage dimensions;
 <a id="ec15"></a>
 ## ec15 Sample QC: inherited-segment report
 
-Identify paired near-private carriers, classify heterozygote-like cells, then sort by sample, partner and position. Split fragment events and inherited regions at their named gaps; report regions meeting the event threshold for unflagged samples. Cell counts/read fractions include the complete pair region. This is a diagnostic, not a parent call.
+Identify paired near-private carriers, classify heterozygote-like cells, then sort by sample, partner and position.
+Group cells into events using the fitted read-sharing range and split inherited regions at their configured gaps.
+Report regions meeting the event threshold for unflagged samples. Cell counts and read fractions include the complete
+pair region. This is a diagnostic, not a parent call.
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 
-Parameters by name: `segment_gap_bp`, `segment_minimum_events`, `fragment_bp`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `segment_gap_bp`, `segment_minimum_events`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(near-private cells log). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -328,3 +336,150 @@ Cost and scope: O(M_in). These terms describe the unit’s work/storage dimensio
 <a id="stage.4"></a>
 
 **Stage:** see [EC26](#ec26).
+
+<a id="ec28"></a>
+## ec28 Read-sharing curve (depth covariance between nearby sites)
+
+Estimate read sharing from read depths on the contig's r1–r4 evidence axis, or on all SNPs when site filtering
+does not apply. Two sites closer than the sequenced molecules can share molecules, so their depths covary within a
+sample. The fitted molecular phi(d) models the share of reads at one site that also give a base d bp away.
+
+**Estimator.** With n[i, s] the depth of sample i at site s, w_i the sample's share of the contig's reads, a_i = N w_i
+its depth factor and b_s the site's mean depth, the residuals e[i, s] = n[i, s] - w_i n[., s] use one factor per
+sample and contig. Every pair of sites of every lag bin is counted (bins: fixed edges to 1 kb, then half-octaves to a
+quarter of the contig's span). A sample's covariance is modelled as a part linear in its depth factor, Poisson
+sampling of shared reads, and a part quadratic in it, a sample-specific pattern of read intensity along the contig
+(regional depth, missing tracts, copy number): Cov_i(n_s, n_t) = a_i sqrt(b_s b_t) phi(d) + a_i^2 Q[s, t]. Two
+weighted least-squares fits per bin over the samples follow: the pooled fit reads every covariance as shared reads;
+the split fit estimates both parts, its linear part being the sharing. Both are corrected for the fitted factors by
+the exact centring map M of the binned linear part. The published curve takes from the pooled value a share
+g_k = s_k^2 / (s_k^2 + v_k) of the pooled-minus-split difference, limited to the interval [-s_k, s_k]; v_k is the
+jackknife variance of the difference and s_k = r_k D the largest intensity part the pooled value of bin k can hold. D
+is the lag-0 statistic over the least value its linear part can take; r_k is the depth weight of the bin's pairs over
+that of lag 0. The combination is made before the centring inverse, and one curve, M^-1 of the result, is published
+for every measured lag. The bound s_k holds in expectation under three assumptions: reads are sampled at least as
+dispersed as Poisson; the sharing at each lag lies between zero and the positive part of the pooled curve; the
+intensity pattern has the same relative variance at every site. D is a fitted value, not a confidence bound.
+
+**Identification.** The split needs samples of different depth. A bin whose two regressors are collinear in the full
+fit or in any delete-one fit, or a contig with fewer than three samples with reads, is undetermined: the pooled value
+is published with g = 0, and `split_determined` and `unseparated` say so. With depths equal up to sampling the split's
+variance is large and the pooled value is published likewise. The pooled value is an upper estimate of sharing only
+where the intensity covariance at that lag is non-negative.
+
+**Range and status.** Sample QC weighs a cell by 1 / (1 + sum of working phi over its neighbours). With nu_k the mean number
+of neighbours a site has in bin k, S the sum of nu_k times the signed estimate over the bins below R and T the same
+sum over the octave [R, 2R), the range r_phi is the smallest edge R at which counting the octave is not expected to
+lower the error of the sum: not (T > 0 and T^2 > 2 Var T + 2 Cov(S, T)), variances by delete-one-sample jackknife.
+The rule is greedy and local: it gives a sufficient reason to extend, not the range of least total error, and it is
+not a test of absence. Status: `none_detected` (range 0), `resolved_within` (the rule stops inside the measured lags:
+a decision about the range, not a certificate of accuracy) or `unresolved` (sharing still countable at the largest
+measured lag, fewer than three samples with reads, or sites that do not determine the curve). The fitted weights
+are max(estimate, 0) in retained bins and zero elsewhere. An unresolved fit retains every measured bin. Final
+evidence adds supported first-omitted-octave weights to the sample-QC working curve as described below. Relatedness
+uses the fitted range for B3 spacing when resolved and the existing stride when unresolved. It also reports the
+working reach, which can extend beyond the fitted range.
+
+**Record.** One per contig beside the evidence record, read by field name; another layout is refused.
+
+| Field | Scale | Meaning |
+|---|---|---|
+| `edges`, `pairs`, `samples`, `sites`, `horizon_bp` | bp, counts | lag bin edges, pairs per bin, the largest measured lag |
+| `excess`, `standard_error` | centred | the signed fitted curve and its jackknife error (conditional on the fitted factors and g) |
+| `retained`, `phi_bins`, `range_bp`, `status` | mask, phi, bp, label | the fitted-range bin mask, fitted working weights, fitted range and its status |
+| `applied_tail` | phi | added working weights aligned to the lag bins, or null when no bin is added |
+| `pooled`, `pooled_se`, `split`, `split_se` | centred | the two fits (split: the pooled value and an infinite error where undetermined) |
+| `split_share`, `split_determined` | 1 | g per bin; whether the full fit and every delete-one fit determine the split |
+| `dispersion`, `poisson_dispersion`, `poisson_dispersion_se` | centred | lag 0 of the pooled fit and of the split's linear part (1 for Poisson sampling) |
+| `excess_dispersion`, `pair_depth_ratio`, `intensity_scale` | uncentred | D, r_k and s_k = r_k D |
+| `unseparated`, `clipped` | uncentred | (1 - g_k) s_k, the intensity part the curve may still hold; the part of the correction beyond s_k, held back |
+| `depth_spread`, `correction` | 1 | coefficient of variation of the samples' depth factors; 1 - sum of squared depth shares |
+| `omitted`, `omitted_upper` | neighbours x phi | the fitted omitted-octave weight and its one-sided 95 % upper limit, both before applying the tail |
+| `neighbour_weight` | neighbours x phi | mean over evidence sites of the sum of composed working phi over other sites |
+| `neighbour_weight_se` | neighbours x phi | delete-one-sample jackknife standard error of the signed neighbour mass at the fixed fitted range |
+
+Uncentred fields are pair sums over the pair weights before the centring inverse; they are conditional on the three
+assumptions above. `clipped` beyond the split's error is evidence to examine (an assumption may fail on that contig,
+or the split may be in error), not proof of a cause.
+
+**Measured limits of the fitted curve.** These checks used known-truth simulations of 60 samples (94 cases, 697
+contigs) and descriptive TroMau evidence. Simulation ratios divide the fitted-range weight by the true weight.
+
+- Clean reads: paired-end 0.99-1.01 per contig; 3 kb reads 0.99-1.05; 30 kb reads 0.91-1.09.
+- Sample-specific regional depth with samples of different depth: paired-end case medians 0.97-1.07, contigs
+  0.85-1.16; long reads medians 0.91-1.22, contigs 0.43-1.72.
+- Long reads with contig-scale missing tracts: case medians 1.23-1.72, contigs 0.19-2.97. The range stops at 16-128 kb
+  on most contigs although sharing reaches 250 kb, and some contigs run on. Three pre-registered tolerances failed
+  there; this is the precision of this split and range rule on those designs, accepted as a limit.
+- Paired-end reads with missing tracts and a depth spread of 0.6: case medians 0.92-1.53, contigs 0.00-2.35; 9 of 128
+  contigs have a range beyond 10 kb. At 0-25 bp the estimate is 0.026 high on average: for a positive intensity part
+  the limit at s_k stops corrections that are too large and lets through ones that are too small.
+- TroMau: the limit holds back 0.016 at 0-25 bp on 21 of 22 contigs. Within the model this is a depth-associated
+  component of the short-lag covariance; it does not identify regional depth or mixed libraries.
+- Equal depths with regional depth: not separable from depths; the pooled value is published and flagged, at 0.48-0.57
+  of the true weight on the simulated cases.
+- Labels: about one contig in ten without sharing is labelled `resolved_within` at 25-100 bp with phi below 0.001;
+  its weights are within 0.1 % of 1. A contig of 2,048 sites and 24 samples is labelled resolved at a ratio of 1.50.
+- One contig-wide curve is fitted. Differences in sharing associated with library depth can be confounded with
+  intensity. Sharing in later octaves can fall outside the fitted range.
+
+Implementation: [science/evidence/read_sharing.py](../../haplotype_reconstruction/science/evidence/read_sharing.py),
+[science/evidence/quality/site_quality.py](../../haplotype_reconstruction/science/evidence/quality/site_quality.py),
+[stages/evidence/records.py](../../haplotype_reconstruction/stages/evidence/records.py).
+
+Parameters by name: none is fitted to data. Fixed choices of resolution and numerics: `FINE_EDGES_BP`, `UPPER_Z` and
+the rank tolerances documented in the module.
+
+Cost and scope: O(N L K) for the pair sums and O(L K^2) for the site geometry, K the number of lag bins (about 40);
+samples and tiles of sites in parallel. The statistics act on K + 1 numbers per sample.
+
+
+### Read-sharing working weights in the first omitted octave
+
+The final evidence fit uses the site axis surviving r1–r4, or all sites if the site filter was off or did not
+apply. For a positive interior fitted range, consider the same occupied bins in its first omitted octave as
+the range rule, with the next occupied bin used when that octave is empty. Take anchors every
+max(1, floor(number of sites / 4096)) sites and count both directions of each positive-distance anchor–partner
+pair. In each bin estimate 1 − Σ(Dᵢ − Dⱼ)² / Σ(Dᵢ + Dⱼ) using the total allele depths and all sample rows.
+The nominal one-sided lower limit subtracts the sum of the delete-one-sample and delete-one-1 Mb-block
+jackknife standard errors times the normal quantile at 1 − .05 / (number of occupied bins tested). A block
+deletion removes pairs touching either endpoint in that block. Require at least two positive-exposure samples
+and blocks and finite estimates on both deletion axes. The positive part of that limit enters the working
+curve. A conservative bound on the integer depth moments ensures exact float64 accumulation.
+
+This is a conservative working contribution under the conditional Poisson depth model. Shared molecules contribute
+positively to the ratio of expected moments and intensity differences subtract a squared contrast. The limit is
+conditional on the fitted range and uses two marginal jackknives. It provides no calibrated global coverage across
+contigs. The contig record stores the added bins as `applied_tail`. The working reach includes the last positive bin,
+and the mean neighbour mass includes the addition. The fitted range still sets B3 marker spacing and sample-QC
+segments. The omitted-mass diagnostic, signed jackknife, neighbour-weight standard error, and read-library split and
+survival inputs describe the original fit. The per-library fits do not calculate the added weights.
+
+Implementation: [science/evidence/read_sharing_tail.py](../../haplotype_reconstruction/science/evidence/read_sharing_tail.py).
+Two depth prefixes per active sample lane accumulate the directed and block-deletion moments without enumerating
+pairs. Work scales with sites plus tested bins times the sum of anchors and occupied blocks, per sample.
+
+### Read sharing (diagnostic)
+
+The calibration report includes a one-sided scan for the all-sample library and for each distinct accepted split
+membership. The scan holds those sample IDs fixed across all analysed contigs. The record identifies the contigs
+and local library numbers where each split membership was published. Split discovery uses the same data.
+
+Evidence stores the centred delete-one estimates as float32 on the canonical sample axis, with one column per
+usable lag bin. Its masks identify those bins and the samples with reads. The signed excess, pair counts and bin
+edges are already part of the contig record. The report projects these measurements onto the survival fit's
+length grid from the run manifest (`parameters.painting.read_state`).
+
+For each configured length, the weight of a measurable lag bin is its number of site pairs times the bin
+average of the triangular overlap divided by the template length. The signed excess curve gives the numerator.
+Centred delete-one estimates, times minus the square root of (n − 1)/n for the n samples with reads on that contig,
+give the sample contributions. A sample with no reads contributes zero on its canonical row. Numerators and sample
+rows are summed across contigs before dividing each score by the Euclidean norm of its pooled rows. The table gives
+the maximum T, winning grid length in bp, approximate conditional p-value and T with each contributing contig omitted.
+An unavailable statistic is null. Each of 9,999 multiplier draws flips one sign per sample across the entire library.
+The tail count includes the observed draw in numerator and denominator. Simulation runs use the realised seed, and
+VCF runs use the fixed reference seed 421. Each split stream also binds the sample IDs.
+
+The approximate conditional p-value is invalid against regional depth-intensity variation (independent-read
+simulations with regional depth variation gave p = .0047 and .0066). The calibration's family-wise rule continues
+to select the read state.

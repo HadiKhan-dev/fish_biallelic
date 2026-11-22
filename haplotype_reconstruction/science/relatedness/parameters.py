@@ -10,48 +10,6 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
-class AlleleFrequencyParameters:
-    """Sitewise Hardy-Weinberg EM schedule and probability bounds."""
-
-    iterations: int = field(
-        default=6,
-        metadata={
-            "provenance": (
-                "Hardy-Weinberg EM updates per site (iterations); fixes the allele-frequency "
-                "estimation schedule."
-            ),
-        },
-    )
-    initial: float = field(
-        default=0.5,
-        metadata={
-            "provenance": (
-                "Initial ALT frequency (probability); starts the sitewise EM at equal REF and ALT "
-                "mass."
-            ),
-        },
-    )
-    clip: float = field(
-        default=1e-4,
-        metadata={
-            "provenance": (
-                "Lower ALT-frequency bound and distance from one (probability); keeps genotype "
-                "priors away from zero."
-            ),
-        },
-    )
-    total_floor: float = field(
-        default=1e-300,
-        metadata={
-            "provenance": (
-                "Minimum genotype-weight sum (probability); prevents division by zero in the EM "
-                "posterior."
-            ),
-        },
-    )
-
-
-@dataclass(frozen=True)
 class FamilyParameters:
     """Family evidence gates, objective tolerances, support units and workspace bounds."""
 
@@ -512,4 +470,4 @@ EVIDENCE_COMPARE_CHUNK = 256  # Early-exit evidence-comparison chunk width (valu
 SCREEN_SITE_TILE = 256  # Storage-only site tile width (sites).
 TERM_FLOOR = 1e-300  # Smallest class-pair site term before its logarithm (probability; rl21).
 
-__all__ = ["AlleleFrequencyParameters", "FamilyParameters", "RateParameters"]
+__all__ = ["FamilyParameters", "RateParameters"]

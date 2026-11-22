@@ -25,7 +25,7 @@ from ...science.evidence.parameters import EvidenceParameters
 from ...science.evidence.run import PreparedEvidence
 from ...store.container import CheckpointFile, RecordInfo
 from ...store.identity import code_dependency_identity
-from ...store.protocol import Derivation, NumericalPolicy, bound_payload_identity, publish, read_items
+from ...store.protocol import Derivation, NumericalPolicy, bound_payload_identity, publish, read_items, resume
 from ...store.protocol import open_windows as record_windows
 from ...store.store import CheckpointStore
 
@@ -52,7 +52,10 @@ SCHEMA = 2
 GL_FIELDS = tuple(CodedLikelihoods.__dataclass_fields__)
 GL_ARRAYS = tuple(name for name in GL_FIELDS if name != "sites")
 GL_WINDOWS = ("pairs", "values", "codes8", "codes16", "codes32", "dense")
-ARRAYS = ("positions", "counts", "likelihoods", "observed", "discovery_sites", "founder_excluded", "block_spans")
+ARRAYS = (
+    "positions", "counts", "likelihoods", "observed", "discovery_sites", "founder_excluded", "block_spans",
+    "cohort_frequencies",
+)
 
 
 def identity(
@@ -102,6 +105,66 @@ def _tie_counts(decisions: EvidenceDecisions) -> TieCounts:
     return TieCounts(tuple(TieCount(kind, *values) for kind, values in sorted(counts.items())))
 
 
+READ_SHARING = "evidence/read_sharing"
+READ_SHARING_SCHEMA = 10
+"""The read-sharing record's layout (science.evidence.read_sharing.ReadSharing, field by field). excess, pooled, split
+and their standard errors are centred curves; intensity_scale, unseparated and clipped are in the uncentred scale
+(pair sums over the pair weights, before the centring inverse) and conditional on that module's assumptions."""
+
+
+def write_read_sharing(file: CheckpointFile, sharing, derivation: str) -> RecordInfo:
+    """Publish a contig's read-sharing curve (science.evidence.read_sharing) under the evidence derivation."""
+    payload = dict(
+        jackknife=None if sharing.jackknife is None else vars(sharing.jackknife),
+        schema=READ_SHARING_SCHEMA, edges=np.asarray(sharing.edges), excess=np.asarray(sharing.excess),
+        standard_error=np.asarray(sharing.standard_error), retained=np.asarray(sharing.retained),
+        phi_bins=np.asarray(sharing.phi_bins), range_bp=int(sharing.range_bp), status=str(sharing.status),
+        applied_tail=sharing.applied_tail,
+        pairs=np.asarray(sharing.pairs), samples=int(sharing.samples), sites=int(sharing.sites),
+        dispersion=float(sharing.dispersion), excess_dispersion=float(sharing.excess_dispersion),
+        pooled=np.asarray(sharing.pooled), pooled_se=np.asarray(sharing.pooled_se), split=np.asarray(sharing.split),
+        split_se=np.asarray(sharing.split_se), split_share=np.asarray(sharing.split_share),
+        split_determined=np.asarray(sharing.split_determined), pair_depth_ratio=np.asarray(sharing.pair_depth_ratio),
+        intensity_scale=np.asarray(sharing.intensity_scale), clipped=np.asarray(sharing.clipped),
+        unseparated=np.asarray(sharing.unseparated), depth_spread=float(sharing.depth_spread),
+        omitted=float(sharing.omitted), omitted_upper=float(sharing.omitted_upper),
+        correction=float(sharing.correction), horizon_bp=int(sharing.horizon_bp),
+        neighbour_weight=float(sharing.neighbour_weight), neighbour_weight_se=float(sharing.neighbour_weight_se),
+        poisson_dispersion=float(sharing.poisson_dispersion),
+        poisson_dispersion_se=float(sharing.poisson_dispersion_se),
+    )
+    return publish(file, READ_SHARING, derivation, payload)
+
+
+def load_read_sharing(file: CheckpointFile, derivation: str):
+    """A contig's published read-sharing curve (ReadSharing), or None."""
+    from ...science.evidence.read_sharing import ReadSharing, SharingJackknife
+
+    saved = resume(file, READ_SHARING, derivation)
+    if saved is None:
+        return None
+    p = saved.payload
+    require_schema(p, READ_SHARING_SCHEMA)  # another layout is never read as this one
+    # keywords: the record's fields are read by name (a positional load mixed them up)
+    return ReadSharing(
+        jackknife=None if p["jackknife"] is None else SharingJackknife(**p["jackknife"]),
+        edges=np.asarray(p["edges"]), excess=np.asarray(p["excess"]), standard_error=np.asarray(p["standard_error"]),
+        retained=np.asarray(p["retained"]), phi_bins=np.asarray(p["phi_bins"]), range_bp=int(p["range_bp"]),
+        applied_tail=None if p["applied_tail"] is None else np.asarray(p["applied_tail"]),
+        status=str(p["status"]), pairs=np.asarray(p["pairs"]), samples=int(p["samples"]), sites=int(p["sites"]),
+        dispersion=float(p["dispersion"]), excess_dispersion=float(p["excess_dispersion"]),
+        pooled=np.asarray(p["pooled"]), pooled_se=np.asarray(p["pooled_se"]), split=np.asarray(p["split"]),
+        split_se=np.asarray(p["split_se"]), split_share=np.asarray(p["split_share"]),
+        split_determined=np.asarray(p["split_determined"]), pair_depth_ratio=np.asarray(p["pair_depth_ratio"]),
+        intensity_scale=np.asarray(p["intensity_scale"]), clipped=np.asarray(p["clipped"]),
+        unseparated=np.asarray(p["unseparated"]), depth_spread=float(p["depth_spread"]),
+        omitted=float(p["omitted"]), omitted_upper=float(p["omitted_upper"]), correction=float(p["correction"]),
+        horizon_bp=int(p["horizon_bp"]), neighbour_weight=float(p["neighbour_weight"]),
+        neighbour_weight_se=float(p["neighbour_weight_se"]), poisson_dispersion=float(p["poisson_dispersion"]),
+        poisson_dispersion_se=float(p["poisson_dispersion_se"]),
+    )
+
+
 def write(
     file: CheckpointFile,
     prepared: PreparedEvidence,
@@ -131,6 +194,7 @@ def write(
                 "discovery_sites",
                 "founder_excluded",
                 "block_spans",
+                "cohort_frequencies",
             )
         }
         payload.update(

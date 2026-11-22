@@ -14,13 +14,22 @@ Seven classes (codes) suffice:
     5         two unknown alleles of different latent rows
     6         two copies of one unknown latent allele
 
-The joins and founder refinement score a site by the robust, floored, centred log likelihood
+Assembly scores the CENTRED view of a sample's evidence (science.assembly.evidence): the mixed likelihoods of the
+observation model divided by the cohort likelihood, L~(g) = [(1 - eps) L(g) + eps B] / B, B = sum_g q(g) L(g)
+(science.shared.observation, eps the run's outlier rate before the calibration barrier, q the site's cohort genotype
+frequencies). For a pair class with predictive law p, P~ = sum_g p(g) L~(g) and
 
-    e = max(log(0.99 P + 0.01 / 3), -2) - log(1 / 3)        (robust_log_likelihood(P) - CENTER)
+    c = log P~ = log[(1 - eps) P / B + eps]
 
-of the sample's normalised genotype likelihoods P under the pair's class; a sample whose likelihoods sum to zero or
-are uniform at a site contributes nothing there (normalised_likelihoods). The linker mixes with its own robustness
-and no floor (assembly.linker.emissions).
+is the log Bayes factor of the class (with redraws) against a random member of the cohort; a redraw from the cohort
+scores exactly 0 (sum_g q(g) L~(g) = 1), and so does a sample without evidence at the site (L~ = 1 at every genotype).
+The joins and founder refinement add the floor of 4.20 in these units,
+
+    e = max(c, CENTRED_FLOOR),    CENTRED_FLOOR = -2 - log(1 / 3)        (robust_log_likelihood(P~) - CENTER)
+
+(in 4.20 the floor was -2 on log(0.99 P + 0.01 / 3) centred by log(1 / 3); with eps = 0.01 and a uniform cohort law the
+two coincide). A sample whose three values are equal at a site contributes nothing there (centred_likelihoods). The
+linker scores c itself (assembly.linker.emissions).
 """
 
 from __future__ import annotations
@@ -38,8 +47,14 @@ every emission site is called."""
 PREDICTIVE_CODES = 7
 """All codes: the emission categories of a block with unknown founder alleles."""
 
-CENTER = math.log(1.0 / 3.0)
-"""The log likelihood of a uniform genotype triple: robust emissions are centred on it."""
+CENTER = 0.0
+"""The log likelihood of the cohort law in the centred view (sum_g q(g) L~(g) = 1): site terms are read relative to
+it, so a term is the log Bayes factor against a random member of the cohort."""
+
+CENTRED_FLOOR = -2.0 - math.log(1.0 / 3.0)
+"""The joins' and refinement's floor on a site term in centred units: the 4.20 floor (-2 on the uncentred term,
+centred by log(1 / 3)) kept as the owner allowed, a stand-in for correlated model error (the unexplained-stretch
+process). While it binds, a discordant site costs CENTRED_FLOOR rather than log eps."""
 
 
 @kernel(
@@ -86,17 +101,17 @@ def predictive_likelihood(p0, p1, p2, code):
 
 
 @kernel(overloads=tuple((p, p, p) for p in (types.float32, types.float64)), cache=True, inline="always", nogil=True)
-def normalised_likelihoods(p0, p1, p2):
-    """(informative, p0, p1, p2): a sample's genotype likelihoods divided by their sum (in their own precision);
-    informative is False, and the values are returned unchanged, when the sum is not positive or the three are
-    equal (the site carries no evidence for the sample)."""
-    total = p0 + p1 + p2
-    if total <= 0.0 or (p0 == p1 and p1 == p2):
+def centred_likelihoods(p0, p1, p2):
+    """(informative, p0, p1, p2): a sample's centred likelihoods at a site (module docstring), returned unchanged
+    (never renormalised: their scale is the cohort likelihood); informative is False when the three are equal (the
+    site carries no evidence for the sample) or not positive."""
+    if not (p0 + p1 + p2 > 0.0) or (p0 == p1 and p1 == p2):
         return False, p0, p1, p2
-    return True, p0 / total, p1 / total, p2 / total
+    return True, p0, p1, p2
 
 
 @kernel(overloads=((types.float32,), (types.float64,)), cache=True, inline="always", nogil=True)
 def robust_log_likelihood(likelihood):
-    """max(log(0.99 P + 0.01 / 3), -2): the robust log likelihood of a normalised genotype likelihood P (uncentred)."""
-    return max(math.log(0.99 * likelihood + 0.01 / 3.0), -2.0)
+    """max(log P~, CENTRED_FLOOR): the robust site term of a pair class whose centred likelihood is P~ (module
+    docstring; the outlier mixture is already in the centred view)."""
+    return max(math.log(likelihood), CENTRED_FLOOR)

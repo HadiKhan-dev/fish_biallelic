@@ -22,7 +22,7 @@ def set_start_bins(set_starts, site_bin, B):
     return reset, blocked
 
 
-def edge_chains(model, mirror, chains, mirrored_chains, theta_m, starts, tau):
+def edge_chains(model, mirror, chains, mirrored_chains, theta_m, starts, tau, *, map_work=map):
     """{(parent, child, slot): (source int8 [B], support float32 [B], reset bool [B])} for every linked homologue of
     the component, from both solves' release chains (release_sample's "chain").
 
@@ -39,43 +39,42 @@ def edge_chains(model, mirror, chains, mirrored_chains, theta_m, starts, tau):
     base[0] = True
     reset_decision = np.asarray(theta_m) >= 0.5 - MEIOSIS_RESET_TOLERANCE
     base[1:] |= reset_decision
-    out = {}
-    for c in range(model.N):
-        for k in (0, 1):
-            p = int(model.par[c, k])
-            if p < 0:
-                continue
-            a, b = chains[c][k], mirrored_chains[c][k]
-            reset = base | starts[p][0] | starts[c][0]
-            blocked = starts[p][1] | starts[c][1]
+    def release_edge(edge):
+        p, c, k = edge
+        a, b = chains[c][k], mirrored_chains[c][k]
+        reset = base | starts[p][0] | starts[c][0]
+        blocked = starts[p][1] | starts[c][1]
+        flip = np.zeros(B, dtype=bool)
+        X, Y = model.X[p], mirror.X[p]
+        if np.all(model.par[p] < 0):
             segment = np.cumsum(reset)
-            flip = np.zeros(B, dtype=bool)
-            if np.all(model.par[p] < 0):
-                X, Y = model.X[p], mirror.X[p]
-                comparable = (
-                    (X[0] != X[1])
-                    & (np.minimum(X[0], X[1]) == np.minimum(Y[0], Y[1]))
-                    & (np.maximum(X[0], X[1]) == np.maximum(Y[0], Y[1]))
-                )
-                swapped = comparable & (Y[0] == X[1])
-                for g in np.unique(segment[comparable]):
-                    inside = segment == g
-                    n_swapped = int(np.sum(swapped & inside))
-                    if 0 < n_swapped < int(np.sum(comparable & inside)):
-                        blocked = blocked | inside
-                    elif n_swapped:
-                        flip |= inside
-            X, Y = model.X[p], mirror.X[p]
-            blocked = blocked | (np.where(flip, Y[1], Y[0]) != X[0]) | (np.where(flip, Y[0], Y[1]) != X[1])
-            va = np.where(a[0] >= tau, 0, np.where(a[1] >= tau, 1, -1))
-            vb = np.where(b[0] >= tau, 0, np.where(b[1] >= tau, 1, -1))
-            vb = np.where((vb >= 0) & flip, 1 - vb, vb)
-            source = np.where((va >= 0) & (va == vb) & ~blocked, va, -1).astype(np.int8)
-            support = np.where(source >= 0, np.minimum(np.maximum(a[0], a[1]), np.maximum(b[0], b[1])), 0.0).astype(
-                np.float32
+            comparable = (
+                (X[0] != X[1])
+                & (np.minimum(X[0], X[1]) == np.minimum(Y[0], Y[1]))
+                & (np.maximum(X[0], X[1]) == np.maximum(Y[0], Y[1]))
             )
-            out[(p, c, k)] = (source, support, reset)
-    return out
+            swapped = comparable & (Y[0] == X[1])
+            # One integer count per segment. The tests below are the per-segment orientation decisions
+            # applied to every bin, without rescanning all bins for each segment.
+            size = int(segment[-1]) + 1
+            n_comparable = np.bincount(segment[comparable], minlength=size)
+            n_swapped = np.bincount(segment[swapped], minlength=size)
+            has_swaps = n_swapped > 0
+            mixed = n_swapped < n_comparable
+            blocked |= (has_swaps & mixed)[segment]
+            flip = (has_swaps & ~mixed)[segment]
+        blocked |= (np.where(flip, Y[1], Y[0]) != X[0]) | (np.where(flip, Y[0], Y[1]) != X[1])
+        va = np.where(a[0] >= tau, 0, np.where(a[1] >= tau, 1, -1))
+        vb = np.where(b[0] >= tau, 0, np.where(b[1] >= tau, 1, -1))
+        vb = np.where((vb >= 0) & flip, 1 - vb, vb)
+        source = np.where((va >= 0) & (va == vb) & ~blocked, va, -1).astype(np.int8)
+        support = np.where(source >= 0, np.minimum(np.maximum(a[0], a[1]), np.maximum(b[0], b[1])), 0.0).astype(
+            np.float32
+        )
+        return edge, (source, support, reset)
+
+    edges = [(int(model.par[c, k]), c, k) for c, k in zip(*np.nonzero(model.par >= 0), strict=True)]
+    return dict(map_work(release_edge, edges))
 
 
 def agreement(first: SampleRelease, second: SampleRelease, site_bin: np.ndarray) -> AgreedRelease:

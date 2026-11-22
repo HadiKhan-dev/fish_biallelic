@@ -53,6 +53,9 @@ class PhaseObservations:
     )
     observed: np.ndarray = field(metadata={"role": "evidence", "axes": ("N", "L"), "units": "1", "dtype": "bool"})
     excluded: np.ndarray = field(metadata={"role": "call", "axes": ("N",), "units": "1", "dtype": "bool"})
+    cohort_frequencies: np.ndarray = field(
+        metadata={"role": "state", "axes": ("L", "3"), "units": "probability", "dtype": "float64"}
+    )
 
 
 @dataclass(frozen=True)

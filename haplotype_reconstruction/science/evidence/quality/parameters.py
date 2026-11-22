@@ -249,19 +249,8 @@ class SampleQualityParameters:
             ),
         },
     )
-    # Cells of one sample closer than one sequenced fragment can share reads: each eligible cell weighs 1 / (the
-    # library's eligible cells in its fragment_bp window, counted from the first passing site), and segment-report
-    # cells form one event.
-    fragment_bp: int = field(
-        default=1000,
-        metadata={
-            "role": "state", "axes": (), "dtype": "int64", "stored": True, "units": "bp",
-            "provenance": (
-                "Read-sharing window width (base pairs); eligible cells in a window share one "
-                "unit of test weight."
-            ),
-        },
-    )
+    # 4.21: cells that share reads are weighed by the contig's estimated read sharing (science.evidence.read_sharing),
+    # and segment-report cells closer than its range form one event; no fixed fragment width.
     # Inherited-segment report only: heterozygous near-private events of one (sample, partner)
     # less than segment_gap_bp apart form a region; regions with fewer events are not listed.
     segment_gap_bp: int = field(

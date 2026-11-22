@@ -220,6 +220,16 @@ class GeneticMapSection:
 
 @dataclass(frozen=True)
 class PaintingSection:
+    read_classes: int = setting(
+        5,
+        "int",
+        "Read-state classes per sample in the painting (1, 3, 5, 7 or 9): the painting carries each sample's "
+        "sequencing reads across neighbouring sites (shared reads see one homologue; science/shared/reads.py), with "
+        "1 + 2 x (1 + minor) classes for minor = 0..3. 1 = off: sites are independent given the founders (the model "
+        "before release 4.21). More classes describe more read-loss patterns at a cost growing as classes squared; "
+        "5 matched 7 and 9 on every simulated design measured (paired-end, long reads, 1x to 10,000x).",
+        (1, 3, 5, 7, 9),
+    )
     pair_sharing: bool = setting(
         False,
         "bool",
@@ -274,6 +284,11 @@ class SimulationReadsSection:
         ("", "realistic", "short_read_cohort", "long_read_cohort")
     )
     error_rate: float = setting(0.02, "float", "Generating sequencing error rate.")
+    uncalled_base_probability: float = setting(
+        generating.UNCALLED_BASE_PROBABILITY, "float",
+        "Probability per covered base (0 to 1) of dropping from REF/ALT counts in either short-read sampler. "
+        "Depth is before this loss. Zero preserves the fully called model."
+    )
     depth_cv: float = setting(0.0, "float", "Between-sample depth coefficient of variation.")
     heterozygote_alt_probability: float = setting(0.5, "float", "Alternate-read probability in heterozygotes.")
     dropout_fraction: float = setting(0.0, "float", "Contiguous missing-marker fraction per sample.")
@@ -344,6 +359,19 @@ class SimulationReadsSection:
     )
     foreign_read_share: float = setting(
         generating.FOREIGN_READ_SHARE, "float", "Share of long reads from another sequenced sample (contamination)."
+    )
+    injected_outlier_rate: float = setting(
+        0.0, "float",
+        "Validation only: rate at which a sample's ordered genotype at a site is replaced by a draw from the "
+        "cohort's ordered genotype law before reads are drawn (injected outliers; truth keeps the original and the "
+        "replaced alleles).",
+    )
+    injected_outlier_pattern: str = setting(
+        "uniform", "str",
+        "Pattern of the injected outliers: uniform; heterogeneous (each sample heavy with probability about one in "
+        "ten, at ten times the others' rate r / 1.9; the cohort mean is the rate only when a tenth is heavy; rate at "
+        "most 0.19); clustered (runs of five consecutive sites); misspecified (half forced heterozygous).",
+        ("uniform", "heterogeneous", "clustered", "misspecified"),
     )
 
 

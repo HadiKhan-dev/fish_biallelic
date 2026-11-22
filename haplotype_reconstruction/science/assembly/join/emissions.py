@@ -35,7 +35,7 @@ from numba import prange
 from haplotype_reconstruction.core.kernels import kernel
 from haplotype_reconstruction.science.shared.emissions import (
     CENTER,
-    normalised_likelihoods,
+    centred_likelihoods,
     pair_code,
     predictive_likelihood,
     robust_log_likelihood,
@@ -155,7 +155,7 @@ def _binned_log_emissions(flat, start, likelihoods, offset, alleles, source_rows
             if not usable[site]:
                 continue
             p0, p1, p2 = likelihoods[sample, offset + site]
-            informative, p0, p1, p2 = normalised_likelihoods(p0, p1, p2)
+            informative, p0, p1, p2 = centred_likelihoods(p0, p1, p2)
             if not informative:
                 continue
             column = site // sites_per_bin

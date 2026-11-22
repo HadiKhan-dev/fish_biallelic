@@ -34,10 +34,11 @@ from ...core.numerics import ordered_sum
 from . import alternatives as alternatives_module
 from . import family, graph
 from .alternatives import Alternatives, softmax_finite
-from .kernels.signatures import OVERLOADS
+from .decision_parameters import ExposureParameters
+from .kernels.decision import OVERLOADS
 from .orientation import Orientation
 from .orientation import fit as fit_orientation
-from .parameters import ExposureParameters, PedigreeParameters
+from .parameters import PedigreeParameters
 from .ties import magnitude, unique_finite_winner
 
 __all__ = ["testable", "fit_scores", "select", "fit", "build_exposure"]

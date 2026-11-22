@@ -13,7 +13,7 @@ import numpy as np
 
 from ...contracts.pedigree import BlockScores, ChromosomeScores
 from ...core.errors import InvariantError
-from . import blocks, exposure, forward, junctions, transmission
+from . import blocks, exposure, junctions, read_block_forward, transmission
 from .resident import resident
 
 
@@ -50,11 +50,12 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, offset,
         descriptors.extend(description)
         state = resident(component, parameters, claim_threads, reverse=reverse)
         claim_threads()
-        values = forward.component_block_scores(state.projection, state.terms, rows, axis, len(description))
+        values = read_block_forward.component_block_scores(state.projection, state.terms, rows, axis, len(description))
         parts["zero"].append(values[:n].T)
         parts["one_raw"].append(values[n:n + len(retained_pairs)].T)
         parts["two"].append(values[n + len(retained_pairs):].T)
-        schedule = junctions.schedules(component.state_classes, component.named_alleles, component.bin_sizes, reverse=reverse)
+        schedule = junctions.schedules(component.state_classes, component.named_alleles, component.bin_sizes,
+                                       reverse=reverse, label_error=component.label_error)
         straight = np.count_nonzero(schedule.pairs[:, :-1] != schedule.pairs[:, 1:], axis=2)
         crossed = np.count_nonzero(schedule.pairs[:, :-1] != schedule.pairs[:, 1:, ::-1], axis=2)
         costs = np.minimum(straight, crossed)
@@ -63,7 +64,7 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, offset,
             first, stop = piece.first_bin, piece.stop_bin
             matched, exposed, explained, pair_exposed = exposure.expected_structure(
                 np.ascontiguousarray(state.pair_masses[:, first:stop]), component.anchored_states,
-                required, trios, component.factors.available, claim_threads)
+                required, trios, component.sources.available, claim_threads)
             for key, value in (("edge_matched", matched[edges[:, 0], edges[:, 1]]),
                                ("edge_exposed", exposed[edges[:, 0], edges[:, 1]]),
                                ("pair_explained", explained), ("pair_exposed", pair_exposed),
@@ -78,7 +79,9 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, offset,
             np.array(schedule.classes, dtype=np.int64, order="C", copy=True),
             np.array(schedule.known, order="C", copy=True),
             np.array(component.selector_switch_probability, copy=True), int(schedule.n_trajectories),
-            float(parameters.direction.mismatch_probability), axis, len(description)).T)
+            float(parameters.direction.mismatch_probability),
+            np.array(transmission.homologue_errors(schedule), dtype=np.float64, order="C", copy=True),
+            axis, len(description)).T)
         del state
     data = {key: np.ascontiguousarray(np.concatenate(value), dtype=np.float64)
             for key, value in parts.items() if key not in ("total_bins", "informative_markers")}

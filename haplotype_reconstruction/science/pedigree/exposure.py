@@ -22,7 +22,7 @@ import numpy as np
 from numba import prange
 
 from ...core.kernels import kernel
-from .kernels.signatures import OVERLOADS
+from .kernels.decision import OVERLOADS
 
 
 @kernel(overloads=OVERLOADS["exposure._unit"], cache=True, inline="always", nogil=True)

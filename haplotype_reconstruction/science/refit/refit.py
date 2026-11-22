@@ -43,12 +43,17 @@ Cells the tie rule released unknown in this pass are not filled.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import numpy as np
 from numba import prange, types
 
 from ...core.kernels import kernel
 from .parameters import (
+    CARRIER_CLASS_EDGES,
+    GAIN_BIN_WIDTH,
+    GAIN_LIMIT,
+    MINIMUM_CLASS_CELLS,
     REFIT_TIE_QUANTUM,
     REFIT_TIE_QUANTUM_PER_CARRIER,
     SITE_TILE,
@@ -107,6 +112,11 @@ _OVERLOADS = {
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.int8, 1, "A", readonly=True, aligned=True),
+            types.int64,
+        ),
+        (
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.Array(types.int8, 1, "C", readonly=False, aligned=True),
             types.int64,
         ),
@@ -128,8 +138,9 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.literal(0),
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -140,8 +151,9 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.int64,
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
     ),
     "_apply_two_row": (
@@ -170,7 +182,9 @@ _OVERLOADS = {
             types.int64,
             types.int64,
             types.float64,
+            types.float64,
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
     ),
     "_swap_conflicts": (
@@ -185,8 +199,9 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.literal(0),
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -199,14 +214,20 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.int64,
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
     ),
     "_carriers": (
         (
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int8, 1, "A", readonly=False, aligned=True),
+            types.int64,
+        ),
+        (
+            types.Array(types.int64, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int8, 1, "A", readonly=True, aligned=True),
             types.int64,
         ),
         (
@@ -277,8 +298,9 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.literal(0),
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -290,8 +312,9 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.int64,
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
     ),
     "_swap_conflicts_fast": (
@@ -307,9 +330,10 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.literal(0),
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -323,9 +347,10 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.int64,
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
     ),
     "_refit_kernel": (
@@ -336,11 +361,13 @@ _OVERLOADS = {
             types.Array(types.float64, 3, "C", readonly=True, aligned=True),
             types.Array(types.boolean, 2, "C", readonly=True, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
-            types.float64,
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.int64,
             types.boolean,
             types.int64,
+            types.int64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
         (
             types.Array(types.int8, 2, "C", readonly=True, aligned=True),
@@ -349,12 +376,60 @@ _OVERLOADS = {
             types.Array(types.float64, 3, "C", readonly=True, aligned=True),
             types.Array(types.boolean, 2, "C", readonly=True, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
-            types.float64,
-            types.float64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.int64,
             types.boolean,
             types.int64,
+            types.int64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.boolean,
         ),
+        (
+            types.Array(types.int8, 2, "C", readonly=True, aligned=True),
+            types.Array(types.int16, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int16, 2, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.int64,
+            types.boolean,
+            types.int64,
+            types.int64,
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.boolean,
+        ),
+    ),
+    "_carrier_class": ((types.int64,),),
+    "_passes": ((types.float64, types.float64, types.boolean),),
+    "_support": tuple(
+        (
+            types.Array(types.int32, 3, "C", readonly=False, aligned=True),
+            types.Array(types.boolean, 2, "C", readonly=False, aligned=True),
+            alleles,
+            types.int64,
+            exclude,
+            types.boolean,
+        )
+        for alleles in (
+            types.Array(types.int8, 1, "A", readonly=False, aligned=True),
+            types.Array(types.int8, 1, "C", readonly=False, aligned=True),
+        )
+        for exclude in (types.int64, types.literal(-1))
+    ),
+    "_start_gains": tuple(
+        (
+            types.Array(types.int8, 2, "C", readonly=calls_readonly, aligned=True),
+            types.Array(types.int16, 2, "C", readonly=False, aligned=True),
+            types.Array(types.int16, 2, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 3, "C", readonly=evidence_readonly, aligned=True),
+            types.Array(types.boolean, 2, "C", readonly=evidence_readonly, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.float64,
+            types.float64,
+            types.int64,
+        )
+        for calls_readonly, evidence_readonly in ((False, True), (True, True), (True, False))
     ),
 }
 
@@ -551,9 +626,10 @@ def _painted_together(together, a, b):
 
 
 @kernel(overloads=_OVERLOADS["_flip_conflicts"], cache=True, nogil=True)
-def _flip_conflicts(table, refit, site, together, cand_a, cand_class, order, n, minimum_gain, marked):
+def _flip_conflicts(table, refit, site, together, cand_a, cand_class, order, n, cand_thr, marked, signed):
     """Marks (in ``marked``) the rows of flip candidates of one tie class that interact and exclude each
-    other: after either flip the other no longer reaches the minimum gain, so the row order would decide.
+    other: after either flip the other no longer exceeds its own threshold (``cand_thr``), so the row order would
+    decide.
     Only pairs inside a tie class are examined (consecutive in ``order``). Returns whether any row was
     marked."""
     marked[:] = False
@@ -576,7 +652,7 @@ def _flip_conflicts(table, refit, site, together, cand_a, cand_class, order, n, 
                 column[rj] = 1 - column[rj]
                 gi = _flip_gain(table, column, ri)
                 column[rj] = 1 - column[rj]
-                if not (gj > 0.0 and gj >= minimum_gain and gi > 0.0 and gi >= minimum_gain):
+                if not (_passes(gj, cand_thr[j], signed) and _passes(gi, cand_thr[i], signed)):
                     marked[ri] = True
                     marked[rj] = True
                     found = True
@@ -595,7 +671,7 @@ def _apply_two_row(alleles, a, b, kind):
 
 
 @kernel(overloads=_OVERLOADS["_swap_pair_conflict"], cache=True, nogil=True)
-def _swap_pair_conflict(table, column, together, a1, b1, k1, a2, b2, k2, minimum_gain, marked):
+def _swap_pair_conflict(table, column, together, a1, b1, k1, a2, b2, k2, threshold_1, threshold_2, marked, signed):
     """One pair of two-row candidates of a tie class (rows a1, b1 with kind k1 and a2, b2 with kind k2; kind 0
     swap, 1 pair flip): when they share a row or a row painted together and either no longer passes after
     the other is applied, marks their four rows. Returns whether rows were marked."""
@@ -609,11 +685,11 @@ def _swap_pair_conflict(table, column, together, a1, b1, k1, a2, b2, k2, minimum
     x1, y1, x2, y2 = column[a1], column[b1], column[a2], column[b2]
     _apply_two_row(column, a1, b1, k1)
     g2 = _two_row_gain(table, column, a2, b2, k2)
-    pass_2 = g2 > 0.0 and g2 >= minimum_gain
+    pass_2 = _passes(g2, threshold_2, signed)
     column[a1], column[b1], column[a2], column[b2] = x1, y1, x2, y2
     _apply_two_row(column, a2, b2, k2)
     g1 = _two_row_gain(table, column, a1, b1, k1)
-    pass_1 = g1 > 0.0 and g1 >= minimum_gain
+    pass_1 = _passes(g1, threshold_1, signed)
     column[a1], column[b1], column[a2], column[b2] = x1, y1, x2, y2
     if pass_1 and pass_2:
         return False
@@ -626,7 +702,7 @@ def _swap_pair_conflict(table, column, together, a1, b1, k1, a2, b2, k2, minimum
 
 @kernel(overloads=_OVERLOADS["_swap_conflicts"], cache=True, nogil=True)
 def _swap_conflicts(
-    table, refit, site, together, cand_a, cand_b, cand_kind, cand_class, order, n, minimum_gain, marked
+    table, refit, site, together, cand_a, cand_b, cand_kind, cand_class, order, n, cand_thr, marked, signed
 ):
     """As _flip_conflicts for the two-row candidates (swaps and pair flips): two of one tie class that share a
     row or a row painted together, each excluding the other (only pairs inside a tie class are examined)."""
@@ -651,8 +727,10 @@ def _swap_conflicts(
                     cand_a[j],
                     cand_b[j],
                     cand_kind[j],
-                    minimum_gain,
+                    cand_thr[i],
+                    cand_thr[j],
                     marked,
+                    signed,
                 ):
                     found = True
         start = end
@@ -733,7 +811,9 @@ def _pair_curvature(table, alleles, u, v):
 
 
 @kernel(overloads=_OVERLOADS["_flip_conflicts_fast"], cache=True, nogil=True)
-def _flip_conflicts_fast(table, refit, site, together, cand_a, cand_gain, cand_class, order, n, minimum_gain, marked):
+def _flip_conflicts_fast(
+    table, refit, site, together, cand_a, cand_gain, cand_class, order, n, cand_thr, marked, signed
+):
     """_flip_conflicts with O(1) pair tests: after row ri flips, rj's flip gain is cand_gain[j] + Delta_{ri rj}
     (and symmetrically), so a pair costs O(1) instead of two O(K) gains: the same predicate in mathematically equivalent
     arithmetic for finite tables."""
@@ -754,7 +834,7 @@ def _flip_conflicts_fast(table, refit, site, together, cand_a, cand_gain, cand_c
                 d = _pair_curvature(table, column, ri, rj)
                 gj = cand_gain[j] + d
                 gi = cand_gain[i] + d
-                fails = not (gj > 0.0 and gj >= minimum_gain and gi > 0.0 and gi >= minimum_gain)
+                fails = not (_passes(gj, cand_thr[j], signed) and _passes(gi, cand_thr[i], signed))
                 if fails:
                     marked[ri] = True
                     marked[rj] = True
@@ -765,8 +845,8 @@ def _flip_conflicts_fast(table, refit, site, together, cand_a, cand_gain, cand_c
 
 @kernel(overloads=_OVERLOADS["_swap_conflicts_fast"], cache=True, nogil=True)
 def _swap_conflicts_fast(
-    table, refit, site, together, cand_a, cand_b, cand_kind, cand_gain, cand_class, order, n, minimum_gain, marked,
-    row_uses
+    table, refit, site, together, cand_a, cand_b, cand_kind, cand_gain, cand_class, order, n, cand_thr, marked,
+    row_uses, signed
 ):
     """The rows _swap_conflicts marks, in O(K) per examined candidate instead of O(K^2) for finite tables.
 
@@ -849,7 +929,7 @@ def _swap_conflicts_fast(
             for p in range(start, end):
                 i = order[p]
                 bound = cand_gain[i] + 2.0 * (lowest[cand_a[i]] + lowest[cand_b[i]])
-                safe[p] = bound > 0.0 and bound >= minimum_gain
+                safe[p] = _passes(bound, cand_thr[i], signed)
                 if not safe[p]:
                     unsafe[n_unsafe] = p
                     n_unsafe += 1
@@ -880,7 +960,7 @@ def _swap_conflicts_fast(
                     )
                     g2 = cand_gain[j] + w
                     g1 = cand_gain[i] + w
-                    fails = not (g2 > 0.0 and g2 >= minimum_gain and g1 > 0.0 and g1 >= minimum_gain)
+                    fails = not (_passes(g2, cand_thr[j], signed) and _passes(g1, cand_thr[i], signed))
                     if fails:
                         marked[a1] = True
                         marked[b1] = True
@@ -896,6 +976,91 @@ def _swap_conflicts_fast(
 
 
 
+@kernel(overloads=_OVERLOADS["_passes"], cache=True, inline="always", nogil=True)
+def _passes(gain, required, signed):
+    """A move qualifies: signed (4.21), its penalised gain (likelihood gain minus the signed class penalty: a departure
+    from the painted call pays t, a return to it regains t, ADVICE2 15.1 item 4) exceeds the tie quantum, with no
+    separate positive-likelihood condition; otherwise 4.20's form, a positive gain of at least the threshold."""
+    if signed:
+        return gain - required > REFIT_TIE_QUANTUM
+    return gain > 0.0 and gain >= required
+
+
+@kernel(overloads=_OVERLOADS["_carrier_class"], cache=True, inline="always", nogil=True)
+def _carrier_class(carriers):
+    """Carrier class of a cell by its scoring carriers n (CARRIER_CLASS_EDGES): 0 for n = 1, 1 for 2, 2 for 3-4,
+    3 for 5-8, 4 for 9-16, 5 for 17-32, 6 for 33 or more; -1 without a carrier."""
+    if carriers < 1:
+        return -1
+    index = 0
+    for edge in CARRIER_CLASS_EDGES:
+        if carriers >= edge:
+            index += 1
+    return index
+
+
+@kernel(overloads=_OVERLOADS["_support"], cache=True, nogil=True)
+def _support(favour, together, alleles, row, exclude, up):
+    """Carriers whose own reads favour raising (``up``) or lowering row ``row``'s allele, its partners held at
+    ``alleles``: its own-pair (homozygous) carriers and those of called partners other than ``exclude`` (-1: none)."""
+    total = 0
+    if together[row, row]:
+        total += favour[row, row, 0 if up else 1]
+    for partner in range(len(alleles)):
+        other = alleles[partner]
+        if partner == row or partner == exclude or other < 0:
+            continue
+        lo, hi = min(row, partner), max(row, partner)
+        if together[lo, hi]:
+            total += favour[lo, hi, 2 * other + (0 if up else 1)]
+    return total
+
+
+@kernel(overloads=_OVERLOADS["_start_gains"], cache=True, parallel=True, nogil=True)
+def _start_gains(calls, first, second, likelihoods, observed, evidence_sites, low, width, bins):
+    """int64 [tiles, classes, bins]: per site tile, the histogram of the single-flip gains of the painted panel's
+    called cells by carrier class (_carrier_class), the gains at the painted state (the refit's start), in bins of
+    ``width`` nats from ``low`` (gains outside fall in the end bins). Integer counts summed by tile, so the prior
+    estimated from them is the same on any thread count. The table is _refit_kernel's (same arithmetic)."""
+    founders, sites = calls.shape
+    samples = first.shape[0]
+    tiles = (sites + SITE_TILE - 1) // SITE_TILE
+    histogram = np.zeros((tiles, len(CARRIER_CLASS_EDGES) + 1, bins), dtype=np.int64)
+    for tile in prange(tiles):
+        table = np.zeros((founders, founders, 3), dtype=np.float64)
+        pair_count = np.zeros((founders, founders), dtype=np.int64)
+        for site in range(tile * SITE_TILE, min(sites, (tile + 1) * SITE_TILE)):
+            table[:] = 0.0
+            pair_count[:] = 0
+            column = evidence_sites[site]
+            carried = False
+            for sample in range(samples):
+                a, b = first[sample, site], second[sample, site]
+                if a < 0 or b < 0 or not observed[sample, column]:
+                    continue
+                if a > b:
+                    a, b = b, a
+                table[a, b, 0] += math.log(likelihoods[sample, column, 0])
+                table[a, b, 1] += math.log(likelihoods[sample, column, 1])
+                table[a, b, 2] += math.log(likelihoods[sample, column, 2])
+                pair_count[a, b] += 1
+                carried = True
+            if not carried:
+                continue
+            for row in range(founders):
+                if calls[row, site] < 0:
+                    continue
+                index = _carrier_class(_carriers(pair_count, calls[:, site], row))
+                if index < 0:
+                    continue
+                value = _flip_gain(table, calls[:, site], row)
+                if not np.isfinite(value):
+                    continue
+                position = int(math.floor((value - low) / width))
+                histogram[tile, index, min(max(position, 0), bins - 1)] += 1
+    return histogram
+
+
 @kernel(overloads=_OVERLOADS["_refit_kernel"], cache=True, parallel=True, nogil=True)
 def _refit_kernel(
     calls,
@@ -904,15 +1069,31 @@ def _refit_kernel(
     likelihoods,
     observed,
     evidence_sites,
-    robustness_epsilon,
-    minimum_gain,
+    thresholds,
     sweeps,
     reverse,
-    fill_min_supporters,
+    move_supporters,
+    fill_supporters,
+    cohort_alt,
+    signed,
 ):
     """Coordinate ascent per site on a founder-pair log-likelihood table.
 
-    ``table[a, b, g]`` (a <= b) sums log((1 - eps) P(reads | dosage g) + eps / 3)
+    4.21 acceptance (ADVICE2 section 12): a called cell of carrier class c (_carrier_class of its scoring carriers
+    at the painted state) changes when the move's gain is positive and reaches ``thresholds[c]`` = log((1 - p_c) /
+    p_c) (the sum of its two cells' thresholds for a two-row move), and at least ``move_supporters`` carriers' own
+    reads favour the change (``favour``; a pair flip also counts the shared {a, b} carriers whose reads favour the two-step change of
+    their dosage). An unknown cell is filled when its posterior log odds, the likelihood difference plus the cohort
+    log odds log(rho / (1 - rho)) (``cohort_alt`` rho per evidence column), reach the threshold of its class, with
+    ``fill_supporters`` favouring carriers. ``signed`` (4.21): a move's prior cost is signed, t for a cell leaving its
+    painted call and -t for one returning to it (ADVICE2 12.3), a move qualifies when its likelihood gain exceeds that
+    cost, supporters are required of departures only (a return restores the painted call), and moves are ordered and
+    tied by their posterior gains (gain minus cost); unsigned, every change pays t and needs a positive gain. Production passes the same count for both (RefitParameters.min_supporters);
+    a constant threshold, no move supporters and a flat prior (rho = 1/2) give 4.20's rule exactly. Returns (refit, gain, guard bool [L]: sites still moving at the last sweep,
+    cell_class int8 [K, L]: the class each threshold came from, -1 for an uncalled or uncarried cell).
+
+    ``table[a, b, g]`` (a <= b) sums log P'(reads | dosage g), P' the mixed likelihoods (the painting's outlier
+    rate against the cohort law, science.shared.observation),
     over observed samples painted with the unordered pair {a, b}; a row's
     objective then needs only its partners' current alleles. ``favour[a, b]``
     counts those samples whose own reads favour one dosage over the next (a < b:
@@ -938,7 +1119,12 @@ def _refit_kernel(
     samples = first.shape[0]
     refit = calls.copy()
     gain = np.zeros((founders, sites), dtype=np.float64)
-    swap_minimum_gain = 2.0 * minimum_gain
+    guard = np.zeros(sites, dtype=np.bool_)
+    cell_class = np.full((founders, sites), -1, dtype=np.int8)
+    # Residual certificate per site (ADVICE2 15.1 item 5): [0] single-row moves still eligible and supported after the
+    # sweeps (zero unless the guard cut the site off), [1] moves refused by support alone at the end (the discarded
+    # repairs), [2] moves eligible and supported after the terminal fills.
+    certificate = np.zeros((3, sites), dtype=np.int32)
     tiles = (sites + SITE_TILE - 1) // SITE_TILE
     for tile in prange(tiles):
         table = np.zeros((founders, founders, 3), dtype=np.float64)
@@ -949,11 +1135,14 @@ def _refit_kernel(
         cand_a = np.empty(founders * founders, dtype=np.int64)
         cand_b = np.empty(founders * founders, dtype=np.int64)
         cand_gain = np.empty(founders * founders, dtype=np.float64)
+        cand_thr = np.empty(founders * founders, dtype=np.float64)
+        cand_post = np.empty(founders * founders, dtype=np.float64)
+        threshold = np.empty(founders, dtype=np.float64)
         cand_class = np.empty(founders * founders, dtype=np.int64)
         cand_kind = np.empty(founders * founders, dtype=np.int64)
         cand_n = np.empty(founders * founders, dtype=np.int64)
         row_carriers = np.zeros(founders, dtype=np.int64)
-        favour = np.zeros((founders, founders, 4), dtype=np.int32)
+        favour = np.zeros((founders, founders, 6), dtype=np.int32)
         pair_count = np.zeros((founders, founders), dtype=np.int64)
         flip_gain = np.zeros(founders, dtype=np.float64)
         row_uses = np.zeros(founders, dtype=np.int64)
@@ -970,9 +1159,9 @@ def _refit_kernel(
                     continue
                 if a > b:
                     a, b = b, a
-                l0 = math.log((1.0 - robustness_epsilon) * likelihoods[sample, column, 0] + robustness_epsilon / 3.0)
-                l1 = math.log((1.0 - robustness_epsilon) * likelihoods[sample, column, 1] + robustness_epsilon / 3.0)
-                l2 = math.log((1.0 - robustness_epsilon) * likelihoods[sample, column, 2] + robustness_epsilon / 3.0)
+                l0 = math.log(likelihoods[sample, column, 0])
+                l1 = math.log(likelihoods[sample, column, 1])
+                l2 = math.log(likelihoods[sample, column, 2])
                 table[a, b, 0] += l0
                 table[a, b, 1] += l1
                 table[a, b, 2] += l2
@@ -990,6 +1179,11 @@ def _refit_kernel(
                         favour[a, b, 2] += 1
                     elif l1 - l2 > REFIT_TIE_QUANTUM:
                         favour[a, b, 3] += 1
+                    # Two-step changes (a pair flip of two rows painted together): 2 over 0, 0 over 2.
+                    if l2 - l0 > REFIT_TIE_QUANTUM:
+                        favour[a, b, 4] += 1
+                    elif l0 - l2 > REFIT_TIE_QUANTUM:
+                        favour[a, b, 5] += 1
                 together[a, b] = True
                 pair_count[a, b] += 1
                 carried = True
@@ -1003,6 +1197,15 @@ def _refit_kernel(
                     for g in range(3):
                         if not np.isfinite(table[a, b, g]):
                             finite = False
+            # Thresholds of the called cells, fixed at the painted state (ADVICE2 12.3).
+            for row in range(founders):
+                threshold[row] = np.inf
+                if refit[row, site] >= 0:
+                    index = _carrier_class(_carriers(pair_count, refit[:, site], row))
+                    cell_class[row, site] = index
+                    if index >= 0:
+                        threshold[row] = thresholds[index]
+            last_moved = False
             for _ in range(sweeps):
                 moved = False
                 flipped[:] = False
@@ -1014,21 +1217,30 @@ def _refit_kernel(
                         if flipped[row] or refit[row, site] < 0:
                             continue
                         delta = _flip_gain(table, refit[:, site], row)
-                        if delta > 0.0 and delta >= minimum_gain:
+                        departs = refit[row, site] == calls[row, site]
+                        required = threshold[row] if (departs or not signed) else -threshold[row]
+                        if _passes(delta, required, signed) and (
+                            (signed and not departs)
+                            or _support(favour, together, refit[:, site], row, -1, refit[row, site] == 0)
+                            >= move_supporters
+                        ):
                             cand_a[n] = row
                             cand_gain[n] = delta
+                            cand_thr[n] = required
+                            cand_post[n] = delta - required
                             cand_n[n] = _carriers(pair_count, refit[:, site], row)
                             n += 1
                     if n == 0:
                         break
-                    order = _decision_order(cand_gain, cand_n, n, reverse, cand_class)
+                    order = _decision_order(cand_post if signed else cand_gain, cand_n, n, reverse, cand_class)
                     if (
                         _flip_conflicts_fast(
-                            table, refit, site, together, cand_a, cand_gain, cand_class, order, n, minimum_gain, touched
+                            table, refit, site, together, cand_a, cand_gain, cand_class, order, n, cand_thr, touched,
+                            signed,
                         )
                         if finite
                         else _flip_conflicts(
-                            table, refit, site, together, cand_a, cand_class, order, n, minimum_gain, touched
+                            table, refit, site, together, cand_a, cand_class, order, n, cand_thr, touched, signed
                         )
                     ):
                         for row in range(founders):
@@ -1070,7 +1282,29 @@ def _refit_kernel(
                                 delta = flip_gain[a] + flip_gain[b] + _pair_curvature(table, refit[:, site], a, b)
                             else:
                                 delta = _two_row_gain(table, refit[:, site], a, b, 0 if xa != xb else 1)
-                            if delta > 0.0 and delta >= swap_minimum_gain:
+                            depart_a = refit[a, site] == calls[a, site]
+                            depart_b = refit[b, site] == calls[b, site]
+                            required = (threshold[a] if (depart_a or not signed) else -threshold[a]) + (
+                                threshold[b] if (depart_b or not signed) else -threshold[b]
+                            )
+                            if not _passes(delta, required, signed):
+                                continue
+                            # Support per cell (ADVICE2 15.1 item 7), at the round's start state: each departing cell
+                            # needs move_supporters of its own row's carriers favouring it; a sample painted with both
+                            # rows counts for both cells in a joint flip (its dosage changes 0 <-> 2) and for neither
+                            # in a swap (its dosage does not change). A return needs no support.
+                            if xa != xb:
+                                support_a = _support(favour, together, refit[:, site], a, b, xb == 1)
+                                support_b = _support(favour, together, refit[:, site], b, a, xa == 1)
+                            else:
+                                shared = favour[a, b, 4 if xa == 0 else 5]
+                                support_a = _support(favour, together, refit[:, site], a, b, xa == 0) + shared
+                                support_b = _support(favour, together, refit[:, site], b, a, xa == 0) + shared
+                            if ((signed and not depart_a) or support_a >= move_supporters) and (
+                                (signed and not depart_b) or support_b >= move_supporters
+                            ):
+                                cand_thr[n] = required
+                                cand_post[n] = delta - required
                                 cand_a[n] = a
                                 cand_b[n] = b
                                 cand_kind[n] = 0 if xa != xb else 1
@@ -1079,16 +1313,16 @@ def _refit_kernel(
                                 n += 1
                     if n == 0:
                         break
-                    order = _decision_order(cand_gain, cand_n, n, reverse, cand_class)
+                    order = _decision_order(cand_post if signed else cand_gain, cand_n, n, reverse, cand_class)
                     if not finite:
                         conflict = _swap_conflicts(
                             table, refit, site, together, cand_a, cand_b, cand_kind, cand_class, order, n,
-                            swap_minimum_gain, touched,
+                            cand_thr, touched, signed,
                         )
                     else:
                         conflict = _swap_conflicts_fast(
                             table, refit, site, together, cand_a, cand_b, cand_kind, cand_gain, cand_class, order, n,
-                            swap_minimum_gain, touched, row_uses,
+                            cand_thr, touched, row_uses, signed,
                         )
                     if conflict:
                         for row in range(founders):
@@ -1110,8 +1344,23 @@ def _refit_kernel(
                         moved = True
                         _touch(touched, together, a)
                         _touch(touched, together, b)
+                last_moved = moved
                 if not moved:
                     break
+            guard[site] = last_moved
+            if signed:
+                for row in range(founders):
+                    if refit[row, site] < 0:
+                        continue
+                    departs = refit[row, site] == calls[row, site]
+                    required = threshold[row] if departs else -threshold[row]
+                    if _passes(_flip_gain(table, refit[:, site], row), required, signed):
+                        if (not departs) or _support(
+                            favour, together, refit[:, site], row, -1, refit[row, site] == 0
+                        ) >= move_supporters:
+                            certificate[0, site] += 1
+                        else:
+                            certificate[1, site] += 1
             # Fills: cells unknown in the painted panel, decided against the post-sweep state
             # and applied together (module docstring).
             n = 0
@@ -1122,11 +1371,13 @@ def _refit_kernel(
                 ll1 = 0.0
                 up = 0
                 down = 0
+                carriers = 0
                 if together[row, row]:
                     ll0 += table[row, row, 0]
                     ll1 += table[row, row, 2]
                     up += favour[row, row, 0]
                     down += favour[row, row, 1]
+                    carriers += pair_count[row, row]
                 for partner in range(founders):
                     other = refit[partner, site]
                     if partner == row or other < 0:
@@ -1138,20 +1389,167 @@ def _refit_kernel(
                     ll1 += table[lo, hi, other + 1]
                     up += favour[lo, hi, 2 * other]
                     down += favour[lo, hi, 2 * other + 1]
-                if ll1 - ll0 >= minimum_gain and up >= fill_min_supporters:
+                    carriers += pair_count[lo, hi]
+                index = _carrier_class(carriers)
+                if index < 0:
+                    continue
+                # Posterior log odds of allele 1 with the cohort's allele frequency as the prior (ADVICE2 12.2).
+                rho = min(max(cohort_alt[column], 1e-12), 1.0 - 1e-12)
+                posterior = ll1 - ll0 + math.log(rho / (1.0 - rho))
+                if posterior >= thresholds[index] and up >= fill_supporters:
                     cand_a[n] = row
                     cand_b[n] = 1
                     cand_gain[n] = ll1 - ll0
+                    cand_n[n] = index
                     n += 1
-                elif ll0 - ll1 >= minimum_gain and down >= fill_min_supporters:
+                elif -posterior >= thresholds[index] and down >= fill_supporters:
                     cand_a[n] = row
                     cand_b[n] = 0
                     cand_gain[n] = ll0 - ll1
+                    cand_n[n] = index
                     n += 1
             for t in range(n):
                 refit[cand_a[t], site] = cand_b[t]
                 gain[cand_a[t], site] = cand_gain[t]
-    return refit, gain
+                cell_class[cand_a[t], site] = cand_n[t]
+            if signed and n > 0:
+                for row in range(founders):
+                    if refit[row, site] < 0 or calls[row, site] < 0:
+                        continue
+                    departs = refit[row, site] == calls[row, site]
+                    required = threshold[row] if departs else -threshold[row]
+                    if _passes(_flip_gain(table, refit[:, site], row), required, signed) and (
+                        (not departs)
+                        or _support(favour, together, refit[:, site], row, -1, refit[row, site] == 0)
+                        >= move_supporters
+                    ):
+                        certificate[2, site] += 1
+    return refit, gain, guard, cell_class, certificate
+
+
+def start_gain_histogram(
+    calls: np.ndarray,
+    first: np.ndarray,
+    second: np.ndarray,
+    likelihoods: np.ndarray,
+    observed: np.ndarray,
+    evidence_sites: np.ndarray,
+) -> np.ndarray:
+    """int64 [classes, bins]: the painted panel's start-state single-flip gains by carrier class (_start_gains),
+    bins of GAIN_BIN_WIDTH nats over [-GAIN_LIMIT, GAIN_LIMIT]; arguments as refit_alleles."""
+    bins = int(round(2.0 * GAIN_LIMIT / GAIN_BIN_WIDTH))
+    histogram = _start_gains(
+        np.ascontiguousarray(calls, dtype=np.int8),
+        np.ascontiguousarray(first, dtype=np.int16),
+        np.ascontiguousarray(second, dtype=np.int16),
+        likelihoods,
+        np.ascontiguousarray(observed, dtype=np.bool_),
+        np.ascontiguousarray(evidence_sites, dtype=np.int64),
+        -GAIN_LIMIT,
+        GAIN_BIN_WIDTH,
+        bins,
+    )
+    return histogram.sum(axis=0)
+
+
+def _prior_score(p: float, gains: np.ndarray, counts: np.ndarray) -> float:
+    """d/dp of sum counts log(1 - p + p exp(G)) (overflow-safe for large G)."""
+    large = gains > 30.0
+    shrunk = np.exp(-gains[large])
+    value = float(np.sum(counts[large] * (1.0 - shrunk) / (p + (1.0 - p) * shrunk)))
+    x = np.exp(gains[~large])
+    return value + float(np.sum(counts[~large] * (x - 1.0) / ((1.0 - p) + p * x)))
+
+
+@dataclass(frozen=True)
+class AcceptancePriors:
+    """The per-contig discordance coefficients and class penalties of the refit (ADVICE2 15.1 items 1 and 2).
+
+    classes: the pooled class of every carrier class (CARRIER_CLASS_EDGES order; class 0, one carrier, never departs:
+    penalty +inf, pooled class -1); cells and positive int64 [7] start-state cells and cells with a positive gain per
+    carrier class; coefficient float64 [7] the pooled class's discordance coefficient c (the maximiser of the start-state
+    mixture likelihood: a working coefficient, not a probability that a call is wrong) and penalty float64 [7]
+    log((1 - c) / c); bound bool [7] the coefficient at the lower bound or at 1/2; floor the lower bound."""
+
+    classes: tuple[int, ...]
+    cells: np.ndarray
+    positive: np.ndarray
+    coefficient: np.ndarray
+    penalty: np.ndarray
+    bound: np.ndarray
+    floor: float
+
+    @property
+    def threshold(self) -> np.ndarray:
+        """The class penalties, in the kernel's argument order."""
+        return self.penalty
+
+
+def class_priors(
+    histogram: np.ndarray, *, base_groups: tuple[tuple[int, ...], ...] | None = None, single_carrier: bool = False
+) -> AcceptancePriors:
+    """c = argmax sum log(1 - c + c exp(G)) over a pooled class's start-state single-flip gains G (concave in c) on
+    [0.5 / max(scored cells, MINIMUM_CLASS_CELLS), 1/2]. Carrier classes pool with the next class of more carriers
+    until the pool holds MINIMUM_CLASS_CELLS cells; a last pool short of it joins the one before it; a contig where no
+    pool reaches it takes the lower bound for every class (ADVICE2 15.1 item 2 and section 16: the condition on
+    positive-gain cells is withdrawn: it diluted the two-carrier class and did not stabilise the estimates). Penalty log((1 - c) / c). Development arms only (15.1 items 2 and 10): ``base_groups`` pools
+    the carrier classes into these groups before the size conditions (e.g. ((1,), (2, 3), (4, 5, 6)) for 2, 3-8, 9+);
+    ``single_carrier`` gives one-carrier cells (class 0) their own pooled penalty instead of +inf."""
+    histogram = np.asarray(histogram, dtype=np.int64)
+    classes = histogram.shape[0]
+    centres = -GAIN_LIMIT + (np.arange(histogram.shape[1]) + 0.5) * GAIN_BIN_WIDTH
+    cells = histogram.sum(axis=1)
+    positive = histogram[:, centres > 0].sum(axis=1)
+    floor = 0.5 / max(int(cells.sum()), MINIMUM_CLASS_CELLS)
+
+    def complete(group):
+        return int(cells[group].sum()) >= MINIMUM_CLASS_CELLS
+
+    groups: list[list[int]] = []
+    current: list[int] = []
+    bases = [list(g) for g in base_groups] if base_groups is not None else [[i] for i in range(1, classes)]
+    if single_carrier:
+        bases = [[0]] + bases
+    for base in bases:
+        current.extend(base)
+        if complete(current):
+            groups.append(current)
+            current = []
+    if current:
+        if groups:
+            groups[-1].extend(current)
+        else:
+            groups.append(current)
+    reached = any(complete(group) for group in groups)
+    merged = [-1] * classes
+    coefficient = np.full(classes, np.nan)
+    penalty = np.full(classes, np.inf)
+    bound = np.zeros(classes, dtype=bool)
+    for number, group in enumerate(groups):
+        counts = histogram[group].sum(axis=0).astype(np.float64)
+        used = counts > 0
+        c = floor
+        if reached and used.any():
+            gains, weights = centres[used], counts[used]
+            if _prior_score(floor, gains, weights) <= 0.0:
+                c = floor
+            elif _prior_score(0.5, gains, weights) >= 0.0:
+                c = 0.5
+            else:
+                low, high = floor, 0.5
+                for _ in range(100):
+                    middle = 0.5 * (low + high)
+                    if _prior_score(middle, gains, weights) > 0.0:
+                        low = middle
+                    else:
+                        high = middle
+                c = 0.5 * (low + high)
+        for index in group:
+            merged[index] = number
+            coefficient[index] = c
+            penalty[index] = math.log((1.0 - c) / c)
+            bound[index] = c <= floor or c >= 0.5
+    return AcceptancePriors(tuple(merged), cells, positive, coefficient, penalty, bound, floor)
 
 
 def refit_alleles(
@@ -1162,20 +1560,26 @@ def refit_alleles(
     observed: np.ndarray,
     evidence_sites: np.ndarray,
     *,
-    robustness_epsilon: float,
-    minimum_gain_nats: float,
+    thresholds: np.ndarray,
+    cohort_alt: np.ndarray,
     coordinate_sweeps: int,
-    fill_min_supporters: int,
+    min_supporters: int,
+    fill_supporters: int | None = None,
     reverse: bool = False,
-) -> tuple[np.ndarray, np.ndarray]:
+    signed: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Refit a K-by-L allele matrix (-1 unknown; filled only by the fill rule) given painted rows.
 
     ``first``/``second`` int16[N, L]: founder rows of the two painted tracks at
-    each panel site (-1 unknown); ``likelihoods`` float64[N, L_e, 3]
-    normalised and ``observed`` bool[N, L_e] on the evidence site axis;
-    ``evidence_sites`` int64[L] maps panel sites to it. Returns the refit
-    matrix and the accepted gain per cell (zero where unchanged; a cell flipped
-    twice keeps its last gain).
+    each panel site (-1 unknown); ``likelihoods`` float64[N, L_e, 3] the
+    mixed likelihoods (science.shared.observation) and ``observed`` bool[N, L_e] on the evidence site axis;
+    ``evidence_sites`` int64[L] maps panel sites to it; ``thresholds`` float64 [7] per carrier class
+    (class_priors); ``cohort_alt`` float64 [L_e] the cohort alternative-allele frequency (the fills' prior);
+    ``min_supporters`` favouring carriers for every change, fills included unless ``fill_supporters`` is given;
+    ``signed`` False gives every change the same cost (4.20's form; the legacy arm of gate G7 and the reference tests).
+    Returns the refit matrix, the accepted gain per cell (zero where unchanged; a cell flipped twice keeps its
+    last gain), the sweep-guard sites, the carrier class of every cell and the residual certificate int32 [3, L]
+    (_refit_kernel).
     """
     return _refit_kernel(
         np.ascontiguousarray(calls, dtype=np.int8),
@@ -1184,9 +1588,11 @@ def refit_alleles(
         likelihoods,
         np.ascontiguousarray(observed, dtype=np.bool_),
         np.ascontiguousarray(evidence_sites, dtype=np.int64),
-        float(robustness_epsilon),
-        float(minimum_gain_nats),
+        np.ascontiguousarray(thresholds, dtype=np.float64),
         int(coordinate_sweeps),
         bool(reverse),
-        int(fill_min_supporters),
+        int(min_supporters),
+        int(min_supporters if fill_supporters is None else fill_supporters),
+        np.ascontiguousarray(cohort_alt, dtype=np.float64),
+        bool(signed),
     )

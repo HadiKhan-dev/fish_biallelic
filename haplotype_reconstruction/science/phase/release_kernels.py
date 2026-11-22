@@ -115,6 +115,9 @@ _OVERLOADS = {
             types.float64,
             types.float64,
             types.float64,
+            types.float64,
+            types.float64,
+            types.float64,
             types.float32,
             types.float32,
             types.float32,
@@ -129,6 +132,7 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", False, aligned=True),
             types.Array(types.int8, 2, "C", False, aligned=True),
             types.Array(types.float32, 2, "C", False, aligned=True),
+            types.Array(types.float64, 2, "C", False, aligned=True),
             types.float64,
             types.Array(types.float64, 2, "C", False, aligned=True),
             types.Array(types.int64, 2, "C", False, aligned=True),
@@ -139,6 +143,7 @@ _OVERLOADS = {
             types.Array(types.int64, 1, "C", False, aligned=True),
             types.Array(types.int8, 2, "F", False, aligned=True),
             types.Array(types.float32, 2, "C", False, aligned=True),
+            types.Array(types.float64, 2, "C", False, aligned=True),
             types.float64,
             types.Array(types.float64, 2, "C", False, aligned=True),
             types.Array(types.int64, 2, "C", False, aligned=True),
@@ -451,13 +456,14 @@ def backward_to(beta_anchor, em, T0, T1, TG, lo, anchor, anchor_mask):
 
 
 @kernel(overloads=_OVERLOADS["_flip_pair"], cache=True, nogil=True)
-def _flip_pair(f1x, f1y, keep, epsilon, g0, g1, g2, weight, out, i):
+def _flip_pair(f1x, f1y, keep, epsilon, q0, q1, q2, g0, g1, g2, weight, out, i):
     """Adds weight x the ordered allele posterior of one label pair (P(homologue 0 carries allele 1) = f1x, homologue
-    1: f1y), with independent per-homologue flips, given the site's reads to out[:, i] (site_posteriors' law)."""
-    w00 = (keep * (1.0 - f1x) * (1.0 - f1y) + epsilon / 3.0) * g0
-    w01 = (keep * (1.0 - f1x) * f1y + epsilon / 6.0) * g1
-    w10 = (keep * f1x * (1.0 - f1y) + epsilon / 6.0) * g1
-    w11 = (keep * f1x * f1y + epsilon / 3.0) * g2
+    1: f1y), with independent per-homologue flips, given the site's reads to out[:, i] (site_posteriors' law; q0, q1,
+    q2 the site's cohort genotype frequencies)."""
+    w00 = (keep * (1.0 - f1x) * (1.0 - f1y) + epsilon * q0) * g0
+    w01 = (keep * (1.0 - f1x) * f1y + epsilon * q1 / 2.0) * g1
+    w10 = (keep * f1x * (1.0 - f1y) + epsilon * q1 / 2.0) * g1
+    w11 = (keep * f1x * f1y + epsilon * q2) * g2
     z = w00 + w01 + w10 + w11
     if z <= 0.0:
         return
@@ -469,7 +475,7 @@ def _flip_pair(f1x, f1y, keep, epsilon, g0, g1, g2, weight, out, i):
 
 
 @kernel(overloads=_OVERLOADS["site_posteriors"], cache=True, nogil=True)
-def site_posteriors(P, site_bin, alleles, gl, epsilon, flips, own_state, own_flip):
+def site_posteriors(P, site_bin, alleles, gl, cohort, epsilon, flips, own_state, own_flip):
     """float64 [4, m]: ordered allele posteriors (00, 01, 10, 11) of each site under the release's site model.
 
     Given the bin's ordered label pair (x, y) (posterior P [B, S, S]) with panel alleles a_x, a_y (alleles [S, m]; a
@@ -478,8 +484,10 @@ def site_posteriors(P, site_bin, alleles, gl, epsilon, flips, own_state, own_fli
     panel allele except for a flip of that allele with probability d_x (f_x(a_x) = 1 - d_x, f_x(1 - a_x) = d_x: the
     capped empirical-Bayes per-copy uncertainty conditional on the fitted carriers and panel, allele_evidence.py),
     and with mixture mass
-    epsilon the pair is redrawn from a uniform genotype (ordered weights 1/3, 1/6, 1/6, 1/3: a label error shorter than
-    a bin, a conversion or mutation; the mass is not itself the probability of a change). d_x is flips[x, i], except
+    epsilon (the run's outlier rate, estimated at the painting calibration) the pair is redrawn from the site's cohort
+    genotype frequencies cohort [m, 3] (ordered weights q0, q1/2, q1/2, q2: a label error shorter than a bin, a
+    conversion, a mutation or a read artefact; science.shared.observation). The site likelihoods gl are the raw ones:
+    the release's ordered numerators carry the mixture themselves, so the posterior is that of the actual alleles. d_x is flips[x, i], except
     for the labels of the sample's own MAP pair at the site (own_state [2, m], -1 none), which take own_flip [2, m]
     (their flips with the sample's direct own likelihood term removed). The selected allele determines the cap.
     The copies flip independently per homologue, including (x, x); this is not exact integration over one shared
@@ -509,6 +517,9 @@ def site_posteriors(P, site_bin, alleles, gl, epsilon, flips, own_state, own_fli
         g0 = float(gl[i, 0])
         g1 = float(gl[i, 1])
         g2 = float(gl[i, 2])
+        q0 = cohort[i, 0]
+        q1 = cohort[i, 1]
+        q2 = cohort[i, 2]
         for x in range(S):
             flip[x] = flips[x, i]
         for t in range(2):
@@ -536,7 +547,8 @@ def site_posteriors(P, site_bin, alleles, gl, epsilon, flips, own_state, own_fli
                     side0[x, ay] += p
                 elif p != 0.0:
                     _flip_pair(
-                        dx if ax == 0 else 1.0 - dx, dy if ay == 0 else 1.0 - dy, keep, epsilon, g0, g1, g2, p, out, i
+                        dx if ax == 0 else 1.0 - dx, dy if ay == 0 else 1.0 - dy, keep, epsilon, q0, q1, q2, g0, g1,
+                        g2, p, out, i
                     )
         for x in range(S):
             dx = flip[x]
@@ -545,16 +557,16 @@ def site_posteriors(P, site_bin, alleles, gl, epsilon, flips, own_state, own_fli
             f1 = dx if alleles[x, i] == 0 else 1.0 - dx  # P(the flipped label's homologue carries allele 1)
             for c in range(2):
                 if side0[x, c] != 0.0:
-                    _flip_pair(f1, float(c), keep, epsilon, g0, g1, g2, side0[x, c], out, i)
+                    _flip_pair(f1, float(c), keep, epsilon, q0, q1, q2, g0, g1, g2, side0[x, c], out, i)
                 if side1[x, c] != 0.0:
-                    _flip_pair(float(c), f1, keep, epsilon, g0, g1, g2, side1[x, c], out, i)
+                    _flip_pair(float(c), f1, keep, epsilon, q0, q1, q2, g0, g1, g2, side1[x, c], out, i)
         for h in range(4):
             if mass[h] == 0.0:
                 continue
-            w00 = (epsilon / 3.0 + (keep if h == 0 else 0.0)) * g0
-            w01 = (epsilon / 6.0 + (keep if h == 1 else 0.0)) * g1
-            w10 = (epsilon / 6.0 + (keep if h == 2 else 0.0)) * g1
-            w11 = (epsilon / 3.0 + (keep if h == 3 else 0.0)) * g2
+            w00 = (epsilon * q0 + (keep if h == 0 else 0.0)) * g0
+            w01 = (epsilon * q1 / 2.0 + (keep if h == 1 else 0.0)) * g1
+            w10 = (epsilon * q1 / 2.0 + (keep if h == 2 else 0.0)) * g1
+            w11 = (epsilon * q2 + (keep if h == 3 else 0.0)) * g2
             z = w00 + w01 + w10 + w11
             if z <= 0.0:
                 continue

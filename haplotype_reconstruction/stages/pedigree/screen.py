@@ -29,7 +29,7 @@ from ...core.errors import InputError, InvariantError
 from ...engine.cpu import claim_threads, current_budget, thread_team
 from ...engine.scheduler import TaskSession
 from ...engine.workers import ResidentRef, release_resident, resident_value, retain
-from ...science.pedigree import forward, m1, pair_bound, panel, selective_m1, selective_screen
+from ...science.pedigree import forward, m1, pair_bound_screen, panel, selective_m1, selective_screen
 from ...science.pedigree.compact_m1 import CompactBuilder, CompactM1
 from ...science.pedigree.parameters import PedigreeParameters
 from ...store.container import CheckpointFile
@@ -135,10 +135,13 @@ def bound(state: ContigState, children: np.ndarray, eligible: np.ndarray) -> tup
     result = np.full(eligible.shape, -np.inf)
     # Even an empty active batch crosses the cache boundary.
     if len(active):
-        result[active] = selective_m1.outward_sum(np.stack([c.bound(children[active]) for c in state.components]))
+        span = (int(children[0]), int(children[-1]) + 1)  # the batch's child range (its exact queries' range)
+        result[active] = selective_m1.outward_sum(
+            np.stack([c.bound(children[active], span, eligible[active]) for c in state.components])
+        )
     else:
         for c in state.components:
-            c.cache_range = c.products = c.powered = c.columns = None
+            c.cache_range = c.products = c.powered = c.columns = c.classes = c.classes_range = c.scored = None
     return state, result
 
 
@@ -247,7 +250,10 @@ def run(
         raise InputError("screen contig axis contains duplicates")
     n = len(eligibility.children)
     markers = np.asarray([p.informative_markers for p in informative], dtype=np.float64)
-    builder = CompactBuilder(n, markers, eligibility.parents.sum(1))
+    # B2 (4.21): the effective information units of each chromosome, None under the 4.20 rule
+    units = np.asarray([p.effective_units for p in informative], dtype=np.float64)
+    units = units if len(units) and np.isfinite(units).all() else None
+    builder = CompactBuilder(n, markers, eligibility.parents.sum(1), units)
     batch_counts = []
     tasks = tuple(
         Task(
@@ -308,7 +314,7 @@ def run(
                     values[ix] = answers[t.key]
                 return values
 
-            batch_result = selective_m1.search_batch(upper, children, allowed, markers, parameters, exact)
+            batch_result = selective_m1.search_batch(upper, children, allowed, markers, parameters, exact, units)
             builder.add(batch_result)
             batch_counts.append(ScreenBatchCounts(**batch_result["counts"]))
         session.run(
@@ -350,7 +356,7 @@ def bound_run(
             return previous
     with thread_team(default=threads):
         product = PairBounds(
-            prepared.contig, pair_bound.chromosome_bounds(prepared, compact, parameters, claim_threads, reverse=reverse)
+            prepared.contig, pair_bound_screen.chromosome_bounds(prepared, compact, parameters, claim_threads, reverse=reverse)
         )
     if file is not None:
         assert identity is not None
@@ -424,7 +430,8 @@ def panel_run(
         if previous is not None:
             return previous
     c = screen.compact
-    utility = panel.robust_screen_values(c.values, c.n_contigs, c.n_samples, c.markers, eligibility, parameters)
+    utility = panel.robust_screen_values(c.values, c.n_contigs, c.n_samples, c.markers, eligibility, parameters,
+                                         units=c.units)
     product, _ = panel.bounded_panel(c, bounds, utility, eligibility, parameters)
     if file is not None:
         assert identity is not None

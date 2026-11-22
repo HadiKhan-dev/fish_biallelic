@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
+from typing import Any
 
 from haplotype_reconstruction.contracts.assembly import (
     AssemblyProduct,
@@ -204,6 +205,26 @@ def finish_level(
         context = next_context(state.level, components, joined_level.components, context)
         record = replace(record, refinement=refined.summary)
     records = (*state.records, record)
+    if record.stop_reason is not None and session.role is Role.FINAL:
+        # The diplotype exchange on the refined components of the last level (stages.assembly.exchange), then
+        # publication. An interrupted run resumes here from the level's refined record and runs the step again.
+        key = replace(session.parent, unit=f"{session.parent.unit}.exchange")
+        task = Task(
+            key,
+            run_exchange,
+            args=(session, state.prepared, state.level, state.l1_context, tuple(components), tuple(alternatives)),
+            resources=ResourceRequest(1, session.max_cores),
+            affinity=session.parent.scope,
+            thread_argument="cores",
+        )
+        gather = Task(
+            replace(key, unit=key.unit + ".gather"),
+            publish_exchanged,
+            args=(session, state.prepared, records, ResultRef(key)),
+            depends_on=(key,),
+            affinity=session.parent.scope,
+        )
+        return Expansion((task,), gather)
     if record.stop_reason is not None:
         product = AssemblyProduct(tuple(components), records, tuple(alternatives), state.prepared)
         if session.records is not None and session.role is Role.FINAL:
@@ -233,6 +254,62 @@ def finish_level(
         affinity=session.parent.scope,
     )
     return Expansion((task,), gather)
+
+
+def run_exchange(
+    session: AssemblySession,
+    prepared: tuple,
+    level: int,
+    l1_context: Any,
+    components: tuple,
+    alternatives: tuple,
+    *,
+    cores: int = 1,
+) -> tuple:
+    """The exchange step on the final components: (components, exchange record, release families). The record,
+    not the extended panels, crosses the task boundary; the gather rebuilds the panels from the completion's."""
+    from haplotype_reconstruction.engine.cpu import current_budget
+    from haplotype_reconstruction.science.assembly.refinement.run import RefinementSettings, bin_floor, macro_context
+
+    from .completion import attached_scoring
+    from .exchange import empty_exchange, exchange_components, has_candidates
+    from .team import RefinementTeam
+
+    if not any(has_candidates(component) for component in components):
+        return tuple(components), empty_exchange(components), tuple(alternatives)  # no evidence is attached
+    parameters = session.parameters
+    config = parameters.refinement
+    settings = RefinementSettings(
+        config,
+        bin_floor(level, prepared, config),
+        float(parameters.cost_scale),
+        parameters.count_rule,
+        level,
+        session.inputs.genetic_map,
+        session.ties.reverse,
+        session.ties.census,
+    )
+    contexts = [macro_context(component, l1_context) for component in components]
+    team = RefinementTeam(cores, current_budget())
+    scoring = session.inputs.evidence.scoring if session.storage is None else session.storage.scoring_ref
+    with attached_scoring(scoring) as view:
+        return exchange_components(components, prepared, view, contexts, settings, alternatives, team)
+
+
+def publish_exchanged(session: AssemblySession, prepared: tuple, records: tuple, result: tuple) -> AssemblyProduct:
+    """Publish the final product with its exchange record (the completion record keeps the prepared panels)."""
+    from .exchange import apply_exchange
+
+    components, exchange, alternatives = result
+    product = AssemblyProduct(
+        tuple(components), records, tuple(alternatives), apply_exchange(prepared, exchange), exchange
+    )
+    if session.records is not None:
+        session.records.save(FINAL, encode_product(product))
+    from .refinement_diagnostics import report_refinement
+
+    report_refinement(session.parent.scope, (level.refinement or {} for level in records))
+    return product
 
 
 def identity_result(value: AssemblyProduct) -> AssemblyProduct:

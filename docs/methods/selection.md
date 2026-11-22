@@ -324,7 +324,7 @@ Construct pair emissions in ascending site order, centre/exponentiate each bin a
 
 Implementation: [science/selection/context_refit.py](../../haplotype_reconstruction/science/selection/context_refit.py).
 
-Parameters by name: `emission_mix`, `unknown_mass`, `redraw_rate_per_morgan`, `context_refit`, `model`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name:, `unknown_mass`, `redraw_rate_per_morgan`, `context_refit`, `model`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_c S^2); O(N L_c); O(N B S^2). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

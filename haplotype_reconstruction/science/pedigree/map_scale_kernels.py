@@ -1,8 +1,10 @@
-"""Compute the transmission-chain likelihoods of the painting-based map-scale estimate (rev 5, DESIGN_MAPSCALE).
+"""Read the painted classes of the painting-based map-scale estimate (rev 5, DESIGN_MAPSCALE): switch-interval
+candidates, the guard's pair observations and IBD-count chains, and the sibs' frames.
 
-Every kernel reads the released painting of one relatedness family at a time: a sib's two transmission chains along
-the physical axis at one genome-wide rate r (cM/Mb, Morgans per bp = r 1e-8), Haldane switches between frames.
-Inputs are C-contiguous writable arrays (the wrappers in map_scale_frames copy them); outputs are freshly allocated.
+Every kernel reads the released painting of one relatedness family at a time (classes and keys only, no emission;
+the frame chains on emissions, with the read state, are map_scale_chains). Rates are genome-wide (cM/Mb, Morgans per
+bp = r 1e-8), Haldane switches between observations. Inputs are C-contiguous writable arrays (the wrappers in
+map_scale_frames copy them); outputs are freshly allocated.
 
 Method: docs/methods/pedigree.md#map-scale.
 """
@@ -22,10 +24,6 @@ __all__ = [
     "pair_fullsib_loglik",
     "pair_alternative_loglik",
     "sib_frames",
-    "frame_loglik",
-    "target_loglik",
-    "target_posterior",
-    "error_run_loglik",
 ]
 
 
@@ -35,10 +33,12 @@ def _a(dtype, ndim):
 
 _u8_3 = _a(types.uint8, 3)
 _i32_2, _i32_3 = _a(types.int32, 2), _a(types.int32, 3)
-_i64_1, _i64_2 = _a(types.int64, 1), _a(types.int64, 2)
-_i8_1 = _a(types.int8, 1)
+_i64_1 = _a(types.int64, 1)
 _b1 = _a(types.boolean, 1)
-_f1, _f2 = _a(types.float64, 1), _a(types.float64, 2)
+_f1 = _a(types.float64, 1)
+# Graph workers attach immutable component arrays. Member and slot indices are allocated inside the worker.
+_ro_keys = types.Array(types.int32, 3, "C", readonly=True)
+_ro_centers = types.Array(types.float64, 1, "C", readonly=True)
 
 # painting.TrackStatus values (contracts.painting): firm stage-1 tracks and switch intervals.
 _NAMED = 2
@@ -83,7 +83,8 @@ def switch_candidates(status, classes, keys_table, n_classes, eligible):
     return c1, c2
 
 
-@kernel(overloads=((_i32_3, _i32_3, _i32_3, _i64_1, _i64_1, _f1),), cache=True, nogil=True)
+@kernel(overloads=((_i32_3, _i32_3, _i32_3, _i64_1, _i64_1, _f1),
+                   (_ro_keys, _ro_keys, _ro_keys, _i64_1, _i64_1, _ro_centers)), cache=True, nogil=True)
 def pair_observations(keys, cand1, cand2, members, carriers, centers):
     """Shared-key observations of every member pair (a, c), a < c, in pair order: at a bin where the OTHER carriers
     (members and slot samples, firm keys only) show exactly four distinct keys and all four tracks of the pair carry a
@@ -299,7 +300,8 @@ def pair_alternative_loglik(offsets, pos, obs, r_grid, eps_grid):
     return hs, po
 
 
-@kernel(overloads=((_i32_3, _i32_3, _i64_1, _i64_1, _f1),), cache=True, nogil=True)
+@kernel(overloads=((_i32_3, _i32_3, _i64_1, _i64_1, _f1),
+                   (_ro_keys, _ro_keys, _i64_1, _i64_1, _ro_centers)), cache=True, nogil=True)
 def sib_frames(cls, key, members, slots, centers):
     """Determined frames of every target member (strict linking). At a bin where the OTHER carriers (members and slot
     samples, firm tracks only) show exactly four classes with four distinct keys, and the other members' co-occurrence
@@ -473,320 +475,3 @@ def sib_frames(cls, key, members, slots, centers):
             fr_lab[nf, 3] = lab[1, 1]
             nf += 1
     return fr_t[:nf], fr_c[:nf], fr_b[:nf], fr_lab[:nf]
-
-
-@kernel(overloads=((_i64_1, _f1, _f2, _f1, _f1),), cache=True, parallel=True, nogil=True)
-def frame_loglik(offsets, pos, em, r_grid, delta_grid):
-    """4-state chain of a sib's two transmissions (independent homologue bits flipping at 1 per Morgan) on each
-    frame sequence [S, R, D]; emissions em[x, :4] (ratios to the frame maximum, states 00, 01, 10, 11) mixed with
-    the misfit column em[x, 4] at weight delta."""
-    S = len(offsets) - 1
-    out = np.zeros((S, len(r_grid), len(delta_grid)))
-    for s in prange(S):
-        lo = offsets[s]
-        hi = offsets[s + 1]
-        for ri in range(len(r_grid)):
-            rate = r_grid[ri] * 1e-8
-            for di in range(len(delta_grid)):
-                dl = delta_grid[di]
-                a = np.full(4, 0.25)
-                ll = 0.0
-                for x in range(lo, hi):
-                    if x > lo:
-                        q = 0.5 * (1.0 - math.exp(-2.0 * (pos[x] - pos[x - 1]) * rate))
-                        st = 1.0 - q
-                        b0 = st * a[0] + q * a[2]
-                        b1 = st * a[1] + q * a[3]
-                        b2 = q * a[0] + st * a[2]
-                        b3 = q * a[1] + st * a[3]
-                        a[0] = st * b0 + q * b1
-                        a[1] = q * b0 + st * b1
-                        a[2] = st * b2 + q * b3
-                        a[3] = q * b2 + st * b3
-                    tot = 0.0
-                    for k in range(4):
-                        a[k] *= (1.0 - dl) * em[x, k] + dl * em[x, 4]
-                        tot += a[k]
-                    ll += math.log(tot)
-                    for k in range(4):
-                        a[k] /= tot
-                out[s, ri, di] = ll
-    return out
-
-
-@kernel(overloads=((_f2, types.float64, types.float64, types.float64),), cache=True, nogil=True)
-def _first_track_transition(T, q, ein, eout):
-    """Track 1 (parent 0's classes 0, 1 are its full-sib symbols) transition matrix at switch probability q."""
-    for u in range(5):
-        fs_u = u < 2
-        for v in range(5):
-            fs_v = v < 2
-            if fs_u:
-                if fs_v:
-                    T[u, v] = (1.0 - ein) * ((1.0 - q) if u == v else q)
-                else:
-                    T[u, v] = ein / 3.0
-            else:
-                if fs_v:
-                    T[u, v] = eout / 2.0
-                else:
-                    T[u, v] = (1.0 - eout) * ((1.0 - q) if u == v else q / 2.0)
-
-
-@kernel(overloads=((_f2, types.float64, types.float64, types.float64),), cache=True, nogil=True)
-def _second_track_transition(T, q, ein, eout):
-    """Track 2 (parent 1's classes 2, 3 are its full-sib symbols) transition matrix at switch probability q."""
-    for u in range(5):
-        fs_u = u == 2 or u == 3
-        for v in range(5):
-            fs_v = v == 2 or v == 3
-            if fs_u:
-                if fs_v:
-                    T[u, v] = (1.0 - ein) * ((1.0 - q) if u == v else q)
-                else:
-                    T[u, v] = ein / 3.0
-            else:
-                if fs_v:
-                    T[u, v] = eout / 2.0
-                else:
-                    T[u, v] = (1.0 - eout) * ((1.0 - q) if u == v else q / 2.0)
-
-
-@kernel(overloads=((_i64_1, _f1, _f2, types.float64, types.float64, _f1, _f1),), cache=True, parallel=True,
-        nogil=True)
-def target_loglik(offsets, pos, em25, rate_cm, dl, ein_grid, eout_grid):
-    """Target relationship chain of each frame sequence [S, Ein, Eout]. Track 1 symbols: 0, 1 = parent-0 classes (its
-    full-sib symbols), 2, 3 = parent-1 classes, 4 = any class outside the four; track 2: full-sib symbols 2, 3. A
-    full-sib symbol flips to the other with the Haldane probability q, leaves to each non-full-sib symbol with
-    e_in / 3 per frame; a non-full-sib symbol returns to each full-sib symbol with e_out / 2, else moves among the
-    non-full-sib symbols with probability q. em25[x, 5 s1 + s2]: unordered pair emissions, em25[x, 25] the misfit
-    column. e_in = 0 is the full-sib chain."""
-    S = len(offsets) - 1
-    NI = len(ein_grid)
-    NO = len(eout_grid)
-    out = np.zeros((S, NI, NO))
-    rate = rate_cm * 1e-8
-    for s in prange(S):
-        lo = offsets[s]
-        hi = offsets[s + 1]
-        T1 = np.zeros((5, 5))
-        T2 = np.zeros((5, 5))
-        a = np.zeros(25)
-        tmp = np.zeros(25)
-        for ii in range(NI):
-            ein = ein_grid[ii]
-            for jj in range(NO):
-                if ein == 0.0 and jj > 0:
-                    out[s, ii, jj] = out[s, ii, 0]
-                    continue
-                eout = eout_grid[jj]
-                pf = eout / (ein + eout)
-                pn = 1.0 - pf
-                for s1 in range(5):
-                    p1 = pf / 2.0 if s1 < 2 else pn / 3.0
-                    for s2 in range(5):
-                        p2 = pf / 2.0 if (s2 == 2 or s2 == 3) else pn / 3.0
-                        a[5 * s1 + s2] = p1 * p2
-                ll = 0.0
-                for x in range(lo, hi):
-                    if x > lo:
-                        q = 0.5 * (1.0 - math.exp(-2.0 * (pos[x] - pos[x - 1]) * rate))
-                        _first_track_transition(T1, q, ein, eout)
-                        _second_track_transition(T2, q, ein, eout)
-                        for v1 in range(5):
-                            for s2 in range(5):
-                                acc = 0.0
-                                for u1 in range(5):
-                                    acc += a[5 * u1 + s2] * T1[u1, v1]
-                                tmp[5 * v1 + s2] = acc
-                        for v1 in range(5):
-                            for v2 in range(5):
-                                acc = 0.0
-                                for u2 in range(5):
-                                    acc += tmp[5 * v1 + u2] * T2[u2, v2]
-                                a[5 * v1 + v2] = acc
-                    tot = 0.0
-                    for k in range(25):
-                        a[k] *= (1.0 - dl) * em25[x, k] + dl * em25[x, 25]
-                        tot += a[k]
-                    ll += math.log(tot)
-                    for k in range(25):
-                        a[k] /= tot
-                out[s, ii, jj] = ll
-    return out
-
-
-@kernel(overloads=((_i64_1, _f1, _f2, types.float64, types.float64, types.float64, types.float64),), cache=True,
-        parallel=True, nogil=True)
-def target_posterior(offsets, pos, em25, rate_cm, dl, ein, eout):
-    """Posterior probability [X] that the target's unordered pair at each frame is not a full-sib configuration (one
-    class of each parent), under the relationship chain of target_loglik at (r, delta, e_in, e_out)."""
-    X = em25.shape[0]
-    out = np.zeros(X)
-    S = len(offsets) - 1
-    rate = rate_cm * 1e-8
-    fsconf = np.zeros(25, np.bool_)
-    for s1 in range(5):
-        for s2 in range(5):
-            if (s1 < 2 and (s2 == 2 or s2 == 3)) or ((s1 == 2 or s1 == 3) and s2 < 2):
-                fsconf[5 * s1 + s2] = True
-    pf = eout / (ein + eout)
-    pn = 1.0 - pf
-    for s in prange(S):
-        lo = offsets[s]
-        hi = offsets[s + 1]
-        n = hi - lo
-        T1 = np.zeros((5, 5))
-        T2 = np.zeros((5, 5))
-        fwd = np.zeros((n, 25))
-        a = np.zeros(25)
-        tmp = np.zeros(25)
-        for s1 in range(5):
-            p1 = pf / 2.0 if s1 < 2 else pn / 3.0
-            for s2 in range(5):
-                p2 = pf / 2.0 if (s2 == 2 or s2 == 3) else pn / 3.0
-                a[5 * s1 + s2] = p1 * p2
-        for i in range(n):
-            x = lo + i
-            if i > 0:
-                q = 0.5 * (1.0 - math.exp(-2.0 * (pos[x] - pos[x - 1]) * rate))
-                _first_track_transition(T1, q, ein, eout)
-                _second_track_transition(T2, q, ein, eout)
-                for v1 in range(5):
-                    for s2 in range(5):
-                        acc = 0.0
-                        for u1 in range(5):
-                            acc += a[5 * u1 + s2] * T1[u1, v1]
-                        tmp[5 * v1 + s2] = acc
-                for v1 in range(5):
-                    for v2 in range(5):
-                        acc = 0.0
-                        for u2 in range(5):
-                            acc += tmp[5 * v1 + u2] * T2[u2, v2]
-                        a[5 * v1 + v2] = acc
-            tot = 0.0
-            for k in range(25):
-                a[k] *= (1.0 - dl) * em25[x, k] + dl * em25[x, 25]
-                tot += a[k]
-            for k in range(25):
-                a[k] /= tot
-                fwd[i, k] = a[k]
-        bw = np.ones(25) / 25.0
-        c = np.zeros(25)
-        for i in range(n - 1, -1, -1):
-            x = lo + i
-            tot = 0.0
-            nf = 0.0
-            for k in range(25):
-                pk = fwd[i, k] * bw[k]
-                tot += pk
-                if not fsconf[k]:
-                    nf += pk
-            out[x] = nf / tot
-            if i > 0:
-                for k in range(25):
-                    c[k] = bw[k] * ((1.0 - dl) * em25[x, k] + dl * em25[x, 25])
-                q = 0.5 * (1.0 - math.exp(-2.0 * (pos[x] - pos[x - 1]) * rate))
-                _first_track_transition(T1, q, ein, eout)
-                _second_track_transition(T2, q, ein, eout)
-                for u1 in range(5):
-                    for v2 in range(5):
-                        acc = 0.0
-                        for v1 in range(5):
-                            acc += T1[u1, v1] * c[5 * v1 + v2]
-                        tmp[5 * u1 + v2] = acc
-                tot = 0.0
-                for u1 in range(5):
-                    for u2 in range(5):
-                        acc = 0.0
-                        for v2 in range(5):
-                            acc += T2[u2, v2] * tmp[5 * u1 + v2]
-                        bw[5 * u1 + u2] = acc
-                        tot += acc
-                for k in range(25):
-                    bw[k] /= tot
-    return out
-
-
-@kernel(overloads=((_i64_1, _f1, _f2, _i64_1, types.int64, _f1, types.float64, _f1, _f1),), cache=True,
-        parallel=True, nogil=True)
-def error_run_loglik(offsets, pos, em, segment, n_segments, r_grid, dl, eps_grid, xi_grid):
-    """Error-run chain log-likelihood of every frame sequence, split into its segments [n_segments, R, E, X].
-
-    Hidden (true transmission state s, shown state g) of the 4-state per-sib chain. s follows the Haldane chain (two
-    bits, one meiosis each). Faithful (g = s): the next shown state is the next true state with probability 1 - eps,
-    otherwise one of the three others (an error run starts). In a run (g != s): it ends with probability xi
-    (g' = s'), else g persists (unless the true state moved onto it). Emission em[x, g] mixed with the misfit column
-    em[x, 4] (weight dl). eps = 0 is the 4-state chain exactly.
-
-    ``segment[x]``: the segment of frame x; a sequence's frames carry consecutive segment numbers (one per material
-    unit it crosses, numbered sequence by sequence), so every segment belongs to one sequence and one thread. Each
-    frame's predictive term log p(y_x | y_<x) is added to its segment: a segment's value is its frames' share of the
-    sequence's forward log-likelihood, and the segments of a sequence sum to it exactly (up to summation order)."""
-    S = len(offsets) - 1
-    R = len(r_grid)
-    E = len(eps_grid)
-    X = len(xi_grid)
-    out = np.zeros((n_segments, R, E, X))
-    for s in prange(S):
-        lo = offsets[s]
-        hi = offsets[s + 1]
-        if hi <= lo:
-            continue
-        seg_lo = segment[lo]
-        seg_hi = segment[hi - 1] + 1
-        a = np.zeros(16)
-        b = np.zeros(16)
-        P = np.zeros((4, 4))
-        for ri in range(R):
-            rate = r_grid[ri] * 1e-8
-            for ei in range(E):
-                eps = eps_grid[ei]
-                for xj in range(X):
-                    if eps == 0.0 and xj > 0:
-                        for g_ in range(seg_lo, seg_hi):
-                            out[g_, ri, ei, xj] = out[g_, ri, ei, 0]
-                        continue
-                    xi = xi_grid[xj]
-                    perr = eps / (eps + xi)
-                    for k in range(16):
-                        st = k // 4
-                        g = k % 4
-                        a[k] = 0.25 * ((1.0 - perr) if g == st else perr / 3.0)
-                    for x in range(lo, hi):
-                        if x > lo:
-                            q = 0.5 * (1.0 - math.exp(-2.0 * (pos[x] - pos[x - 1]) * rate))
-                            for u in range(4):
-                                for v in range(4):
-                                    d = ((u ^ v) >> 1) + ((u ^ v) & 1)
-                                    P[u, v] = (1.0 - q) ** (2 - d) * q ** d
-                            for k in range(16):
-                                b[k] = 0.0
-                            for st in range(4):
-                                for g in range(4):
-                                    m = a[4 * st + g]
-                                    if m == 0.0:
-                                        continue
-                                    for s2 in range(4):
-                                        w = m * P[st, s2]
-                                        if g == st:
-                                            b[4 * s2 + s2] += w * (1.0 - eps)
-                                            for g2 in range(4):
-                                                if g2 != s2:
-                                                    b[4 * s2 + g2] += w * eps / 3.0
-                                        else:
-                                            if g == s2:
-                                                b[4 * s2 + s2] += w
-                                            else:
-                                                b[4 * s2 + s2] += w * xi
-                                                b[4 * s2 + g] += w * (1.0 - xi)
-                            for k in range(16):
-                                a[k] = b[k]
-                        tot = 0.0
-                        for k in range(16):
-                            a[k] *= (1.0 - dl) * em[x, k % 4] + dl * em[x, 4]
-                            tot += a[k]
-                        out[segment[x], ri, ei, xj] += math.log(tot)
-                        for k in range(16):
-                            a[k] /= tot
-    return out

@@ -764,13 +764,33 @@ CALIBRATION_DIVISOR_COLUMNS = (
 """
 
 
+def _sharing_diagnostic(directory, identity, compute):
+    """Publish the run-level diagnostic once per checked derivation; repeated reports reuse its record."""
+    import json
+
+    from .tables import write_json
+
+    path = directory / "read_sharing_diagnostic.json"
+    if path.is_file():
+        record = json.loads(path.read_text())
+        if record["derivation"] == identity:
+            return path, record["payload"]
+    value = compute()
+    write_json(path, dict(derivation=identity, payload=value))
+    return path, value
+
+
 def write_calibration(output, results):
     """Publish pooled and per-contig calibration objectives, estimates and measured task seconds."""
     import pandas as pd
+
+    from ...results.read_sharing import calibration_report_inputs
     from .tables import write_frame, write_json
-    value = results.painting_calibration()
-    if value is None:
+
+    inputs = calibration_report_inputs(results)
+    if inputs is None:
         return []
+    value, identity, compute = inputs
     directory = Path(output) / "painting"
     epsilon, divisor, path = value["robustness_epsilon"], value["confidence_divisor"], value["path_divisor"]
     robust = [(c["contig"], e, score, e == epsilon)
@@ -780,6 +800,11 @@ def write_calibration(output, results):
                 for c in value["divisor_contigs"] for d, f, score, cells, path_score in c["rows"]]
     divisors.extend(("RUN", d, -1, score, path_score, cells, d == divisor, d == path)
                     for d, score, cells, path_score in value["divisor_pooled"])
-    return [write_json(directory / "calibration.json", value),
-            write_frame(directory / "calibration_robustness.csv", pd.DataFrame(robust, columns=CALIBRATION_ROBUSTNESS_COLUMNS)),
-            write_frame(directory / "calibration_divisor.csv", pd.DataFrame(divisors, columns=CALIBRATION_DIVISOR_COLUMNS))]
+    record, diagnostic = _sharing_diagnostic(directory, identity, compute)
+    return [
+        write_json(directory / "calibration.json", {**value, diagnostic["label"]: diagnostic}),
+        write_frame(directory / "calibration_robustness.csv",
+                    pd.DataFrame(robust, columns=CALIBRATION_ROBUSTNESS_COLUMNS)),
+        write_frame(directory / "calibration_divisor.csv", pd.DataFrame(divisors, columns=CALIBRATION_DIVISOR_COLUMNS)),
+        record,
+    ]

@@ -6,7 +6,10 @@ law of the transmitted founder state couples the ordered-diplotype chain with th
 object for two parents. The projection keeps, per candidate and bin, the transmitted-state marginal
 pi (S values), its transmitted ALT probability at each marker conditional on the candidate's own
 reads, and between bins a maximum-entropy bridge matching the exact adjacent marginals and the exact
-same-state (persistence) flow, so a trio is scored with O(S^2) forward states.
+same-state (persistence) flow, so a trio is scored with O(S^2) forward states. The marginals, the flows and
+BACKGROUND's conditioned ALT probability come from preparation (PreparedComponent.sources, science.pedigree.
+read_sources: the source chain with the painting's read state); the bridges depend on the scoring parameters
+and the tie convention and are built here.
 
 Bridge operator per boundary (row = source state, column = destination): T = diag(stay) +
 alpha beta^T off the diagonal (+ one pivot row arm and column arm), solved by bisection on the
@@ -46,9 +49,6 @@ Bridge construction and checks (PS07):
    Any failure raises `ProjectionInvariantError` (an `InvariantError`) with candidate, component, boundary, branch
    and the failing residual, stopping the stage. There is no fallback.
 
-The first == second < background transmitted-ALT branch is unreachable;
-named states pass through before the BACKGROUND conditional calculation.
-
 Method: docs/methods/pedigree.md#transmitted-state-projection
 """
 
@@ -66,8 +66,8 @@ from ...core.errors import InvariantError
 from ...core.kernels import kernel
 from ...core.ties import policy
 from ..painting.api import background_alt_frequency, state_alt_probabilities
-from .kernels.signatures import OVERLOADS
-from .parameters import (
+from .kernels.preparation import OVERLOADS
+from .numerical_parameters import (
     BRIDGE_BISECTION_LIMIT,
     BRIDGE_FEASIBILITY_ULPS,
     BRIDGE_FOLD_DISCRIMINANT,
@@ -156,227 +156,6 @@ class ProjectionInvariantError(InvariantError):
     def __reduce__(self):
         # Raised in graph workers: unpickle without __init__ (the default calls cls(message), a TypeError).
         return copyreg.__newobj__, (type(self), *self.args), self.__dict__
-
-
-@kernel(overloads=OVERLOADS["projection._symmetrise"], cache=True, parallel=True, nogil=True)
-def _symmetrise(posterior):
-    """Average each ordered diplotype with its mirror and renormalise per bin (in place)."""
-    candidates, bins, states, _ = posterior.shape
-    valid = np.ones(candidates, dtype=np.bool_)
-    for candidate in prange(candidates):
-        for block in range(bins):
-            for first in range(states):
-                for second in range(first + 1, states):
-                    value = 0.5 * (
-                        posterior[candidate, block, first, second] + posterior[candidate, block, second, first]
-                    )
-                    posterior[candidate, block, first, second] = value
-                    posterior[candidate, block, second, first] = value
-            total = 0.0
-            for first in range(states):
-                for second in range(states):
-                    total += posterior[candidate, block, first, second]
-            if total <= 0.0 or not np.isfinite(total):
-                valid[candidate] = False
-            else:
-                posterior[candidate, block] /= total
-    return valid
-
-
-@kernel(overloads=OVERLOADS["projection._transmitted_alt"], cache=True, parallel=True, nogil=True)
-def _transmitted_alt(candidate_gl, candidate_observed, state_alt, posterior, site_to_bin, background_index, epsilon):
-    """P(transmitted allele = ALT | transmitted state, own reads), the untransmitted homologue
-    marginalised over the source posterior, without an S^2 per-site array.
-
-    Only BACKGROUND (no panel haplotype) is conditioned on the candidate's reads. A named class transmits its panel
-    allele, or BACKGROUND's ALT frequency where the panel left it uncalled: the panel leaves alleles
-    uncalled where the data are noisy, and there the candidate's own GL rows are noisy too (simulations: heterozygous-
-    looking at ~40% of truly homozygous such sites), so conditioning on them cost true parents tens of nats per
-    chromosome against M0 and the relative models."""
-    candidates, sites, _ = candidate_gl.shape
-    states = state_alt.shape[0]
-    result = np.empty((candidates, sites, states), dtype=np.float64)
-    for task in prange(candidates * sites * states):
-        first = task % states
-        quotient = task // states
-        site = quotient % sites
-        candidate = quotient // sites
-        block = site_to_bin[site]
-        q_first = state_alt[first, site]
-        # A deterministic transmitted allele cannot change on conditioning (the shared emission
-        # cache relies on these passing through unchanged); named classes are never conditioned.
-        if q_first == 0.0 or q_first == 1.0 or first < background_index:
-            result[candidate, site, first] = q_first
-            continue
-        if candidate_observed[candidate, site]:
-            w0 = (1.0 - epsilon) * candidate_gl[candidate, site, 0] + epsilon / 3.0
-            w1 = (1.0 - epsilon) * candidate_gl[candidate, site, 1] + epsilon / 3.0
-            w2 = (1.0 - epsilon) * candidate_gl[candidate, site, 2] + epsilon / 3.0
-        else:
-            w0 = 1.0
-            w1 = 1.0
-            w2 = 1.0
-        numerator = 0.0
-        marginal = 0.0
-        for second in range(states):
-            q_second = state_alt[second, site]
-            p00 = (1.0 - q_first) * (1.0 - q_second)
-            p10 = q_first * (1.0 - q_second)
-            p01 = (1.0 - q_first) * q_second
-            p11 = q_first * q_second
-            denominator = w0 * p00 + w1 * (p10 + p01) + w2 * p11
-            conditional = (w1 * p10 + w2 * p11) / denominator if denominator > 0.0 else q_first
-            mass = posterior[candidate, block, first, second]
-            marginal += mass
-            numerator += mass * conditional
-        result[candidate, site, first] = numerator / marginal if marginal > 0.0 else q_first
-    return result
-
-
-@kernel(overloads=OVERLOADS["projection._exclusion_sums"], cache=True, nogil=True)
-def _exclusion_sums(matrix):
-    """Row-without, column-without and complement leave-one-out sums, cancellation-free, O(S^2)."""
-    states = matrix.shape[0]
-    row_without = np.empty_like(matrix)
-    column_without = np.empty_like(matrix)
-    complement = np.empty_like(matrix)
-    prefix = np.empty(states + 1, dtype=np.float64)
-    suffix = np.empty(states + 1, dtype=np.float64)
-    for row in range(states):
-        prefix[0] = 0.0
-        for column in range(states):
-            prefix[column + 1] = prefix[column] + matrix[row, column]
-        suffix[states] = 0.0
-        for column in range(states - 1, -1, -1):
-            suffix[column] = suffix[column + 1] + matrix[row, column]
-        for column in range(states):
-            row_without[row, column] = prefix[column] + suffix[column + 1]
-    for column in range(states):
-        prefix[0] = 0.0
-        for row in range(states):
-            prefix[row + 1] = prefix[row] + matrix[row, column]
-        suffix[states] = 0.0
-        for row in range(states - 1, -1, -1):
-            suffix[row] = suffix[row + 1] + matrix[row, column]
-        for row in range(states):
-            column_without[row, column] = prefix[row] + suffix[row + 1]
-    for row in range(states):
-        prefix[0] = 0.0
-        for column in range(states):
-            prefix[column + 1] = prefix[column] + column_without[row, column]
-        suffix[states] = 0.0
-        for column in range(states - 1, -1, -1):
-            suffix[column] = suffix[column + 1] + column_without[row, column]
-        for column in range(states):
-            complement[row, column] = prefix[column] + suffix[column + 1]
-    return row_without, column_without, complement
-
-
-@kernel(overloads=OVERLOADS["projection._selected_flows"], cache=True, parallel=True, nogil=True)
-def _selected_flows(posterior, right_weight, same, one, two, selector):
-    """Propagate the selected (transmitted) diplotypes and the positive adjacent selected-state
-    flows: same-state (diagonal), outgoing-change and incoming-change flow per boundary."""
-    candidates, bins, states, _ = posterior.shape
-    shape = (candidates, bins - 1, states)
-    diagonal_flow = np.empty(shape, dtype=np.float64)
-    outgoing_change_flow = np.empty(shape, dtype=np.float64)
-    incoming_change_flow = np.empty(shape, dtype=np.float64)
-    valid = np.ones((candidates, bins - 1), dtype=np.bool_)
-    for candidate in prange(candidates):
-        for boundary in range(bins - 1):
-            w0 = same[boundary]
-            w1 = one[boundary]
-            w2 = two[boundary]
-            rho = right_weight[candidate, boundary]
-            row_rho = np.sum(rho, axis=1)
-            column_rho = np.sum(rho, axis=0)
-            rho_row_without, rho_column_without, rho_complement = _exclusion_sums(rho)
-            scaled = np.empty((states, states), dtype=np.float64)
-            for first in range(states):
-                for second in range(states):
-                    cell = rho[first, second]
-                    denominator = (
-                        w0 * cell
-                        + w1 * (rho_row_without[first, second] + rho_column_without[first, second])
-                        + w2 * rho_complement[first, second]
-                    )
-                    if denominator <= 0.0 or not np.isfinite(denominator):
-                        valid[candidate, boundary] = False
-                        scaled[first, second] = 0.0
-                    else:
-                        scaled[first, second] = posterior[candidate, boundary, first, second] / denominator
-
-            tau = selector[candidate, boundary]
-            for first in range(states):
-                direct_same = 0.0
-                swapped_same = 0.0
-                outgoing_direct = 0.0
-                outgoing_swapped = 0.0
-                swap_change_base = w1 * rho_row_without[first, first] + w2 * rho_complement[first, first]
-                for second in range(states):
-                    u = scaled[first, second]
-                    direct_same += u * (w1 * row_rho[first] + (w0 - w1) * rho[first, second])
-                    if second == first:
-                        swapped_same += u * (w1 * column_rho[first] + (w0 - w1) * rho[first, first])
-                    else:
-                        swapped_same += u * (w2 * column_rho[first] + (w1 - w2) * rho[first, first])
-                    direct_change = w1 * rho_column_without[first, second] + w2 * rho_complement[first, second]
-                    swap_change = swap_change_base
-                    if second != first:
-                        swap_change += (w0 - w1) * rho[first, second] + (w1 - w2) * rho_column_without[first, second]
-                    outgoing_direct += u * direct_change
-                    outgoing_swapped += u * swap_change
-                diagonal_flow[candidate, boundary, first] = (1.0 - tau) * direct_same + tau * swapped_same
-                outgoing_change_flow[candidate, boundary, first] = (
-                    1.0 - tau
-                ) * outgoing_direct + tau * outgoing_swapped
-
-            scaled_row_without, scaled_column_without, scaled_complement = _exclusion_sums(scaled)
-            for destination in range(states):
-                other_source_total = 0.0
-                for other in range(states):
-                    other_source_total += scaled_column_without[destination, other]
-                direct_incoming = w2 * row_rho[destination] * other_source_total
-                correction = 0.0
-                for other in range(states):
-                    correction += rho[destination, other] * scaled_column_without[destination, other]
-                direct_incoming += (w1 - w2) * correction
-                swapped_incoming = 0.0
-                for source in range(states):
-                    if source == destination:
-                        continue
-                    source_to_destination = scaled[source, destination]
-                    source_other = scaled_row_without[source, destination]
-                    swapped_incoming += column_rho[destination] * (
-                        w1 * source_to_destination + w2 * source_other
-                    ) + rho[source, destination] * ((w0 - w1) * source_to_destination + (w1 - w2) * source_other)
-                incoming_change_flow[candidate, boundary, destination] = (
-                    1.0 - tau
-                ) * direct_incoming + tau * swapped_incoming
-
-            direct = np.empty((states, states), dtype=np.float64)
-            for first in range(states):
-                for second in range(states):
-                    cell = scaled[first, second]
-                    direct[first, second] = rho[first, second] * (
-                        w0 * cell
-                        + w1 * (scaled_row_without[first, second] + scaled_column_without[first, second])
-                        + w2 * scaled_complement[first, second]
-                    )
-            total = 0.0
-            for first in range(states):
-                for second in range(states):
-                    value = (1.0 - tau) * direct[first, second] + tau * direct[second, first]
-                    posterior[candidate, boundary + 1, first, second] = value
-                    total += value
-            if total <= 0.0 or not np.isfinite(total):
-                valid[candidate, boundary] = False
-            else:
-                posterior[candidate, boundary + 1] /= total
-                diagonal_flow[candidate, boundary] /= total
-                outgoing_change_flow[candidate, boundary] /= total
-                incoming_change_flow[candidate, boundary] /= total
-    return diagonal_flow, outgoing_change_flow, incoming_change_flow, valid
 
 
 @kernel(overloads=OVERLOADS["projection._small_diagonal_product"], cache=True, inline="always", nogil=True)
@@ -825,40 +604,31 @@ def informative_marker_counts(
     return cumulative[:, bin_stop] - cumulative[:, bin_start]
 
 
+def marker_state_alt(named_alleles: np.ndarray) -> np.ndarray:
+    """float64 [S, M]: ALT probability of each state at each marker, the class's call or BACKGROUND's frequency where
+    uncalled, BACKGROUND (last) its frequency (painting.states.background_alt_frequency of the markers' calls)."""
+    background = background_alt_frequency(named_alleles)
+    state_alt = np.empty((named_alleles.shape[0] + 1, named_alleles.shape[1]), dtype=np.float64)
+    state_alt[:-1] = state_alt_probabilities(named_alleles, background)
+    state_alt[-1] = background
+    return state_alt
+
+
 def project(
     component: PreparedComponent,
-    posterior: np.ndarray,
     *,
     source_gap_support_sites: int,
     bridge_tolerance: float,
     bridge_max_iterations: int,
     reverse: bool,
 ) -> Projection:
-    """Projected model of one component from its exact source marginals [N, B, S, S].
-
-    ``posterior`` is overwritten (homologue-symmetrised, then the selected chain's propagation).
-    """
-    factors, transition = component.factors, component.transition
-    candidates, bins, states, _ = posterior.shape
+    """Projected model of one component from its prepared source laws (PreparedComponent.sources)."""
+    laws = component.sources
+    candidates, bins, states = laws.pi.shape
     bin_stop = np.cumsum(component.bin_sizes).astype(np.int64)
     bin_start = bin_stop - component.bin_sizes
-    background = background_alt_frequency(component.named_alleles)
-    state_alt = np.empty((states, component.informative_markers), dtype=np.float64)
-    state_alt[:-1] = state_alt_probabilities(component.named_alleles, background)
-    state_alt[-1] = background
+    state_alt = marker_state_alt(component.named_alleles)
     gl, observed = component.genotype_likelihoods, component.observed
-    source_valid = _symmetrise(posterior)
-    if np.any(~source_valid):
-        sample = int(np.flatnonzero(~source_valid)[0])
-        bad_mass = np.sum(posterior[sample], axis=(1, 2))
-        boundary = int(np.flatnonzero((bad_mass <= 0) | ~np.isfinite(bad_mass))[0])
-        raise ProjectionInvariantError(
-            "source posterior marginal lost all mass",
-            sample,
-            component.component_index,
-            boundary,
-            residual=float(bad_mass[boundary]),
-        )
     selector = np.broadcast_to(component.selector_switch_probability, (candidates, bins - 1)).copy()
     excursion = np.zeros((candidates, bins - 1), dtype=np.float64)
     if source_gap_support_sites > 0 and bins > 1:
@@ -869,20 +639,16 @@ def project(
         per_bin = informative_marker_counts(gl, observed, bin_start, bin_stop)
         adjacent = np.minimum(per_bin[:, :-1], per_bin[:, 1:])
         excursion = selector * (1.0 - np.minimum(1.0, adjacent / source_gap_support_sites))
-    same, one, two = transition.same, transition.one_change, transition.two_changes
-    diagonal_flow, outgoing, incoming, valid = _selected_flows(
-        posterior, factors.right_weight, same, one, two, selector
-    )
-    if np.any(~valid):
-        sample, boundary = map(int, np.argwhere(~valid)[0])
-        raise ProjectionInvariantError(
-            "selected-oriented posterior propagation lost mass", sample, component.component_index, boundary
-        )
-    pi = np.ascontiguousarray(np.sum(posterior, axis=3))
-    site_to_bin = np.repeat(np.arange(bins, dtype=np.int64), component.bin_sizes)
-    candidate_alt = _transmitted_alt(
-        gl, observed, state_alt, posterior, site_to_bin, states - 1, float(component.robustness_epsilon)
-    )
+    # Named classes transmit their panel allele (BACKGROUND's frequency where uncalled), never conditioned;
+    # BACKGROUND's probability is conditioned on the candidate's own reads in preparation.
+    candidate_alt = np.empty((candidates, component.informative_markers, states), dtype=np.float64)
+    candidate_alt[:] = state_alt.T[None]
+    candidate_alt[:, :, -1] = laws.background_alt
+    # writable copies: the stored arrays are read-only views, the kernels' declared arguments writable
+    pi = np.array(laws.pi, dtype=np.float64)
+    diagonal_flow = np.array(laws.diagonal_flow, dtype=np.float64)
+    outgoing = np.array(laws.outgoing_flow, dtype=np.float64)
+    incoming = np.array(laws.incoming_flow, dtype=np.float64)
     diagnostics = np.full((candidates, bins - 1, 2), np.nan)
     stay, alpha, beta, row_arm, column_arm, branch, pivot, valid = _bridges(
         pi,
@@ -933,5 +699,5 @@ def project(
         state_alt,
         bin_start,
         bin_stop,
-        factors.available,
+        laws.available,
     )

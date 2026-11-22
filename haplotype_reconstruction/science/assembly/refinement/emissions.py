@@ -9,7 +9,7 @@ from haplotype_reconstruction.science.shared.emissions import (
     CENTER,
     GENOTYPE_CODES,
     PREDICTIVE_CODES,
-    normalised_likelihoods,
+    centred_likelihoods,
     pair_code,
     predictive_likelihood,
     robust_log_likelihood,
@@ -23,7 +23,7 @@ __all__ = [
     "PREDICTIVE_CODES",
     "pair_code",
     "predictive_likelihood",
-    "normalised_likelihoods",
+    "centred_likelihoods",
     "robust_log_likelihood",
     "pair_index",
 ]

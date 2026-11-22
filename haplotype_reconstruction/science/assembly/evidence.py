@@ -1,8 +1,14 @@
 """Build the exact founder-visible evidence used throughout assembly.
 
-Owns masking, float32 casting and depth-row content keys (U01).
+Owns masking, the centred observation view, float32 casting and depth-row content keys (U01).
 Memory allocation/attachment and record decoding belong to the stage adapter.
-Method: docs/methods/assembly.md#evidence. Exact neutral inputs may be borrowed; scoring is owned.
+Method: docs/methods/assembly.md#evidence.
+
+Assembly scores the CENTRED view of each observed cell: L~(g) = [(1 - eps) L(g) + eps B] / B, B = sum_g q(g) L(g), the
+mixed likelihoods of the observation model (science.shared.observation; eps the run's outlier rate before the
+calibration barrier, q the site's cohort genotype frequencies) divided by the cohort likelihood. A genotype law p then
+scores log sum_g p(g) L~(g), the log Bayes factor against a random member of the cohort (science.shared.emissions); a
+cell without evidence (unobserved, excluded or outside the kept sites) is exactly 1 at every genotype and scores 0.
 """
 
 from __future__ import annotations
@@ -23,28 +29,53 @@ from haplotype_reconstruction.core.kernels import kernel
 _READ_F64 = tuple(types.Array(types.float64, 3, "C", readonly=r) for r in (False, True))
 _READ_BOOL2 = tuple(types.Array(types.boolean, 2, "C", readonly=r) for r in (False, True))
 _READ_BOOL1 = tuple(types.Array(types.boolean, 1, "C", readonly=r) for r in (False, True))
+_READ_F64_2 = tuple(types.Array(types.float64, 2, "C", readonly=r) for r in (False, True))
 a64 = types.float64[:, :, ::1]
 a32 = types.float32[:, :, ::1]
 bo = types.boolean[:, ::1]
 
 
 @kernel(
-    overloads=tuple((f64, b2, b1, a64, a32, bo) for f64 in _READ_F64 for b2 in _READ_BOOL2 for b1 in _READ_BOOL1),
+    overloads=tuple(
+        (f64, b2, b1, q, types.float64, a64, a32, bo)
+        for f64 in _READ_F64
+        for b2 in _READ_BOOL2
+        for b1 in _READ_BOOL1
+        for q in _READ_F64_2
+    ),
     parallel=True,
     cache=True,
     nogil=True,
 )
-def _fill_views(likelihoods, observed, kept, neutral, scoring, seen):
-    """Write the float64 neutral view, its float32 copy and observed & kept in one pass over the cells."""
+def _fill_views(likelihoods, observed, kept, cohort, epsilon, neutral, scoring, seen):
+    """Write the float64 centred view (module docstring), its float32 copy and observed & kept in one pass over the
+    cells; cohort float64[L, 3] the sites' cohort genotype frequencies, epsilon the outlier rate."""
     samples, sites, _ = likelihoods.shape
+    keep = 1.0 - epsilon
     for sample in prange(samples):
         for site in range(sites):
             used = observed[sample, site] and kept[site]
             seen[sample, site] = used
+            if not used:
+                for genotype in range(3):
+                    neutral[sample, site, genotype] = 1.0
+                    scoring[sample, site, genotype] = 1.0
+                continue
+            l0 = likelihoods[sample, site, 0]
+            l1 = likelihoods[sample, site, 1]
+            l2 = likelihoods[sample, site, 2]
+            background = cohort[site, 0] * l0 + cohort[site, 1] * l1 + cohort[site, 2] * l2
             for genotype in range(3):
-                value = likelihoods[sample, site, genotype] if used else 1.0 / 3.0
+                value = keep * likelihoods[sample, site, genotype] / background + epsilon
                 neutral[sample, site, genotype] = value
                 scoring[sample, site, genotype] = value
+
+
+def _borrowed(observed: np.ndarray) -> np.ndarray:
+    """A read-only view of the input observed flags (the views' flags when every site is kept)."""
+    view = observed.view()
+    view.flags.writeable = False
+    return view
 
 
 def depth_row_keys(counts, observed, kept, *, map_work=map):
@@ -102,6 +133,9 @@ class AssemblyEvidence:
     kept: NDArray[np.bool_]
     identity: str
     depth_keys: tuple[bytes, ...] | None = field(default=None, repr=False)
+    cohort: NDArray[np.float64] | None = field(default=None, repr=False)
+    """float64 [L, 3] the sites' cohort genotype frequencies (ContigEvidence.cohort_frequencies): the outlier law of
+    the observation model (science.shared.observation)."""
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -114,7 +148,8 @@ class AssemblyEvidence:
     def nbytes(self) -> int:
         keys = 0 if self.depth_keys is None else sum(map(len, self.depth_keys))
         neutral = 0 if self.neutral is None else self.neutral.nbytes
-        return int(neutral + self.scoring.nbytes + self.observed.nbytes + keys)
+        cohort = 0 if self.cohort is None else self.cohort.nbytes
+        return int(neutral + self.scoring.nbytes + self.observed.nbytes + keys + cohort)
 
     def founder_evidence(self) -> SelectionEvidence:
         """Borrow the neutral view before its final-assembly lifetime ends."""
@@ -137,21 +172,22 @@ class AssemblyEvidence:
         *,
         counts=None,
         depth_keys=None,
-        borrow_neutral: bool = False,
+        cohort,
+        outlier_rate: float,
     ) -> AssemblyEvidence:
-        """Build the exact views; borrow_neutral certifies already neutral raw evidence.
-
-        Only the ContigEvidence producer can establish that missing raw cells are
-        exactly 1/3, every site is kept, and no founder row was excluded. Generic
-        likelihood callers retain the owned/masked route by default.
-        """
+        """Build the exact centred views (module docstring) from normalised likelihoods, their observed flags, the
+        kept sites, the sites' cohort genotype frequencies ``cohort`` float64[L, 3] and the run's ``outlier_rate``."""
+        cohort = np.ascontiguousarray(cohort, dtype=np.float64)
+        epsilon = float(outlier_rate)
+        if cohort.shape != (likelihoods.shape[1], 3) or not 0.0 <= epsilon < 1.0:
+            raise ValueError("assembly evidence needs every site's cohort genotype frequencies and a rate in [0, 1)")
+        # The observed flags of the views are observed & kept: with every site kept they ARE the input flags, which
+        # are then borrowed read-only instead of copied ([N, L] bool; 4.20 borrowed them on the same condition).
+        borrow = isinstance(observed, np.ndarray) and bool(np.all(kept))
         if isinstance(likelihoods, CodedLikelihoods):
             neutral = np.empty(likelihoods.shape, dtype=np.float64)
             scoring = np.empty(likelihoods.shape, dtype=np.float32)
-            borrow_mask = borrow_neutral and isinstance(observed, np.ndarray)
-            seen = observed.view() if borrow_mask else np.empty(observed.shape, dtype=np.bool_)
-            if borrow_mask:
-                seen.flags.writeable = False
+            seen = _borrowed(observed) if borrow else np.empty(observed.shape, dtype=np.bool_)
             if depth_keys is None and counts is not None:
                 depth_keys = depth_row_keys(counts, observed, kept)
             # Gather and fill DEPTH_ROWS samples at a time so the sample-parallel kernel has
@@ -160,48 +196,47 @@ class AssemblyEvidence:
             for first in range(0, likelihoods.shape[0], DEPTH_ROWS):
                 stop = min(likelihoods.shape[0], first + DEPTH_ROWS)
                 values = likelihoods.gather(slice(first, stop), slice(None))
-                flags = (
-                    np.empty((stop - first, likelihoods.shape[1]), dtype=np.bool_)
-                    if borrow_mask
-                    else seen[first:stop]
-                )
                 _fill_views(
                     values,
                     np.ascontiguousarray(observed[first:stop]),
                     kept_c,
+                    cohort,
+                    epsilon,
                     neutral[first:stop],
                     scoring[first:stop],
-                    flags,
+                    np.empty((stop - first, likelihoods.shape[1]), dtype=np.bool_) if borrow else seen[first:stop],
                 )
                 del values
-            for array in (neutral, scoring):
+            for array in (neutral, scoring) if borrow else (neutral, scoring, seen):
                 declare_immutable(array)
-            if not borrow_mask:
-                declare_immutable(seen)
-            return cls(np.asarray(positions), neutral, scoring, seen, np.asarray(kept), str(identity), depth_keys)
+            return cls(
+                np.asarray(positions), neutral, scoring, seen, np.asarray(kept), str(identity), depth_keys, cohort=cohort
+            )
         observed = dense_observed(observed)
         likelihoods = np.ascontiguousarray(likelihoods, dtype=np.float64)
         kept = np.ascontiguousarray(kept, dtype=np.bool_)
         observed = np.ascontiguousarray(observed, dtype=np.bool_)
         if depth_keys is None and counts is not None:
             depth_keys = depth_row_keys(counts, observed, kept)
-        if borrow_neutral:
-            neutral, seen = likelihoods.view(), observed.view()
-            neutral.flags.writeable = seen.flags.writeable = False
-            scoring = np.array(likelihoods, dtype=np.float32, order="C", copy=True)
-            declare_immutable(scoring)
+        neutral = np.empty(likelihoods.shape, dtype=np.float64)
+        scoring = np.empty(likelihoods.shape, dtype=np.float32)
+        if borrow:
+            # one sample-parallel call; its flags output is transient (the views keep the borrowed input flags)
+            _fill_views(likelihoods, observed, kept, cohort, epsilon, neutral, scoring, np.empty(observed.shape, np.bool_))
+            seen = _borrowed(observed)
         else:
-            neutral = np.empty(likelihoods.shape, dtype=np.float64)
-            scoring = np.empty(likelihoods.shape, dtype=np.float32)
             seen = np.empty(observed.shape, dtype=np.bool_)
-            _fill_views(likelihoods, observed, kept, neutral, scoring, seen)
-            for array in (neutral, scoring, seen):
-                declare_immutable(array)  # owned and filled once; borrowed views are never declared owned
-        return cls(np.asarray(positions), neutral, scoring, seen, kept, str(identity), depth_keys)
+            _fill_views(likelihoods, observed, kept, cohort, epsilon, neutral, scoring, seen)
+        for array in (neutral, scoring) if borrow else (neutral, scoring, seen):
+            declare_immutable(array)  # owned and filled once
+        return cls(np.asarray(positions), neutral, scoring, seen, kept, str(identity), depth_keys, cohort=cohort)
 
     @classmethod
-    def from_contig(cls, evidence, identity: str, *, counts=None, depth_keys=None) -> AssemblyEvidence:
-        """Mask founder-excluded samples before hashing exact observed total depths."""
+    def from_contig(
+        cls, evidence, identity: str, *, outlier_rate: float, counts=None, depth_keys=None
+    ) -> AssemblyEvidence:
+        """Mask founder-excluded samples before hashing exact observed total depths; ``outlier_rate`` the run's rate
+        before the calibration barrier."""
         counts = evidence.counts if counts is None else counts
         source = replace(evidence, counts=None) if evidence.counts is not None else evidence
         founder = source.founder_view()
@@ -213,7 +248,8 @@ class AssemblyEvidence:
             identity,
             counts=counts,
             depth_keys=depth_keys,
-            borrow_neutral=bool(evidence.discovery_sites.all() and not evidence.founder_excluded.any()),
+            cohort=evidence.cohort_frequencies,
+            outlier_rate=outlier_rate,
         )
 
 
@@ -231,7 +267,8 @@ class AssemblyEvidenceSource:
     kept: NDArray[np.bool_]
     identity: str
     depth_keys: tuple[bytes, ...] | None
-    borrow_neutral: bool
+    cohort: NDArray[np.float64]
+    outlier_rate: float
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -244,5 +281,6 @@ class AssemblyEvidenceSource:
             self.kept,
             self.identity,
             depth_keys=self.depth_keys,
-            borrow_neutral=self.borrow_neutral,
+            cohort=self.cohort,
+            outlier_rate=self.outlier_rate,
         )

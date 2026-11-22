@@ -882,6 +882,15 @@ and `recombination/junction_members.csv`. Each has its header even with no items
 
 ### Painting calibration
 
+The `read sharing (diagnostic)` section of `painting/calibration.json` reports the all-sample library and every
+distinct accepted split membership across the analysed contigs. The small run record
+`painting/read_sharing_diagnostic.json` holds a derivation and the same payload. Each library has its canonical
+sample indices, publication origins, sample and contributing-contig counts, T, approximate conditional p-value,
+winning length in bp on the run's configured read-state grid and T with each contributing contig omitted. A null value indicates insufficient information.
+The approximate conditional p-value is invalid against regional depth-intensity variation (independent-read
+simulations with regional depth variation gave p = .0047 and .0066). The scan feeds only this report.
+See [read sharing in evidence](../methods/evidence.md#read-sharing-diagnostic).
+
 `painting/calibration.json` contains the run's `robustness_epsilon`, `divisor`, and
 `site_correlation`, the per-contig and pooled objectives, and task durations in seconds.
 `painting/calibration_robustness.csv` has `contig`, `robustness_epsilon`, `log_likelihood`,

@@ -264,6 +264,13 @@ class ComponentPainting:
     packed_emissions: NDArray[np.float64] | None = record_field(
         "state", axes=("N", "S*(S+1)/2", "B"), units="nats", dtype="float64", stored=False, default=None, kw_only=True
     )
+    label_error: NDArray[np.float32] | None = record_field(
+        "report", axes=("N", "B", "3"), units="probability", dtype="float32", default=None, kw_only=True
+    )
+    """4.21 (ADVICE2 11.1), the reference painting only: (u, v_0, v_1) per sample and bin, u the posterior probability
+    that the released pair of local classes is wrong and v_t that track t's released label is wrong (dosage-aware for
+    two copies of one class), from the label-pair mass summed over all fidelity states; NaN where nothing is released.
+    The pedigree reads it as per-bin label-error allowances (A9 direction, A10 relationship)."""
 
     @property
     def interval(self) -> tuple[int, int]:

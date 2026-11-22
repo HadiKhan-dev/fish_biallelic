@@ -16,7 +16,8 @@ from ...core.random import stream
 from ...engine.cpu import claim_threads, thread_team
 from ...science.pedigree import junctions
 from ...science.pedigree import relationship as science
-from ...science.pedigree.parameters import PEDIGREE_WORKSPACE, PedigreeParameters
+from ...science.pedigree.parameters import PedigreeParameters
+from ...science.pedigree.workspace_parameters import PEDIGREE_WORKSPACE
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy
@@ -121,7 +122,10 @@ def score_schedules(
                 claim_threads()
                 x = observe(part.classes, part.known, rows[first:last])
                 result[first:last] += science.process_log_likelihoods(
-                    x, distances, chance, persistence, rates, isolated_error=parameters.relationship.isolated_error
+                    x, distances, chance, persistence, rates,
+                    isolated_error=science.unit_isolated_errors(
+                        part.pair_error, rows[first:last], parameters.relationship.isolated_error
+                    ),
                 )
                 del x
         chances.append(RelationshipChance(int(index), q, s, qt, st, references))
@@ -157,6 +161,7 @@ def run(
                     component.named_alleles,
                     component.bin_sizes,
                     reverse=parameters.reverse_conventions,
+                    label_error=component.label_error,
                 )
             )
         result = score_schedules(

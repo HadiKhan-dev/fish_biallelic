@@ -86,6 +86,7 @@ from ...contracts.painting import LabelContinuity, RelabelMove
 from ...contracts.panels import SITE_FOUNDER_FIELDS as _SITE_FOUNDER_FIELDS
 from ...contracts.panels import ComponentPanel, relabel_rows
 from ...core import ties
+from ...core.errors import InputError
 from ...core.kernels import kernel
 from . import emissions as evidence_windows
 from . import fidelity, hmm
@@ -430,7 +431,7 @@ def relabel_component(
     batch_samples: int = 1,
     reverse: bool,
     census_sink: Callable[[ties.TieCensus], None] | None = None,
-    emission_builder: evidence_windows.EmissionBuilder = evidence_windows.tempered_emissions,
+    emission_builder: evidence_windows.EmissionBuilder | None = None,
     emission_cache_bytes: int = 0,
 ) -> tuple[ComponentPanel, LabelContinuity]:
     """Return (painted panel, outcome): the relabelled panel when that lowers painted switches.
@@ -462,6 +463,8 @@ def relabel_component(
         return panel, _outcome("no_link_or_movable_row", **counts)
     from functools import partial
 
+    if emission_builder is None:
+        raise InputError("painting emissions need the cohort law: pass emission_builder=functools.partial(tempered_emissions, cohort=...)")
     emission_builder = partial(emission_builder, robustness_epsilon=robustness_epsilon, site_correlation=site_correlation)
     return _relabel_linked(
         panel,
@@ -512,7 +515,8 @@ class _SampleBatches:
     ):
         self.emission_builder = emission_builder
         self.likelihoods, self.observed, self.sites = likelihoods, observed, sites
-        # resident: (stop, likelihoods, observed, sites), the evidence of samples [0, stop) at the selected sites.
+        # resident: (stop, likelihoods, observed, sites, columns), the evidence of samples [0, stop) at the selected
+        # sites: ``sites`` index the copy, ``columns`` are the copy's contig columns (emissions.contig_columns).
         self.resident = resident
         self.states, self.part_start, self.part_stop, self.config = states, part_start, part_stop, config
         self.bin_starts, self.bin_stops, self.part_bin = bin_starts, bin_stops, part_bin
@@ -543,8 +547,15 @@ class _SampleBatches:
     def source(self, start, stop):
         """(likelihoods, observed, sites) to build the batch [start, stop) from."""
         if self.resident is not None and stop <= self.resident[0]:
-            return self.resident[1:]
+            return self.resident[1:4]
         return self.likelihoods, self.observed, self.sites
+
+    def columns(self, start, stop):
+        """The builder's ``columns`` keyword for the batch [start, stop): the resident copy's contig columns when the
+        batch is built from it (its ``sites`` index the copy), else none (``sites`` are the evidence's columns)."""
+        if self.resident is not None and stop <= self.resident[0]:
+            return {"columns": self.resident[4]}
+        return {}
 
     def _values(self, start, stop):
         if start in self._kept:
@@ -557,6 +568,7 @@ class _SampleBatches:
             self.bin_starts,
             self.bin_stops,
             self.config,
+            **self.columns(start, stop),
             parts=(self.part_start, self.part_stop, self.part_bin),
         )
         value = raw, np.any(informative, axis=1)
@@ -633,7 +645,7 @@ def _relabel_linked(
     *,
     convention_reverse: bool,
     census_sink: Callable[[ties.TieCensus], None] | None = None,
-    emission_builder=evidence_windows.tempered_emissions,
+    emission_builder=None,
     emission_cache_bytes: int = 0,
 ):
     """The relabelling search of a component with link points and movable rows (relabel_component), over
@@ -687,6 +699,7 @@ def _relabel_linked(
                 copy,
                 observed.resident_columns(selected_sites, copy, slice(0, covered)),
                 np.arange(n_sites, dtype=np.int64),
+                np.asarray(selected_sites, dtype=np.int64),
             )
             keep_bytes = emission_cache_bytes - needed
     samples = _SampleBatches(
@@ -1110,6 +1123,7 @@ def _relabel_linked(
             bins.starts,
             bins.stops,
             config,
+            **samples.columns(start, stop),
         )
         switches_after += int(
             np.sum(

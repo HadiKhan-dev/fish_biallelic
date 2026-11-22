@@ -80,6 +80,5 @@ def task(
         depends_on=depends_on,
         inputs=(RecordKey(prepared.contig, "pedigree/prepared"),),
         resources=ResourceRequest(max_cores=cores),
-        affinity=prepared.contig,
         thread_argument="threads",
     )

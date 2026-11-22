@@ -28,9 +28,10 @@ are called; otherwise the predictive class of the unknown allele(s) under a unif
 (science.shared.emissions), one latent allele when both homologues copy the same uncalled row. Unobserved
 sample calls and missing founder alleles are never imputed into the panel.
 
-Robust emission of dosage d: max(log(0.99 p_d + 0.01/3), -2) - log(1/3) with p the normalised
-genotype likelihoods (window.site_values gives the uncentred term; CENTER is subtracted as the site
-is read).
+Robust emission of dosage d: max(log L~_d, CENTRED_FLOOR) with L~ the sample's centred likelihoods at the site
+(the run's outlier mixture against the cohort law divided by the cohort likelihood; science.shared.emissions):
+the log Bayes factor against a random member of the cohort, floored at its 4.20 value (window.site_values gives
+the term; CENTER, the cohort law's term, is 0 and subtracted as the site is read).
 
 Kernels read the log evidence and switch costs of a sample-site through a window
 (window.py: a stretch of sites held in memory, anything else computed on the spot with the same

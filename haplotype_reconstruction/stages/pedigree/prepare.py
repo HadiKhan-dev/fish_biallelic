@@ -7,7 +7,7 @@ counts and emission workspace sizes do not enter that identity.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields, replace
 from functools import partial
 from typing import Any
@@ -26,8 +26,9 @@ from ...engine.cpu import TASK_THREADS, thread_team
 from ...engine.graph import Expansion, ResultRef
 from ...science.pedigree import prepare as science
 from ...science.pedigree.blocks import ScorePlacement, cut_list
-from ...science.pedigree.parameters import PedigreeParameters, PreparationParameters
+from ...science.pedigree.parameters import PedigreeParameters
 from ...science.pedigree.regimes import Layout
+from ...science.pedigree.scoring_parameters import PreparationParameters
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, read_items, resume
@@ -39,10 +40,10 @@ KEY = "pedigree/prepared"
 
 
 class PreparedAdapter:
-    """Lossless schema-4 prepared record with a small layout header (selectors, their fallback-rate lengths, bins,
-    markers) and the contig's configured material."""
+    """Lossless schema-6 prepared record (4.21: the source laws and the children's read state) with a small layout
+    header (selectors, their fallback-rate lengths, bins, markers) and the contig's configured material."""
 
-    schema = 4
+    schema = 6
 
     def encode(self, value: PreparedChromosome) -> Mapping[str, Any]:
         return {"schema": self.schema, **to_payload(value), "layout": [
@@ -97,8 +98,10 @@ def run(
     threads: int = 1,
     file: CheckpointFile | None = None,
     identity: str | None = None,
+    read_builder: Callable | None = None,
 ) -> PreparedChromosome:
-    """Return the whole prepared contig, reusing only a matching published identity."""
+    """Return the whole prepared contig, reusing only a matching published identity. ``read_builder``: the painting's
+    read-state builder (read_state_builder; None when the painting has no read state)."""
     if (file is None) != (identity is None):
         raise InputError("publication requires both file and identity")
     adapter = PreparedAdapter()
@@ -108,11 +111,23 @@ def run(
         if previous is not None:
             return previous
     with thread_team(default=threads):
-        product = science.prepare_chromosome(painting, evidence, chromosome_map, parameters)
+        product = science.prepare_chromosome(painting, evidence, chromosome_map, parameters, read_builder=read_builder)
     if file is not None:
         assert identity is not None
         publish_product(file, KEY, identity, product, adapter)
     return adapter.decode(adapter.encode(product))
+
+
+def read_state_builder(painting: Painting, evidence: ContigEvidence, file: CheckpointFile, evidence_identity: str):
+    """The source chain's emission builder with the painting's read state (stages.painting.read_state over
+    science.pedigree.prepare.scalar_emissions, at the path strength only), or None when the painting has none."""
+    if painting.parameters.read_classes == 1:
+        return None
+    from ..painting.read_state import stage_builder
+
+    cohort = evidence.cohort_frequencies
+    return stage_builder(partial(science.scalar_emissions, cohort=cohort), file, evidence_identity, cohort, None,
+                         painting.parameters, unit_batches=True)
 
 
 @dataclass(frozen=True)
@@ -150,13 +165,16 @@ def prepare_stored(
     threads: int = 1,
 ) -> PreparedReference:
     """Load checked contig inputs, publish preparation and return only its small cause."""
+    from ...science.painting.parameters import PaintingParameters
     from ..evidence import records as evidence_records
-    from ..painting import records as painting_records
+    from ..painting import repaint as painting_records  # the painting the pedigree reads (4.21 P)
 
     store = CheckpointStore(root, nthreads=threads)
     contig = chromosome_map.contig
     file = store.contig(contig)
-    painted = painting_records.result_reader(store, manifest, product="reference", contig=contig, panels=False)
+    painted = painting_records.result_reader(
+        store, manifest, product="refit_reference", contig=contig, panels=False, emissions=False,
+    )
     observed = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
     if painted is None or observed is None:
         raise InputError(f"pedigree requires painting and evidence for {contig}")
@@ -172,6 +190,15 @@ def prepare_stored(
         if cached.payload["contig"] != contig:
             raise InputError("prepared contig differs from its configured axis")
         return PreparedReference(contig, identity, cached.payload["omitted_reason"])
+    # The read-state source builds its own raw emissions at path strength.
+    # Decode the packed repaint cache only when the scalar source can use it.
+    header = read_items(file, painted.key, painted.identity, ("schema", "parameters"))
+    if header is None:
+        raise InputError(f"missing pedigree prerequisite {file.label}:{painted.key}")
+    require_schema(header.payload, painted.schema)
+    painting_parameters = from_payload(PaintingParameters, header.payload["parameters"])
+    if painting_parameters.read_classes == 1:
+        painted = painting_records.result_reader(store, manifest, product="refit_reference", contig=contig, panels=False)
     painting = _read_request(file, painted)
     evidence = _read_request(file, observed)
     if painting.sample_ids != tuple(manifest["sample_ids"]) or evidence.sample_ids != painting.sample_ids:
@@ -184,6 +211,7 @@ def prepare_stored(
         threads=threads,
         file=file,
         identity=identity,
+        read_builder=read_state_builder(painting, evidence, file, observed.identity),
     )
     return PreparedReference(contig, identity, product.omitted_reason)
 
@@ -218,6 +246,8 @@ def _bound_stored(
     record = load_product(store.run, screen.SCREEN, screen_identity, screen.ScreenAdapter())
     if record is None:
         raise InputError("pair bounds require the complete selective screen")
+    # Bounds advance through ordered bins inside each row piece. TroMau chr19 at 19 and 38 threads used
+    # .833 and .733 with wall 1.85 and 1.16 s respectively. The dynamic grant keeps the shorter wall available.
     screen.bound_run(
         _required_prepared(store, reference), record.compact, parameters, threads=threads, file=file, identity=identity
     )
@@ -263,6 +293,8 @@ def _scores_stored(
     record = load_product(store.run, screen.SCREEN, screen_identity, screen.ScreenAdapter())
     if record is None:
         raise InputError("floored scores require the complete selective screen")
+    # The score tiles run independently, while each chain carries its previous bin's state.
+    # TroMau chr19 used .828 / .792 / .803 at 8 / 19 / 38 threads (19.54 / 8.68 / 4.50 wall s).
     scores.run(
         _required_prepared(store, reference),
         record.compact,
@@ -291,7 +323,7 @@ def _after_bounds(
     *,
     threads: int = 1,
 ) -> Expansion:
-    from ...science.pedigree.pair_bound import retained_pair_count
+    from ...science.pedigree.pair_bound_screen import retained_pair_count
     from . import decision, screen
 
     store = CheckpointStore(root, nthreads=threads)
@@ -308,6 +340,8 @@ def _after_bounds(
     values = screen.StoredBounds(
         tuple(store.contig(c) for c, _ in bounds), tuple(i for _, i in bounds), retained_pair_count(record.compact)
     )
+    # The genome panel depends on the completed screen and bounds on all contigs.
+    # This serial publication and its ordered reduction took 0.15 s on famhs and 0.18 s on TroMau.
     screen.panel_run(
         record,
         values,
@@ -316,8 +350,8 @@ def _after_bounds(
         file=store.run,
         identity=identity,
     )
-    from ..painting.records import reference_key
     from ...science.painting.parameters import PaintingParameters
+    from ..painting.records import reference_key
 
     painting_key = reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))
     tasks = tuple(
@@ -416,12 +450,14 @@ def _after_prepared(
         # (one CPU inside the map), with Blosc's GIL release enabled so independent decodes overlap.
         readers = CheckpointStore(root, nthreads=TASK_THREADS)
         prepared = tuple(threaded_each(partial(_required_prepared, readers), informative))
+        # Per-contig phases are concurrent. Each exact query round depends on the preceding bound and
+        # request mask. The famhs screen used 2,217 CPU s in 37.8 wall s (.772) in the saved baseline.
         screen.run(prepared, eligibility, parameters, threads=threads, nested=True, file=store.run, identity=identity)
         del prepared
     else:
         require_schema(cached.payload, 1)
-    from ..painting.records import reference_key
     from ...science.painting.parameters import PaintingParameters
+    from ..painting.records import reference_key
 
     painting_key = reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))
     tasks = tuple(
@@ -482,10 +518,15 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     maps = working_maps(store, manifest, maps)  # the material, units and exclusion weights read this map (rl20)
     if any(json_digest(maps.identity(c)) != map_identity(store, manifest, c) for c in contigs):
         raise InputError("pedigree maps differ from the run's working maps")
-    from ..painting.records import reference_key
     from ...science.painting.parameters import PaintingParameters
+    from ..painting.records import reference_key
 
     painting_key = reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))
+    # Preparation overlaps the map graph. Its famhs chr19 warm read took 24.3 wall / 27.0 CPU s,
+    # and preparation took 85.6 wall / 347.8 CPU s (19 threads). With the table work, its matched warm
+    # reads were 11.8 s, the read builder 4.6 s and preparation 30.4 s. The per-sample read recurrence depends
+    # on ordered sites. On TroMau, unpinning only preparation cut its span from 819 to 327 s and raised the
+    # whole command from 1,658 to 1,692 s. The current separate frame workers overlap the contig tasks.
     tasks = tuple(
         Task(
             TaskKey("pedigree", "prepare", c),
@@ -507,6 +548,7 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
         TaskKey("pedigree", "map_scale"),
         map_scale.run_stored,
         args=(root, manifest, maps, parameters, numerical_policy),
+        kwargs=dict(maximum_cores=maximum_cores),
         resources=ResourceRequest(max_cores=maximum_cores),
         inputs=tuple(RecordKey(c, painting_key) for c in contigs),
         outputs=(RecordKey("run", map_scale.KEY),),

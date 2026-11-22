@@ -708,7 +708,8 @@ def _complete_workflow(
     step = cut.step
     if step == "reconstruct" and not any(key.stage == "painting" for key in nodes):
         # Before the run calibration a reconstruction stops at the contig's final assembly, and its marker says
-        # so: reconstruct.CONTIG.done always means painted and refitted (the pedigree's prerequisite).
+        # so: reconstruct.CONTIG.done always means painted, with the refit's gain histogram (the pedigree step then
+        # pools the run's class priors and refits every contig before the pedigree; 4.21 A7).
         step = "assembly"
     name = step + ("." + scopes[0] if cut.step in {"evidence", "reconstruct", "phase"} and len(scopes) == 1 else "")
 
@@ -1014,7 +1015,8 @@ def execute(
         scheduling = execution_options(graph, cut, contig_costs=sizes, phase_costs=sizes)
         preload = task_preloads(tasks)
         if command == "reconstruct":
-            # both passes of a reconstruction (to the final assembly, then painting and refit) share one kernel cache
+            # both passes of a reconstruction (to the final assembly, then painting and the refit histogram) share one
+            # kernel cache
             from ..stages.graph import step_preloads
 
             preload = tuple(dict.fromkeys((*preload, *step_preloads("reconstruct"))))
@@ -1067,19 +1069,18 @@ def execute(
         assert cut is not None
         if defer:
             tasks, scheduling = with_kernel_tasks(tasks, scheduling, kernels)
-        pedigree_reported: list[bool] = []
+        pedigree_receipt = None
 
         def on_task(task, reply, finished=recorder.task_finished):
+            nonlocal pedigree_receipt
             finished(task, reply)
             if task.key.stage == "relatedness" and task.key.round == "" and isinstance(reply.value, str):
                 _report_rate(prepared)  # once per invocation that runs or reuses the relatedness gather
             # Once per invocation that publishes or reuses the pedigree product: the first pedigree task replying with
             # the product's receipt (the node itself replies with an expansion before the map scale and the product
             # exist).
-            if task.key.stage == "pedigree" and not pedigree_reported and _pedigree_identity(reply.value):
-                pedigree_reported.append(True)
-                _report_map_scale(prepared)
-                _report_material(prepared, reply.value)
+            if task.key.stage == "pedigree" and pedigree_receipt is None and _pedigree_identity(reply.value):
+                pedigree_receipt = reply.value
 
         values = run_graph(
             tasks,
@@ -1091,6 +1092,11 @@ def execute(
             contig_lanes=None if settings.execution.contig_lanes == "auto" else int(settings.execution.contig_lanes),
             preload=preload,
         )
+        # Binding the diagnostic's upstream identities took 88 s on a 76-core TroMau replay. Report the completed
+        # product outside the scheduler so pending stages can run while their CPUs are available.
+        if pedigree_receipt is not None:
+            _report_map_scale(prepared)
+            _report_material(prepared, pedigree_receipt)
         if defer:
             from ..engine.kernels import record_compiled
 

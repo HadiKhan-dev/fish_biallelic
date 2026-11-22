@@ -31,10 +31,11 @@ from ...contracts.roles import require_schema
 from ...core.errors import InvariantError
 from ...core.ties import TieCensus, TieSettings
 from ...science.painting.diagnostics import ModelTrajectory, PaintingDiagnostics, summarise
-from ...science.painting.emissions import ArraySource, gather_sites, tempered_into
+from ...science.painting.emissions import ArraySource, contig_columns, gather_sites, mix_window, tempered_into
 from ...science.painting.fidelity import ChainModel
 from ...science.painting.parameters import EMISSION_CACHE_MAX_BYTES, WINDOW_BYTES, PaintingParameters
 from .compute import paint_chromosome
+from .read_state import stage_builder
 from ...store.container import CheckpointFile
 from ...store.protocol import claim, mark_complete, publish, read_items, resume
 from ...store.slices import WindowArray
@@ -57,12 +58,15 @@ class WindowEvidence:
     likelihoods: ArraySource
     observed: ArraySource
     payload_identity: str
+    cohort_frequencies: np.ndarray
 
 
 @contextmanager
 def read_evidence(file: CheckpointFile, expected: str) -> Iterator[WindowEvidence]:
     """Verify identity before opening checked evidence windows; never mask founder QC."""
-    found = read_items(file, "evidence", expected, ("schema", "contig", "sample_ids", "payload_identity"))
+    found = read_items(
+        file, "evidence", expected, ("schema", "contig", "sample_ids", "payload_identity", "cohort_frequencies")
+    )
     if found is None:
         raise InvariantError("painting requires the evidence record")
     payload = found.payload
@@ -76,6 +80,7 @@ def read_evidence(file: CheckpointFile, expected: str) -> Iterator[WindowEvidenc
             arrays["likelihoods"],
             arrays["observed"],
             payload["payload_identity"],
+            np.asarray(payload["cohort_frequencies"], dtype=np.float64),
         )
 
 
@@ -90,18 +95,24 @@ def windowed_emissions(
     bin_stops: np.ndarray,
     config: PaintingParameters,
     *,
+    cohort: np.ndarray,
     robustness_epsilon: float,
     site_correlation: float,
     parts: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
     sample_tile: int = 1,
     window_bytes: int = WINDOW_BYTES,
+    columns: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Gather bounded whole-reference windows and use the one scientific emission formula.
+    """Gather bounded whole-reference windows and use the one scientific emission formula. ``cohort`` float64[L, 3]
+    the contig's cohort genotype frequencies: each gathered window is mixed at ``robustness_epsilon`` (mix_window).
+    ``columns``: when ``likelihoods`` and ``observed`` are a resident copy, the contig column of each of its columns
+    (the cohort is read at contig_columns(sites, columns)); None when ``sites`` are contig columns.
 
     Parts and storage windows never split the reference-window denominator. Windows preserve every bin's
     ascending site accumulation, including its last short bin. Arrays and storage
     readers exercise the same route in forced-route tests.
     """
+    cohort_sites = contig_columns(sites, columns)
     start, stop, step = samples.indices(likelihoods.shape[0])
     if step != 1:
         raise InvariantError("painting requires contiguous sample batches")
@@ -150,6 +161,7 @@ def windowed_emissions(
                 seen = np.ascontiguousarray(flags[first_sample:last_sample, left:right])
             else:
                 values, seen = gather_sites(likelihoods, observed, sites[left:right], selection)
+            values = mix_window(values, cohort[cohort_sites[left:right]], robustness_epsilon)
             # One kernel tempers the window into the batch's arrays: informative sites, the design
             # effect of each whole reference window and the parts' emissions, with no serial steps between them.
             tempered_into(
@@ -169,7 +181,7 @@ def windowed_emissions(
                 flags,
                 informative,
                 first_sample,
-                robustness_epsilon=robustness_epsilon, site_correlation=site_correlation,
+                site_correlation=site_correlation,
             )
     return raw, flags, informative
 
@@ -223,6 +235,24 @@ def run_contig(
 ) -> Painting:
     """Resume or execute model -> continuity -> decode -> release; publish product last."""
     complete = {records.PAINTING: expected, records.SUMMARY: expected, records.IDENTITY: expected}
+    builders: dict[str, Callable[..., Any]] = {}
+
+    def emission_builder(source: ContigEvidence | WindowEvidence, batch: int) -> Callable[..., Any]:
+        """The contig's emission builder, made once per task: the reference painting reuses the fine painting's
+        (the same read_classes and read_state; the read state's cached label-independent parts serve both)."""
+        if "builder" not in builders:
+            from functools import partial
+
+            base = partial(
+                _at_batch_boundary,
+                partial(windowed_emissions, sample_tile=batch, cohort=source.cohort_frequencies),
+                batch,
+            )
+            builders["builder"] = stage_builder(
+                base, file, evidence_identity, source.cohort_frequencies, confidence_correlation, parameters,
+                unit_batches=True,
+            )
+        return builders["builder"]
     with claim(file, records.PAINTING, expected, blocking=False) as needed:
         if not needed:
             result = records.load(file, expected, assembly=assembly)
@@ -244,8 +274,6 @@ def run_contig(
             def compute(source: ContigEvidence | WindowEvidence) -> Painting:
                 if source.payload_identity != payload_identity:
                     raise InvariantError("painting evidence payload binding differs")
-                from functools import partial
-
                 # Sample batches are sized by the most CPUs this task may use (its memory estimate assumes as much), and
                 # each batch re-reads the task's share first, so painting grows into CPUs its peers free within the
                 # step. Results do not depend on the batch size (per-sample statistics are summed in sample order).
@@ -260,7 +288,7 @@ def run_contig(
                     emission_cache_bytes=emission_cache_bytes,
                     model_sink=model_sink,
                     census_sink=census_sink if census or ties.census is not None else None,
-                    emission_builder=partial(_at_batch_boundary, partial(windowed_emissions, sample_tile=batch), batch),
+                    emission_builder=emission_builder(source, batch),
                     progress=_Progress(file, expected),
                     robustness_epsilon=robustness_epsilon, site_correlation=site_correlation,
                     confidence_correlation=confidence_correlation,
@@ -283,8 +311,6 @@ def run_contig(
             )})
             with claim(file, records.REFERENCE, reference_identity, blocking=False) as needed:
                 if needed:
-                    from functools import partial
-
                     reference_parameters = replace(parameters, snps_per_bin=parameters.reference_snps_per_bin)
                     batch = max(1, max(threads, max_threads or threads) if batch_samples is None else batch_samples)
 
@@ -294,8 +320,9 @@ def run_contig(
                         return paint_chromosome(
                             materialise(assembly[1], assembly[0]), source, reference_parameters, genetic_map,
                             batch_samples=batch, reverse=ties.reverse, emission_cache_bytes=emission_cache_bytes,
-                            emission_builder=partial(_at_batch_boundary, partial(windowed_emissions, sample_tile=batch), batch),
+                            emission_builder=emission_builder(source, batch),
                             progress=_Progress(file, reference_identity), label_continuity=result.label_continuity,
+                            label_errors=True,  # the painting the pedigree reads carries the label errors (A9, A10)
                             robustness_epsilon=robustness_epsilon, site_correlation=site_correlation,
                             confidence_correlation=confidence_correlation,
                         )
@@ -342,12 +369,16 @@ def run(
     from . import calibration_records
     calibration = required_product(reader, calibration_records, "calibration", None)
     expected = records.expected(store, reader.manifest, product="painting", contig=contig).identity
+    from .read_state import effective_painting
+
     run_contig(
         file,
         expected,
         (assembly.prepared, assembly.components),
         working_maps(store, reader.manifest, maps).for_contig(contig),
-        resolved.parameters.painting,
+        # read_classes = 1 when the calibration recorded no library of the run sharing reads (the painting carries
+        # the parameters it was made with, so its consumers take the same route)
+        effective_painting(resolved.parameters.painting, calibration),
         evidence_identity=evidence_id,
         payload_identity=payload,
         robustness_epsilon=calibration["robustness_epsilon"],

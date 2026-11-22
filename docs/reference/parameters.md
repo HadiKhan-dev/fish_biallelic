@@ -64,9 +64,7 @@ Source: [haplotype_reconstruction/science/assembly/alleles/parameters.py](../../
 | `SITE_HALF_BAND` | `2.0 ** (-20)` | See model | Name the founder-allele search, release and numerical constants. |
 | `POLYNOMIAL_CANCELLATION` | `1e-10` | See model | Direct positive-sum fallback when polynomial cancellation exceeds this relative guard. |
 | `TINY_LIKELIHOOD` | `1e-300` | See model | Positive likelihood floor, preventing log(0) in site posteriors. |
-| `FEEDBACK_EVIDENCE_KEEP` | `0.99` | See model | Robust evidence mixture weights and strict uniform-range tolerance for context feedback. |
-| `FEEDBACK_EVIDENCE_MIX` | `0.01` | See model | Name the founder-allele search, release and numerical constants. |
-| `FEEDBACK_UNIFORM_TOLERANCE` | `1e-12` | See model | Name the founder-allele search, release and numerical constants. |
+| `FEEDBACK_UNIFORM_TOLERANCE` | `1e-12` | See model | Strict uniform-range tolerance for context feedback (its evidence carries the run's outlier mixture). |
 ## science.assembly.alleles.parameters — SitePosteriorParameters
 
 Source: [haplotype_reconstruction/science/assembly/alleles/parameters.py](../../haplotype_reconstruction/science/assembly/alleles/parameters.py).
@@ -96,8 +94,6 @@ Source: [haplotype_reconstruction/science/assembly/completion/parameters.py](../
 | `elbo_absolute_tolerance` | `1e-08` | nats | Absolute ELBO convergence tolerance 1e-8. |
 | `elbo_relative_tolerance` | `1e-08` | dimensionless | Relative ELBO convergence tolerance 1e-8. |
 | `monotonic_tolerance` | `1e-08` | nats | Allow an ELBO decrease of at most 1e-8 before flagging a non-monotone iteration. |
-| `uniform_mix` | `0.01` | probability | Uniform genotype emission mixture weight 0.01 for robust cross-fit evidence. |
-| `log_floor` | `-2.0` | nats | Robust genotype log-emission floor -2 in variational EM. |
 | `fold_seed` | `1729` | dimensionless seed | Seed 1729 makes the content-keyed two-fold assignment reproducible. |
 | `minimum_call_probability` | `0.99` | probability | Release an unknown allele only at posterior probability at least 0.99. |
 | `minimum_carriers` | `2` | samples | Require at least 2 carriers for a cross-fitted allele release. |
@@ -126,7 +122,6 @@ Source: [haplotype_reconstruction/science/assembly/completion/parameters.py](../
 | `snps_per_bin` | `50` | sites/bin | Leave out 50-site bins to obtain outside-bin evidence for candidate fills. |
 | `minimum_supporters` | `2` | samples or expected carrier mass | Require carrier count or mass at least 2 for a candidate cavity fill. |
 | `minimum_posterior_probability` | `0.99` | probability | Require filled-allele posterior probability at least 0.99. |
-| `uniform_mix` | `0.01` | probability | Uniform genotype mixture weight 0.01 for robust cavity emissions. |
 | `tie_tolerance` | `1e-12` | log-score units | Numerical tie tolerance 1e-12 in cavity calculations. |
 | `founder_identifiability_tolerance` | `1e-12` | allele probability | Treat outside-bin founder probabilities within 1e-12 as indistinguishable. |
 | `minimum_observable_founder_separation` | `1` | sites | Require each founder to differ from every other at 1 or more observable outside-bin sites. |
@@ -161,7 +156,6 @@ Source: [haplotype_reconstruction/science/assembly/completion/parameters.py](../
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `UNIFORM_TOLERANCE` | `1e-12` | See model | U04/U05/U07: normalized genotype evidence range; observation.py:15. |
-| `CAVITY_LOG_FLOOR` | `-2.0` | See model | U05 bin emissions use this fixed floor independently of cross-fit configuration. |
 ## science.assembly.count_rule.parameters — CountRuleParameters
 
 Source: [haplotype_reconstruction/science/assembly/count_rule/parameters.py](../../haplotype_reconstruction/science/assembly/count_rule/parameters.py).
@@ -191,7 +185,6 @@ Source: [haplotype_reconstruction/science/assembly/parameters.py](../../haplotyp
 |---|---|---|---|
 | `max_sites` | `2000` | sites/component | At most 2000 usable proxy sites per component, bounding each gap fit scan. |
 | `max_iterations` | `50` | updates/gap fit | At most 50 EM updates per gap fit; convergence may stop earlier. |
-| `robustness` | `0.01` | probability | Uniform genotype mixture weight 0.01, limiting sensitivity to incompatible evidence. |
 | `error_fraction` | `0.01` | probability | Stationary error-tract copying fraction 0.01 in the within-block model. |
 | `error_tract_bp` | `20000.0` | bp | Mean error-tract length 20000 bp in the within-block quality process. |
 | `min_log_probability` | `-10.0` | nats | Transition log floor -10 before row renormalisation, retaining support for every edge. |
@@ -258,7 +251,6 @@ Source: [haplotype_reconstruction/science/assembly/parameters.py](../../haplotyp
 | `BRANCH_LIMIT` | `16` | See model | Complete joint input continuations (docs/methods/assembly.md#u13), separate from endpoint beam quotas. |
 | `LINKER_THETA_CAP` | `0.5` | See model | Linker probability floors and log-range bounds (docs/methods/assembly.md#aj07). |
 | `LINKER_THETA_FLOOR` | `1e-15` | See model | Name the scientific hierarchy, linker and join parameters with provenance. |
-| `LINKER_EMISSION_FLOOR` | `1e-300` | See model | Name the scientific hierarchy, linker and join parameters with provenance. |
 | `LINKER_MIN_SCALED_MASS` | `1e-250` | See model | Name the scientific hierarchy, linker and join parameters with provenance. |
 | `LINKER_MAX_LOG_RANGE` | `500.0` | See model | Name the scientific hierarchy, linker and join parameters with provenance. |
 | `LINKER_LANE_WIDTH` | `32` | See model | Cost/route only: existing execution lanes and block-product routing. |
@@ -439,8 +431,7 @@ Source: [haplotype_reconstruction/science/discovery/parameters.py](../../haploty
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `EMISSION_FLOOR` | `1e-12` | See model | Numerical probability bounds and rounding allowances. Minimum fixed-K emission probability before logarithms. |
-| `RESIDUAL_GEOMETRY_SLACK` | `1e-12` | See model | Fractional slack for residual geometry boundary comparisons. |
+| `RESIDUAL_GEOMETRY_SLACK` | `1e-12` | See model | Numerical probability bounds and rounding allowances. Fractional slack for residual geometry boundary comparisons. |
 | `SIGMOID_SATURATION` | `37.0` | See model | Logit where exp(-x) is below 2**-53. |
 | `LOG_ODDS_MAX` | `math.log((1.0 - np.finfo(np.float64).eps) / np.finfo(np.float64).eps)` | See model | Maximum residual log odds (nats), finite at one minus float64 epsilon. |
 | `LOG_ODDS_MIN` | `math.log(np.finfo(np.float64).tiny) - math.log1p(-np.finfo(np.float64).tiny)` | See model | Minimum residual log odds (nats), finite at float64 tiny. |
@@ -510,7 +501,6 @@ Source: [haplotype_reconstruction/science/evidence/quality/parameters.py](../../
 | `heterozygote_depth_classes` | `4` | 1 | Eligible-cell depth quantile classes (count); allows own-error and heterozygote weights to vary with depth. |
 | `minimum_samples` | `20` | 1 | Minimum libraries (samples) for quality fitting; smaller cohorts have too little private-allele evidence to distinguish foreign-like reads. |
 | `artefact_regions` | `16` | 1 | Equal-site-count regions per contig (count); allows a separate local-artefact share in each region under both hypotheses. |
-| `fragment_bp` | `1000` | bp | Read-sharing window width (base pairs); eligible cells in a window share one unit of test weight. |
 | `segment_gap_bp` | `1000000` | bp | Maximum gap between inherited near-private events (base pairs); groups events for the segment report only. |
 | `segment_minimum_events` | `3.0` | 1 | Minimum weighted events per reported inherited segment (events); suppresses sparsely supported report regions. |
 ## science.evidence.quality.parameters
@@ -642,6 +632,21 @@ Source: [haplotype_reconstruction/science/evidence/read_model/parameters.py](../
 | `PROFILE_BRACKET_TRIALS` | `40` | See model | Maximum bracket expansions (trials). |
 | `PROFILE_ROOT_ITERATIONS` | `200` | See model | Maximum profile-root solver iterations. |
 | `PROFILE_ROOT_EPS_FACTOR` | `4` | See model | Relative profile-root tolerance in float64 epsilon units. |
+## science.observation.parameters — ObservationParameters
+
+Source: [haplotype_reconstruction/science/observation/parameters.py](../../haplotype_reconstruction/science/observation/parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `pilot_share` | `0.01` | share of blocks | About 1 % of every analysed contig's blocks. |
+| `minimum_contig_blocks` | `4` | blocks | At least 4 pilot blocks per analysed contig. |
+| `minimum_run_blocks` | `256` | blocks | At least 256 pilot blocks per run where it has them (ADVICE2 section 8, note of 09:12; sized for the removed scale test and kept for the rate: its strict fits are a small share of discovery's cost). |
+| `maximum_run_blocks` | `512` | blocks | At most 512 pilot blocks per run (cost bound). |
+| `strict_outlier_rate` | `1e-06` | probability | Strict fits (ADVICE2 section 8, addendum: M17, M18). |
+| `minimum_unit_cells` | `50` | cells | A (sample, block) unit needs 50 cells of known states. |
+| `grid_points` | `31` | points | 31 log-spaced rates from grid_low to grid_high. |
+| `grid_low` | `1e-07` | probability | Lowest rate of the grid. |
+| `grid_high` | `0.3` | probability | Highest rate of the grid. |
 ## science.painting.parameters
 
 Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotype_reconstruction/science/painting/parameters.py).
@@ -659,13 +664,58 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `MAXIMUM_MASK_STATES` | `63` | See model | int64 interval masks allow 63 labels; enforced at the decode boundary. |
 | `EMISSION_CACHE_MAX_BYTES` | `8 << 30` | See model | Dimension-only cache/window budgets (bytes); their values do not select scientific candidates. 8 GiB, so the largest chromosomes' estimation and label-continuity emissions stay resident (chr3 at N = 320: packed estimation emissions 1.0 GiB, label-continuity part emissions about 2.8 GB); a reported working set, not a reservation (the memory governor acts on measured pressure). |
 | `WINDOW_BYTES` | `64 << 20` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
+| `READ_STATE_CACHE_BYTES` | `16 << 30` | See model | Read-state cache budget (bytes; dimension-only, PaintingParameters.read_classes > 1): the label-independent parts of the read state (painting/read_inputs.py) kept across a component's emission builds (copying-model fits, label continuity, decode, reference painting). Values never depend on it: a build reuses the arrays it would compute. 16 GiB holds every sample's parts of the largest contig of the 8-contig paired-end designs (80 samples x 329,000 selected sites x 400 bytes, 10.5 GB); larger cohorts keep the batches that fit and recompute the rest. |
+| `READ_STATE_BATCH_BYTES` | `16 << 30` | See model | Read-state batch budget (bytes; dimension-only): one sample batch's read-state working set (read matrices at both strengths, label-independent parts, their transient inputs over the evidence span). Batches shrink below the CPU-sized batch only where that would exceed it, e.g. near 30 founders over thousands of bins (496 label pairs x 5,000 bins x 5 classes: 0.27 GB of read matrices per sample and strength). Results do not depend on the batch. |
+| `READ_TABLE_CACHE_BYTES` | `1 << 30` | See model | Read-state table cache (bytes; dimension-only): the depth and class tables of the read state's (survival bin, depth value) pairs (science/shared/reads.py build_tables), kept across a contig's sample batches; about 0.5 MB per pair at the deepest tables. A table is a function of its key alone, so values never depend on it. |
 | `EMISSION_RESCALE_BELOW` | `1e-150` | See model | Probability-product floor (dimensionless): fold the product into its log below this value; factors below it are logged directly, so bin aggregation never underflows. |
+## science.painting.parameters — ReadStateParameters
+
+Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotype_reconstruction/science/painting/parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `offsets` | `3` | count | Minimum number of retained consecutive loss offsets starting at zero; keeps the three-offset base support even when the depth posterior allows trimming further. |
+| `loss_pilot_tail` | `1e-09` | probability | Upper tail for the stationary Poisson lost-depth quantile at the library's largest mean covering depth. A small tail makes it a starting point for wide support. |
+| `loss_pilot_extra_offsets` | `5` | count | Pilot width added to the stationary quantile to allow for posterior shifts at called-depth jumps. |
+| `loss_pilot_minimum_offsets` | `13` | count | Positive-loss pilot floor. Fitted-library physical depth-pair tails were negligible at nine offsets, so thirteen leave room for conditioning on longer sequences. |
+| `loss_pilot_maximum_offsets` | `33` | count | Positive-loss pilot ceiling to bound work; the trial checked finite pilot widths against wider support on high-loss and deep-island fixtures. |
+| `loss_span_tail` | `0.0001` | probability | Maximum pilot depth-path mass discarded across the span, shared equally over its evidence sites. Allows pruning while bounding the total variation within the pilot. |
+| `survival_step` | `1.02` | ratio | Log-grid ratio of 1 - phi for table reuse (2 %): a linear grid rounds short-gap survival to one. |
+| `survival_floor` | `1e-07` | probability | Smallest tabulated read turnover 1 - phi. |
+| `loss_contrast_gap_bp` | `5` | bp | Maximum adjacent spacing for extrapolating the called-depth variance to zero gap. |
+| `loss_quartet_span_bp` | `10` | bp | Maximum span of four consecutive distinct markers in the repeated-depth check. |
+| `loss_cluster_bp` | `1000000` | bp | Physical block width for the spatial delete-block uncertainty of the loss contrasts. |
+| `depth_step` | `0.25` | reads | Per-homologue covering-depth bins for table reuse. |
+| `minimum_arrival_depth` | `0.05` | reads | Floor of the per-homologue covering depth in the read-arrival law: a sample with almost no reads still receives arrivals. |
+| `length_grid_low_bp` | `50.0` | bp | Shortest read length of the survival fit's log-spaced grid. |
+| `length_grid_high_bp` | `2000000.0` | bp | Longest read length of the survival fit's log-spaced grid. |
+| `length_grid_points` | `60` | count | Read lengths of the survival fit's log-spaced grid. |
+| `minimum_sharing_bins` | `3` | count | Measured read-sharing lag bins the survival fit needs. |
+| `sharing_detection_alpha` | `0.01` | probability | Owner 18 Nov: family-wise error 1 % over the run's read-sharing tests (Bonferroni; sharing_detection_alpha docstring); the per-bin z 2 it replaces flagged 3 of std's 8 contigs without sharing (max z 2.08-2.25) and a noise library split (split z 4.14, parts' max z 4.64 and 5.19: counting only the all-sample bins, z* 4.0, accepts it; counting the split tests, z* 4.58, does not); every sharing design measured has max z 14-414 (lab421/lr/cost/diag, diag2). |
+| `detection_z` | `None` | standard errors | The run's family-wise detection threshold z*, resolved by the calibration from every analysed contig's read-sharing record and carried on the paintings' parameters (None in the configuration). |
+| `maximum_loss` | `0.5` | probability | Largest intermittent loss the model uses. A covariance fit above one starts at zero loss and may be corrected by the nearby-depth check. |
+| `deep_tail` | `1e-12` | probability | Tail probability of the deep covering depth (42, 47, 52 reads at minor 0, 1, 2): at and above it the split class is 'balanced', so tables and per-site work stay fixed at any depth. |
+| `table_minimum_depth` | `24` | reads | Smallest covering-depth range of the tables. |
+| `table_depth_margin` | `2` | reads | Covering depths tabulated beyond the deepest called site and its offsets. |
+| `library_lags_bp` | `(25, 100, 300, 1000, 3000, 10000, 30000)` | bp | Lags of the samples' depth-correlation curves compared by the library grouping. |
+| `library_gaps_bp` | `(100.0, 300.0, 1000.0, 3000.0, 10000.0, 30000.0)` | bp | Gaps at which two candidate libraries' fitted survival laws are compared. |
+| `library_seed_lag_bp` | `1000` | bp | Lag that seeds the two-means split when the contig is long enough for it. |
+| `library_iterations` | `50` | count | Largest number of two-means rounds of a candidate split. |
+| `library_minimum_samples` | `3` | count | Samples per library for its own read-sharing estimate. |
+| `library_survival_tolerance` | `0.2` | probability | Survival difference that changes decisions (lab421: +-0.10 at 30 kb changed nothing, -0.22 by 0.005 percentage points); within-library differences measured <= 0.08, genuine libraries 0.95-0.97. |
+| `library_levels` | `2` | count | Divisive levels of the library grouping (at most four libraries). |
+| `fallback_error` | `0.02` | probability | Per-read other-allele rate when the evidence stage applied its fixed binomial read model (the evidence stage's ReadModelParameters.fixed_error; no fitted rate is recorded then). |
 ## science.painting.parameters — PaintingParameters
 
 Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotype_reconstruction/science/painting/parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
+| `read_classes` | `5` | classes | Owner 17 Nov 2026: user setting 1/3/5/7/9, default 5 (= 7 = 9 in every criterion measured). |
+| `read_state` | `ReadStateParameters()` | 1 | Read-state parameter group; offsets, survival grid, deep bound and library grouping are declared by its fields. |
+| `path_divisor` | `4.0` | 1 | Read-state path strength, fixed: on the four truth designs path divisor 4 decoded the fewest unmatched switch events at equal misses (seed 58 vs 94 at divisor 1, famhs 52 vs 79, bc8 17 vs 41, tl 26 vs 58); the within-window path score failed as a selector. |
+| `confidence_grid` | `(1.0, 2.0, 4.0, 8.0, 16.0)` | 1 | Read-state confidence divisor candidates (4.21, from 1-64): the read-aware calibration chose 1-2 on every simulated design (bc8 1, tl 1, k30 1, seed 2, famhs 2) and 8 on TroMau (whole genome best 8; best 16 on chr19 alone); 32 and 64 were never the best or the choice, and leaving them out leaves every recorded choice unchanged at 5 of 7 fits per fold. |
+| `calibration_morgans` | `10.0` | Morgans | Read-aware confidence calibration material (4.21): on the stored per-contig fits, the contigs in configured order reaching 10 Morgans choose what every contig chose on TroMau (42.5 M; 8 at every prefix), bc8 (14.7 M; 1 at every prefix) and seed (14.7 M; 2 at 11.2 M and at 14.7 M, 1 at 12.8 M and below 11 M, both good on truth); TroMau fits 5 of its 22 contigs. |
 | `divisor_grid` | `(1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0)` | 1 | Full-reference evidence divisors; choose the pooled held-out posterior predictive maximum. |
 | `calibration_folds` | `3` | folds | Hide every kth selected-site reference window in one of k deterministic folds. |
 | `initial_switch_rate` | `2.0` | Morgan^-1 | Initial copying-change rate per track (per Morgan); starts component estimation at two ancestry changes per Morgan. |
@@ -673,7 +723,7 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `initial_error_exit` | `0.25` | probability | Initial panel-error exit probability per edge (probability); starts the mean label-preserving error-run length at four bins. |
 | `estimation_iterations` | `8` | count | Fixed EM updates of the copying rate and error chain (iterations); defines a deterministic truncated estimator. |
 | `estimate_grid` | `2.0 ** (-6)` | nats | Rounding step for estimated parameters (natural-log units); limits sensitivity to genotype-likelihood noise below the grid scale. |
-| `robustness_grid` | `(0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03)` | probability | Candidate genotype-outlier mixture masses (probabilities); selected across the run by the sum of the components' last EM-trajectory log likelihoods, ties to smaller mass. |
+| `robustness_grid` | `(1e-06, 3e-06, 1e-05, 3e-05, 0.0001, 0.0003, 0.001, 0.003, 0.01, 0.03)` | probability | Candidate genotype outlier rates (probabilities), half-decades from the numerical bound 1e-6; selected across the run by the sum of the components' last EM-trajectory log likelihoods, ties to the smaller rate. |
 | `snps_per_bin` | `25` | sites | Target selected sites per emission bin (sites); sets near-equal consecutive bins for the copying chain. |
 | `reference_snps_per_bin` | `100` | sites | Selected-site reference window for evidence tempering and pedigree observation bins. |
 | `emission_log_floor` | `-50.0` | nats | Lower bound of a site log emission (nats); limits a discordant observation before bin aggregation. |
@@ -682,57 +732,9 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `label_continuity_maximum_loser_ratio` | `0.1` | share | Maximum switch-loser to switch-winner sample ratio (dimensionless); protects shared recombinant lineages during row relabelling. |
 | `label_continuity_check_budget` | `64` | count | Maximum charged candidate checks per search iteration, including tie peers (candidates). An unresolved class withholds its repair and ends the search with check_budget_reached; capability rejections need no decode or charge. Bounds trial work at large founder counts. |
 | `viterbi_tie` | `VITERBI_TIE` | nats | Viterbi predecessor tie quantum (nats); noise_quantum(1.9e-6) places the preference for fewer track changes above the measured score-gap noise scale. |
-## science.pedigree.parameters — WinnerNumerics
+## science.pedigree.decision_parameters — ExposureParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `contrast_ulp_factor` | `512.0` | See model | PD11; 512 machine-epsilon units times score magnitude define the rounding tie band. |
-| `noise_floor` | `2.0 ** (-15)` | See model | PD11; absolute tie floor of 2^-15 nats prevents small score perturbations selecting a winner. |
-| `minimum_graph_quantum` | `1e-300` | See model | PD13; positive graph-confidence tie quantum floor of 1e-300 nats. |
-## science.pedigree.parameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `WINNER_NUMERICS` | `WinnerNumerics()` | See model | Fixed model numerics are versioned by source identity, not additional user settings. |
-## science.pedigree.parameters — PreparationParameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `markers_per_bin` | `10` | See model | PS01; select at most 10 evenly spaced markers per painting bin for transmission scoring. |
-| `markers_per_information_block` | `100` | See model | PS01; group at least 100 selected markers per information block for tempering. |
-| `effective_markers_per_information_block` | `3.0` | See model | PS01; cap each information block at 3 effective markers through its emission exponent. |
-## science.pedigree.parameters — ScoringParameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `mismatch_probability` | `0.01` | See model | PS04; probability 0.01 of reading the inherited allele as the other allele in child emissions. |
-| `source_gap_support_sites` | `1` | See model | PS04; 1 informative selected marker supplies full adjacent-bin support; less support mixes a uniform selector excursion. |
-| `bridge_postcheck_tolerance` | `2e-13` | See model | PS04; dimensionless base tolerance 2e-13 for bridge probability and marginal residual checks. |
-| `bridge_max_iterations` | `128` | See model | PS04; at most 128 bisection iterations for the maximum-entropy bridge root. |
-| `null_prior_samples` | `1.0` | See model | PS04; 1 uniform pseudo-sample keeps every founder state possible in the leave-child-out null source. |
-## science.pedigree.parameters — PanelParameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `max_pairs_per_child` | `256` | See model | PS07; nominal cap of 256 M2 pairs per child, every retained eligible pair below it (no relevance screen, DESIGN_417 S8, owner 14 Nov 2026), the largest full-data bounds above it; boundary ties and unknown bounds remain, and binding is flagged. |
-| `pair_bound_high_mass` | `0.01` | See model | PS07; probability-mass cutoff 0.01 for separate named-state groups; controls bound tightness and cost. |
-| `information_tempering_power` | `0.5` | See model | PS07; dimensionless exponent 0.5 on information-block count sets chromosome softmax temperature. |
-| `maximum_contig_weight_ratio` | `4.0` | See model | PS07; dimensionless ratio 4 clips sqrt(marker count) relative to its median before normalizing weights. |
-| `rank_weight` | `0.35` | See model | PS07; probability weight 0.35 for tied-rank evidence in diagnostic utility; the remainder uses contaminated softmax. |
-| `chromosome_contamination` | `0.02` | See model | PS07; probability weight 0.02 of the uniform eligible-parent distribution in chromosome diagnostic utility. |
-## science.pedigree.parameters — ExposureParameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../../haplotype_reconstruction/science/pedigree/decision_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
@@ -742,13 +744,13 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `minimum_exposed_units` | `3.0` | See model | PD05 / DESIGN_417 D2; require 3 exposed material units (1-Morgan units of the working map) in the standard regime; 1 in the low-material band. |
 | `report_edge_coverage` | `0.95` | See model | PD05; fraction 0.95 labels the edge-coverage diagnostic; does not gate decisions. |
 | `report_pair_explainability` | `0.95` | See model | PD05; fraction 0.95 labels the pair-explainability diagnostic; does not gate decisions. |
-## science.pedigree.parameters — DirectionParameters
+## science.pedigree.decision_parameters — DirectionParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../../haplotype_reconstruction/science/pedigree/decision_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `mismatch_probability` | `0.01` | See model | PS19/PD06; dimensionless per-bin probability 0.01 that a meiotic copy has a different painted local class. Allows painting disagreement without making a direction impossible. Decision replays at 0.001, 0.01 and 0.1 agreed at Tier B for a real multi-generation cross, the TroMau cross and large known-truth simulations; 0.1 added false full-fit edges in a 30-founder known-truth simulation. |
+| `mismatch_probability` | `0.01` | See model | PS19/PD06; the FLOOR (4.21, ADVICE2 11.1) of the per-bin probability that a meiotic copy has a different painted local class: the direction kernels use min(1/2, max(0.01, v_child + v_parent)) and the family transmission vote min(1/2, max(0.01, v)) per label, v the reference painting's per-track label error, so an over-confident posterior is never more decisive than 4.20. Decision replays at 0.001, 0.01 and 0.1 agreed at Tier B for a real multi-generation cross, the TroMau cross and large known-truth simulations; 0.1 added false full-fit edges in a 30-founder known-truth simulation. |
 | `window_morgans` | `0.0` | Morgan | DESIGN_417 rev 4; width W of the direction windows (consecutive windows of W working Morgans of the unit axis) whose summed direction log odds are capped at window_cap; 0 (default) turns the cap off. A count-free bound on a long (chromosome-wide) painting failure's votes, measured in V5 with a positive control before the owner chooses W. |
 | `window_cap` | `float(np.log(39.0))` | nats | DESIGN_417 rev 4; ln 39 = 3.66 nats, 4.16.1's per-chromosome cap (failure probability 0.05), below the release cut-off ln 49, so one window cannot orient an edge alone. |
 | `pair_failure_probability` | `0.02` | See model | PD06/PD08/PD09/PD10; pair-level failure probability 0.02 bounds the orientation correction, and the orientation prior that the run's direction model reads from the direction-free solve (within [0.01, 0.99]). |
@@ -760,9 +762,9 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `retry_iterations` | `4096` | See model | PD06/PD08/PD09/PD10; at most 4096 iterations in the damped reciprocal retry. |
 | `retry_damping` | `0.5` | See model | PD06/PD08/PD09/PD10; dimensionless mixing weight 0.5 in the reciprocal retry. |
 | `ancestry_path_budget` | `16` | See model | PD06/PD08/PD09/PD10; retain at most 16 joint configurations per sample in the reverse two-edge ancestry factor. |
-## science.pedigree.parameters — SelectionParameters
+## science.pedigree.decision_parameters — SelectionParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../../haplotype_reconstruction/science/pedigree/decision_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
@@ -770,17 +772,17 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `prior_sensitivity` | `((0.5, 0.3, 0.2), (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0), (0.2, 0.3, 0.5))` | See model | PD04/PD12/PD13/PD14; three fixed dimensionless M0/M1/M2 prior vectors; released M0 must survive all. |
 | `m0_contamination_probability` | `0.02` | See model | PD04/PD12/PD13/PD14; probability weight 0.02 mixes child M0 into aggregated M1/M2 likelihoods. |
 | `graph_local_search_passes` | `3` | See model | PD04/PD12/PD13/PD14; at most 3 coordinate passes of acyclic graph repair. |
-## science.pedigree.parameters — ResamplingParameters
+## science.pedigree.decision_parameters — ResamplingParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../../haplotype_reconstruction/science/pedigree/decision_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `bootstrap_replicates` | `1000` | See model | PD16; 1000 unit-bootstrap draws for configuration and parent support fractions. |
 | `bootstrap_seed` | `20260725` | See model | PD16; integer seed 20260725 fixes the unit-bootstrap random stream. |
-## science.pedigree.parameters — ReleaseParameters
+## science.pedigree.decision_parameters — ReleaseParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../../haplotype_reconstruction/science/pedigree/decision_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
@@ -789,9 +791,9 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `tier_b` | `(lambda: TierThresholds(0.7, 0.7, 0.8))()` | See model | PD18/PD20/PD21; primary dimensionless configuration-bootstrap, parent-bootstrap and leave-one-out cutoffs (0.7, 0.7, 0.8). |
 | `orientation_reversal_probability` | `0.02` | See model | PD18/PD20/PD21; reversal probability 0.02 gives the edge orientation cutoff log((1-p)/p) in nats. |
 | `support_set_coverage` | `0.95` | See model | PD18/PD20/PD21; probability mass 0.95 retained by configuration candidate sets, including boundary ties. |
-## science.pedigree.parameters — ExclusionParameters
+## science.pedigree.exclusion_parameters — ExclusionParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/exclusion_parameters.py](../../haplotype_reconstruction/science/pedigree/exclusion_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
@@ -799,23 +801,9 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `genotype_replacement_probability` | `0.01` | See model | PD22; probability 0.01 of uniform genotype replacement in the Mendelian compatibility ratio. |
 | `bet_sizes` | `(1 / 1024, 1 / 256, 1 / 64, 1 / 16, 1 / 4, 1.0)` | See model | PD22; dimensionless bet fractions from 1/1024 through 1 average exclusion evidence at several strengths. |
 | `window_widths_bp` | `(1000000, 5000000, 20000000)` | See model | PD22; physical window widths 1000000, 5000000 and 20000000 bp, half-overlapping plus the whole chromosome. |
-## science.pedigree.parameters — RelationshipParameters
+## science.pedigree.family_transmission_parameters — FamilyTransmissionParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `failure_region_rate` | `0.1` | 1/Morgan | PD28; one observed painting failure in fourteen Morgans motivates 0.1 regions per Morgan. |
-| `failure_region_length` | `0.05` | Morgan | PD28; observed painting failures span 4–8 cM, shorter than full-sib IBD0 segments. |
-| `isolated_error` | `0.001` | probability/bin | PD28; scale 1-q per bin; at most 0.03% wrong bins; no uninformative-bin penalty. |
-| `withholding_score` | `float(np.log(1000.0))` | nats | PD23; log(1000) survives higher-prior sensitivity; with the 4.18 priors one top-band witness withholds only with a pair margin below -2.31 nats. |
-| `sibship_prior` | `(0.67, 0.96, 0.99)` | probability | PD28 / DESIGN_417 D5; full-sib shares of the guard's witness occurrences in three support bands, support on pooled Morgan-weighted 1-M units, pooled over three known-truth sets (4,159 occurrences, 73 runs; run-bootstrap intervals 0.54-0.79, 0.91-0.98, 0.97-1.00); every held-out fit changed no guard decision (RELCAL). |
-| `support_bounds` | `(0.5, 0.75)` | share | PD28; support bands of the sibship calibration, unchanged in 4.18 (DESIGN_417 D5). |
-| `sibship_check_partners` | `16` | count | PD28; bounded ring check; 8 and 16 partners match all-partner validation scores. |
-| `reference_triples` | `400` | count | PD28; 400 reference triples give about 0.02 sampling error in bin infeasibility. |
-## science.pedigree.parameters — FamilyTransmissionParameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/family_transmission_parameters.py](../../haplotype_reconstruction/science/pedigree/family_transmission_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
@@ -825,30 +813,16 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `maximum_iterations` | `30` | count | PD29; MAP-EM iteration bound per fit (each step is monotone). |
 | `start_rounds` | `3` | count | PD29; rounds of cross-initialisation between the three models (stops when none improves). |
 | `random_starts` | `3` | count | PD29; data-seeded block perturbations of each model's best paths per round (the review's restarts raised segment likelihoods by up to 32 nats without them). |
-## science.pedigree.parameters — MaterialParameters
+## science.pedigree.map_scale_parameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `unit_morgans` | `1.0` | Morgan | DESIGN_417 D1; one unit per working Morgan, about one meiosis's correlation length (Haldane exp(-2d) = 0.14 at 1 M); adjacent 1-M units correlate 0.12-0.22 for relatives on one chromosome, lag 2 at most 0.04 (CALIB2 section 5). |
-| `tail_morgans` | `0.5` | Morgan | DESIGN_4154 A2 / DESIGN_417 D1; a final piece shorter than half a unit joins the unit before it. |
-| `switch_clip` | `0.499999` | probability | DESIGN_4154 A2; switch probabilities are clipped below 1/2 before the Haldane distance. |
-| `assessable_morgans` | `5.0` | Morgan | MCAL section 4.1 (60 simulated genomes, configured map = generating map, so U in true Morgans; single chromosomes 0.5-15 M; pre-registered one-sided exact tests, clustered by genome); below 5 Morgans nothing is assessed: the low-material rule released non-parents in mixed-family designs at 3.5-5 M (12 of 971 against 0 of 600 at 5-7 M) and in small families; from 5 M every design passes the tested criterion (8 M on its literal point reading). V5 (64 end-to-end cells, g4c5_12): no hold criterion fires below 12 M. Replaces DESIGN_417 rev 3's 3.5 (MCAL: 3.5-5 M in excess). |
-| `standard_morgans` | `12.0` | Morgan | MCAL section 4.2; the released Tier B thresholds apply from 12 working Morgans: below it they released more non-parents than their own reference (multi-chromosome genomes of >= 15 M) in small families (11-12 M: 10 of 486 against 10 of 1,379, p = 0.035) and in parent-free sib-rich designs (10-11 M: 10 releases per 3,808 parentless children against 2 per 6,720, p = 0.008); from 12 M no excess in any design (10 M on the cumulative test; per-design power 0.1-0.4 near the cut, so an empirical calibration, not demonstrated equivalence). V5: rev 3's 9.5 released 4.46 edges per 100 parentless children on sib-rich cells read on a 2.5x long map (hold H2); 12 returns the 9.5-12 M band to the low-material rule, as 4.16.1 (0.11 per 100), and passes the direction positive control (SCORE_g4c5_12, CONTROL_SCORE_g4c5_12). |
-| `tier_a_morgans` | `12.0` | Morgan | MCAL section 4.3; no Tier A non-parent in designs with sequenced parents from 8 M (74,337 Tier A edges at 8-15+ M), but Tier A is assessed only with the released Tier B thresholds, so its effective minimum is standard_morgans (12 M). Parent-free sib-rich designs release Tier A non-parents at 12-13, 13-15 and >= 15 M (2, 2, 1; their >= 15-M reference holds 1), so no higher cut removes them (documented limitation; V5 g4c5_12: 1 such edge in 448 parentless children at 13.7 M). |
-| `low_bootstrap` | `0.95` | fraction | DESIGN_4154 A4; Tier B configuration and parent bootstrap cut-off of the low-material band (assessable_morgans <= U < standard_morgans), where adjacent units of one chromosome are dependent. |
-| `low_leave_one_out` | `1.0` | fraction | DESIGN_4154 A4; every leave-one-unit-out fit must agree in the low-material band. |
-## science.pedigree.parameters
-
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/map_scale_parameters.py](../../haplotype_reconstruction/science/pedigree/map_scale_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `RATE_ESTIMATE_MODES` | `('veto', 'ignore', 'adopt')` | See model | [genetic_map] rate_estimate: what the estimated recombination rates may change (DESIGN_RELEASE section 1). |
-## science.pedigree.parameters — MapScaleParameters
+## science.pedigree.map_scale_parameters — MapScaleParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/map_scale_parameters.py](../../haplotype_reconstruction/science/pedigree/map_scale_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
@@ -864,7 +838,7 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `target_exit_rates` | `(0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3)` | probability per frame | Rev 4 G4 (ii): exit grid of such an excursion. |
 | `error_run_starts` | `(0.0, 0.0003, 0.001, 0.003, 0.01, 0.03)` | probability per frame | Rev 4 er: start probability eps of an error run (the shown state leaves the true transmission state); eps = 0 is the 4-state chain; profiled by maximum likelihood. |
 | `error_run_ends` | `(0.02, 0.1, 0.4)` | probability per frame | Rev 4 er: end probability xi of an error run. |
-| `consistency_alpha` | `0.01` | probability | Rev 5 R5.2: family-wise level of the family-consistency test (Bonferroni over the active families, t(df) reference of the quasi-likelihood z); null calibration 1 of 65 genomes (upper bound 7 %). |
+| `consistency_alpha` | `0.01` | probability | Rev 5 R5.2: family-wise level of the family-consistency test (Bonferroni over the active families, t(df) reference of the quasi-likelihood z, df from the family-within-unit deviance on the material units, 4.21 C11; rev 5 used contigs). Null calibration on units: 1 of 65 development genomes refused (one-sided 95 % upper bound 7 %; the genome contig strata also refuse), 1 of 126 simulated genomes; null families beyond the t(df) 0.995 quantile 0.010. |
 | `drop_margin` | `1.25` | See model | Rev 4/5: with three or more families the most deviant family is dropped when &#124;z&#124; exceeds 1.25 z_crit (an identifiable outlier, e.g. a guard failure), and the test repeats. |
 | `bootstrap_replicates` | `2000` | See model | Rev 5 B_J: percentile-bootstrap replicates of the joint interval (count). |
 | `minimum_interval_units` | `5` | See model | The joint interval needs at least five equal-material units (working Morgans of frame axis) and two families: a percentile bootstrap over fewer units is degenerate. The same minimum as the relatedness estimate's (RateParameters.minimum_interval_units) and the pedigree's assessable material; it replaces rev 5's >= 5 contigs (owner, 13 Nov 2026). On the 195 lab genomes no adopted or usable estimate had fewer than 5 units (matrix f3: 3 units, refused by R2 and the usable floor). |
@@ -872,29 +846,39 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `minimum_events` | `60.0` | expected crossovers | Rev 4/5 R2: adoption needs 60 expected crossovers on the kept families (2 x frame span x rate): about a 25 % half-width (R3) at Poisson precision; the information criterion that replaces rev 5's >= 5 contigs together with the material-unit interval (DESIGN_RELEASE section 4). |
 | `maximum_half_width` | `0.25` | fraction | Rev 4/5 R3: adoption needs a joint 95 % interval half-width of at most 25 % of the estimate. |
 | `usable_minimum_events` | `20.0` | expected crossovers | Review3 SHOULD-FIX 4: a non-adopted estimate may still take part in the veto only with 20 expected crossovers and an interval whose lower end lies above the grid floor; every dev and held-out fallback had >= 46, the two V5 scaffold cells that decided on 19 and 4 events (interval lower end on the floor) are refused. |
-## science.pedigree.parameters — PedigreeParameters
+## science.pedigree.material_parameters — MaterialParameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/material_parameters.py](../../haplotype_reconstruction/science/pedigree/material_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `reverse_conventions` | `False` | See model | PD27; boolean false selects the default explicit arbitrary tie convention. |
-| `preparation` | `PreparationParameters()` | See model | PD27; internal marker-selection and tempering parameter group; units are declared by its fields. |
-| `scoring` | `ScoringParameters()` | See model | PD27; internal projected-transmission parameter group; units are declared by its fields. |
-| `panel` | `PanelParameters()` | See model | PD27; internal bounded-M2-search parameter group; units are declared by its fields. |
-| `exposure` | `ExposureParameters()` | See model | PD27; internal exposure-gate parameter group; units are declared by its fields. |
-| `direction` | `DirectionParameters()` | See model | PD27; internal orientation and family-factor parameter group; units are declared by its fields. |
-| `selection` | `SelectionParameters()` | See model | PD27; internal state-prior and acyclic-search parameter group; units are declared by its fields. |
-| `resampling` | `ResamplingParameters()` | See model | PD27; internal unit-bootstrap parameter group; units are declared by its fields. |
-| `release` | `ReleaseParameters()` | See model | PD27; internal evidence-tier parameter group; units are declared by its fields. |
-| `exclusion` | `ExclusionParameters()` | See model | PD27; internal full-marker exclusion parameter group; units are declared by its fields. |
-| `relationship` | `RelationshipParameters()` | See model | PD27; painting relationship evidence parameters, with units declared by each field. |
-| `family_transmission` | `FamilyTransmissionParameters()` | See model | PD29; family transmission test parameters, with units declared by each field. |
-| `material` | `MaterialParameters()` | See model | DESIGN_417; material units and regime cut-offs, with units declared by each field. |
-| `map_scale` | `MapScaleParameters()` | See model | 4.19 (DESIGN_RELEASE); the painting-based rate estimate and the mode of its use by the material regime, with units declared by each field. |
-## science.pedigree.parameters — ScoringNumerics
+| `unit_morgans` | `1.0` | Morgan | DESIGN_417 D1; one unit per working Morgan, about one meiosis's correlation length (Haldane exp(-2d) = 0.14 at 1 M); adjacent 1-M units correlate 0.12-0.22 for relatives on one chromosome, lag 2 at most 0.04 (CALIB2 section 5). |
+| `tail_morgans` | `0.5` | Morgan | DESIGN_4154 A2 / DESIGN_417 D1; a final piece shorter than half a unit joins the unit before it. |
+| `switch_clip` | `0.499999` | probability | DESIGN_4154 A2; switch probabilities are clipped below 1/2 before the Haldane distance. |
+| `assessable_morgans` | `5.0` | Morgan | MCAL section 4.1 (60 simulated genomes, configured map = generating map, so U in true Morgans; single chromosomes 0.5-15 M; pre-registered one-sided exact tests, clustered by genome); below 5 Morgans nothing is assessed: the low-material rule released non-parents in mixed-family designs at 3.5-5 M (12 of 971 against 0 of 600 at 5-7 M) and in small families; from 5 M every design passes the tested criterion (8 M on its literal point reading). V5 (64 end-to-end cells, g4c5_12): no hold criterion fires below 12 M. Replaces DESIGN_417 rev 3's 3.5 (MCAL: 3.5-5 M in excess). |
+| `standard_morgans` | `12.0` | Morgan | MCAL section 4.2; the released Tier B thresholds apply from 12 working Morgans: below it they released more non-parents than their own reference (multi-chromosome genomes of >= 15 M) in small families (11-12 M: 10 of 486 against 10 of 1,379, p = 0.035) and in parent-free sib-rich designs (10-11 M: 10 releases per 3,808 parentless children against 2 per 6,720, p = 0.008); from 12 M no excess in any design (10 M on the cumulative test; per-design power 0.1-0.4 near the cut, so an empirical calibration, not demonstrated equivalence). V5: rev 3's 9.5 released 4.46 edges per 100 parentless children on sib-rich cells read on a 2.5x long map (hold H2); 12 returns the 9.5-12 M band to the low-material rule, as 4.16.1 (0.11 per 100), and passes the direction positive control (SCORE_g4c5_12, CONTROL_SCORE_g4c5_12). |
+| `tier_a_morgans` | `12.0` | Morgan | MCAL section 4.3; no Tier A non-parent in designs with sequenced parents from 8 M (74,337 Tier A edges at 8-15+ M), but Tier A is assessed only with the released Tier B thresholds, so its effective minimum is standard_morgans (12 M). Parent-free sib-rich designs release Tier A non-parents at 12-13, 13-15 and >= 15 M (2, 2, 1; their >= 15-M reference holds 1), so no higher cut removes them (documented limitation; V5 g4c5_12: 1 such edge in 448 parentless children at 13.7 M). |
+| `low_bootstrap` | `0.95` | fraction | DESIGN_4154 A4; Tier B configuration and parent bootstrap cut-off of the low-material band (assessable_morgans <= U < standard_morgans), where adjacent units of one chromosome are dependent. |
+| `low_leave_one_out` | `1.0` | fraction | DESIGN_4154 A4; every leave-one-unit-out fit must agree in the low-material band. |
+## science.pedigree.numerical_parameters — WinnerNumerics
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/numerical_parameters.py](../../haplotype_reconstruction/science/pedigree/numerical_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `contrast_ulp_factor` | `512.0` | See model | PD11; 512 machine-epsilon units times score magnitude define the rounding tie band. |
+| `noise_floor` | `2.0 ** (-15)` | See model | PD11; absolute tie floor of 2^-15 nats prevents small score perturbations selecting a winner. |
+| `minimum_graph_quantum` | `1e-300` | See model | PD13; positive graph-confidence tie quantum floor of 1e-300 nats. |
+## science.pedigree.numerical_parameters
+
+Source: [haplotype_reconstruction/science/pedigree/numerical_parameters.py](../../haplotype_reconstruction/science/pedigree/numerical_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `WINNER_NUMERICS` | `WinnerNumerics()` | See model | Fixed model numerics are versioned by source identity, not additional user settings. |
+## science.pedigree.numerical_parameters — ScoringNumerics
+
+Source: [haplotype_reconstruction/science/pedigree/numerical_parameters.py](../../haplotype_reconstruction/science/pedigree/numerical_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
@@ -927,14 +911,117 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `selective_frontier_ulps` | `32` | See model | PS22; 32 scaled machine-epsilon units guard best and floor frontiers in selective search. |
 | `pair_null_relative_guard` | `1e-12` | See model | PS15; dimensionless relative padding 1e-12 inflates null-row maxima for conservative pair bounds. |
 | `exclusion_tiny` | `1e-300` | See model | PS20; positive probability floor 1e-300 protects exclusion ratio denominators and bet logarithms. |
-## science.pedigree.parameters — PedigreeWorkspace
+## science.pedigree.numerical_parameters
+
+Source: [haplotype_reconstruction/science/pedigree/numerical_parameters.py](../../haplotype_reconstruction/science/pedigree/numerical_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `SCORING_NUMERICS` | `ScoringNumerics()` | See model | Fixed numerical tolerances for pedigree inference. |
+| `INFORMATIVE_GL_SPREAD` | `SCORING_NUMERICS.informative_gl_spread` | See model | Fixed numerical tolerances for pedigree inference. |
+| `SELECTOR_SWITCH_FLOOR` | `SCORING_NUMERICS.selector_switch_floor` | See model | Fixed numerical tolerances for pedigree inference. |
+| `TRANSMISSION_SWITCH_FLOOR` | `SCORING_NUMERICS.transmission_switch_floor` | See model | Fixed numerical tolerances for pedigree inference. |
+| `HALL_ULPS` | `SCORING_NUMERICS.hall_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `HUB_MASS_TIE` | `SCORING_NUMERICS.hub_mass_tie` | See model | Fixed numerical tolerances for pedigree inference. |
+| `SITE_POLYNOMIAL_THRESHOLD` | `SCORING_NUMERICS.site_polynomial_threshold` | See model | Fixed numerical tolerances for pedigree inference. |
+| `LOG_FLOOR` | `SCORING_NUMERICS.log_floor` | See model | Fixed numerical tolerances for pedigree inference. |
+| `TINY` | `SCORING_NUMERICS.tiny` | See model | Fixed numerical tolerances for pedigree inference. |
+| `FAMILY_EXP_UNDERFLOW` | `SCORING_NUMERICS.family_exp_underflow` | See model | Fixed numerical tolerances for pedigree inference. |
+| `ORDER_MINIMUM_UNIT_WEIGHT` | `SCORING_NUMERICS.order_minimum_unit_weight` | See model | Fixed numerical tolerances for pedigree inference. |
+| `ORDER_VARIANCE_OFFSET` | `SCORING_NUMERICS.order_variance_offset` | See model | Fixed numerical tolerances for pedigree inference. |
+| `DIRECTION_RELIABILITY_GRID` | `SCORING_NUMERICS.direction_reliability_grid` | See model | Fixed numerical tolerances for pedigree inference. |
+| `DIRECTION_COIN_SHARE_GRID` | `SCORING_NUMERICS.direction_coin_share_grid` | See model | Fixed numerical tolerances for pedigree inference. |
+| `JUNCTION_UNREACHABLE_STATE` | `SCORING_NUMERICS.junction_unreachable_state` | See model | Fixed numerical tolerances for pedigree inference. |
+| `JUNCTION_UNREACHABLE_COUNT` | `SCORING_NUMERICS.junction_unreachable_count` | See model | Fixed numerical tolerances for pedigree inference. |
+| `NULL_ROUNDING_ULPS` | `SCORING_NUMERICS.null_rounding_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `BRIDGE_FEASIBILITY_ULPS` | `SCORING_NUMERICS.bridge_feasibility_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `BRIDGE_POST_TOLERANCE_FACTOR` | `SCORING_NUMERICS.bridge_post_tolerance_factor` | See model | Fixed numerical tolerances for pedigree inference. |
+| `BRIDGE_POST_ULPS` | `SCORING_NUMERICS.bridge_post_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `BRIDGE_BISECTION_LIMIT` | `SCORING_NUMERICS.bridge_bisection_limit` | See model | Fixed numerical tolerances for pedigree inference. |
+| `BRIDGE_FOLD_DISCRIMINANT` | `SCORING_NUMERICS.bridge_fold_discriminant` | See model | Fixed numerical tolerances for pedigree inference. |
+| `CERTIFICATE_GL_ULPS` | `SCORING_NUMERICS.certificate_gl_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `SELECTIVE_UPPER_ULPS` | `SCORING_NUMERICS.selective_upper_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `SELECTIVE_UPPER_STATE_FACTOR` | `SCORING_NUMERICS.selective_upper_state_factor` | See model | Fixed numerical tolerances for pedigree inference. |
+| `SELECTIVE_BOUND_ULPS` | `SCORING_NUMERICS.selective_bound_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `SELECTIVE_SUM_ULPS` | `SCORING_NUMERICS.selective_sum_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `SELECTIVE_FRONTIER_ULPS` | `SCORING_NUMERICS.selective_frontier_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
+| `PAIR_NULL_RELATIVE_GUARD` | `SCORING_NUMERICS.pair_null_relative_guard` | See model | Fixed numerical tolerances for pedigree inference. |
+| `EXCLUSION_TINY` | `SCORING_NUMERICS.exclusion_tiny` | See model | Fixed numerical tolerances for pedigree inference. |
+## science.pedigree.parameters — PedigreeParameters
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
+| `reverse_conventions` | `False` | See model | PD27; boolean false selects the default explicit arbitrary tie convention. |
+| `preparation` | `PreparationParameters()` | See model | PD27; internal marker-selection and tempering parameter group; units are declared by its fields. |
+| `scoring` | `ScoringParameters()` | See model | PD27; internal projected-transmission parameter group; units are declared by its fields. |
+| `panel` | `PanelParameters()` | See model | PD27; internal bounded-M2-search parameter group; units are declared by its fields. |
+| `exposure` | `ExposureParameters()` | See model | PD27; internal exposure-gate parameter group; units are declared by its fields. |
+| `direction` | `DirectionParameters()` | See model | PD27; internal orientation and family-factor parameter group; units are declared by its fields. |
+| `selection` | `SelectionParameters()` | See model | PD27; internal state-prior and acyclic-search parameter group; units are declared by its fields. |
+| `resampling` | `ResamplingParameters()` | See model | PD27; internal unit-bootstrap parameter group; units are declared by its fields. |
+| `release` | `ReleaseParameters()` | See model | PD27; internal evidence-tier parameter group; units are declared by its fields. |
+| `exclusion` | `ExclusionParameters()` | See model | PD27; internal full-marker exclusion parameter group; units are declared by its fields. |
+| `relationship` | `RelationshipParameters()` | See model | PD27; painting relationship evidence parameters, with units declared by each field. |
+| `family_transmission` | `FamilyTransmissionParameters()` | See model | PD29; family transmission test parameters, with units declared by each field. |
+| `material` | `MaterialParameters()` | See model | DESIGN_417; material units and regime cut-offs, with units declared by each field. |
+| `map_scale` | `MapScaleParameters()` | See model | 4.19 (DESIGN_RELEASE); the painting-based rate estimate and the mode of its use by the material regime, with units declared by each field. |
+## science.pedigree.relationship_parameters — RelationshipParameters
+
+Source: [haplotype_reconstruction/science/pedigree/relationship_parameters.py](../../haplotype_reconstruction/science/pedigree/relationship_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `failure_region_rate` | `0.1` | 1/Morgan | PD28; one observed painting failure in fourteen Morgans motivates 0.1 regions per Morgan. |
+| `failure_region_length` | `0.05` | Morgan | PD28; observed painting failures span 4–8 cM, shorter than full-sib IBD0 segments. |
+| `isolated_error` | `0.001` | probability/bin | PD28; scale 1-q per bin; at most 0.03% wrong bins; no uninformative-bin penalty. 4.21 (ADVICE2 11.1): the FLOOR of the per-unit, per-bin error min(1/2, max(0.001, sum of the members' u)), u the reference painting's probability that a member's released pair is wrong. |
+| `withholding_score` | `float(np.log(1000.0))` | nats | PD23; log(1000) survives higher-prior sensitivity; with the 4.18 priors one top-band witness withholds only with a pair margin below -2.31 nats. |
+| `sibship_prior` | `(0.67, 0.96, 0.99)` | probability | PD28 / DESIGN_417 D5; full-sib shares of the guard's witness occurrences in three support bands, support on pooled Morgan-weighted 1-M units, pooled over three known-truth sets (4,159 occurrences, 73 runs; run-bootstrap intervals 0.54-0.79, 0.91-0.98, 0.97-1.00); every held-out fit changed no guard decision (RELCAL). |
+| `support_bounds` | `(0.5, 0.75)` | share | PD28; support bands of the sibship calibration, unchanged in 4.18 (DESIGN_417 D5). |
+| `sibship_check_partners` | `16` | count | PD28; bounded ring check; 8 and 16 partners match all-partner validation scores. |
+| `reference_triples` | `400` | count | PD28; 400 reference triples give about 0.02 sampling error in bin infeasibility. |
+## science.pedigree.scoring_parameters — PreparationParameters
+
+Source: [haplotype_reconstruction/science/pedigree/scoring_parameters.py](../../haplotype_reconstruction/science/pedigree/scoring_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `markers_per_bin` | `10` | See model | PS01; select at most 10 evenly spaced markers per painting bin for transmission scoring. |
+| `markers_per_information_block` | `100` | See model | PS01; group at least 100 selected markers per information block for tempering. |
+| `effective_markers_per_information_block` | `3.0` | See model | PS01; cap each information block at 3 effective markers through its emission exponent. |
+| `information_temperature` | `'confidence'` | See model | 4.21 B1 (ADVICE2 11.3, 14.1 item 7): the tempered view's exponent x = 1 / (1 + (n - 1) r_T) for n informative markers in the group, r_T = (d - 1) / (reference_snps_per_bin - 1) with d the painting's CONFIDENCE divisor (confidence), or its path divisor (path); fixed is 4.20's min(3, n) / n. r_T is a TRANSFERRED working temperature: estimated by this run under the painting's model, not the pedigree's (at d = 128 the implied correlation exceeds 1); no calibrated pedigree evidence is claimed. For a fixed path the net coefficient on the log emissions is (1 + x) / 2 >= 1/2. |
+## science.pedigree.scoring_parameters — ScoringParameters
+
+Source: [haplotype_reconstruction/science/pedigree/scoring_parameters.py](../../haplotype_reconstruction/science/pedigree/scoring_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `source_gap_support_sites` | `1` | See model | PS04; 1 informative selected marker supplies full adjacent-bin support; less support mixes a uniform selector excursion. |
+| `bridge_postcheck_tolerance` | `2e-13` | See model | PS04; dimensionless base tolerance 2e-13 for bridge probability and marginal residual checks. |
+| `bridge_max_iterations` | `128` | See model | PS04; at most 128 bisection iterations for the maximum-entropy bridge root. |
+| `null_prior_samples` | `1.0` | See model | PS04; 1 uniform pseudo-sample keeps every founder state possible in the leave-child-out null source. |
+## science.pedigree.scoring_parameters — PanelParameters
+
+Source: [haplotype_reconstruction/science/pedigree/scoring_parameters.py](../../haplotype_reconstruction/science/pedigree/scoring_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `max_pairs_per_child` | `256` | See model | PS07; nominal cap of 256 M2 pairs per child, every retained eligible pair below it (no relevance screen, DESIGN_417 S8, owner 14 Nov 2026), the largest full-data bounds above it; boundary ties and unknown bounds remain, and binding is flagged. |
+| `pair_bound_high_mass` | `0.01` | See model | PS07; probability-mass cutoff 0.01 for separate named-state groups; controls bound tightness and cost. |
+| `information_tempering_power` | `0.5` | See model | PS07; dimensionless exponent 0.5 on information-block count sets chromosome softmax temperature. |
+| `maximum_contig_weight_ratio` | `4.0` | See model | PS07; dimensionless ratio 4 clips sqrt(marker count) relative to its median before normalizing weights. |
+| `rank_weight` | `0.35` | See model | PS07; probability weight 0.35 for tied-rank evidence in diagnostic utility; the remainder uses contaminated softmax. |
+| `chromosome_contamination` | `0.02` | See model | PS07; probability weight 0.02 of the uniform eligible-parent distribution in chromosome diagnostic utility. |
+## science.pedigree.workspace_parameters — PedigreeWorkspace
+
+Source: [haplotype_reconstruction/science/pedigree/workspace_parameters.py](../../haplotype_reconstruction/science/pedigree/workspace_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
 | `relationship_sequence_chunk` | `32768` | count | PD28; bound binary sequence workspaces per contig task; execution grain only. |
 | `common_emission_cache_bytes` | `256 << 20` | See model | PS09; 268435456 bytes is the cutoff for retaining common child-emission caches. |
+| `class_transfer_cache_bytes` | `1 << 30` | See model | LR phase 2 Tier 2; 1073741824 bytes bound one child batch's class-transfer cache of the read state (read_transfer.class_transfers: bins x 2 views x S^2 x C^2 float64 per child); a child whose cache exceeds it is scored per site (the same values). |
 | `bound_workspace_bytes` | `512 << 20` | See model | PS15; workspace target 536870912 bytes sizes pair-bound batches without limiting concurrency. |
 | `bound_batch_rows` | `4000000` | See model | PS15; at most 4000000 pair-bound workspace rows per batch. |
 | `exclusion_pattern_limit` | `1024` | See model | PS20; cache at most 1024 distinct genotype-likelihood patterns per sample before direct fallback. |
@@ -944,53 +1031,24 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | `family_transpose_block` | `64` | See model | PD09; transpose cavity messages in blocks of 64 samples for contiguous child reads. |
 | `selective_bound_group_bins` | `8` | See model | PS22; group 8 consecutive bins when constructing selective-bound geometry. |
 | `exclusion_dyad_batch` | `256` | See model | PS20; batches of 256 dyads bound exclusion scanner workspaces. |
-## science.pedigree.parameters
+## science.pedigree.workspace_parameters
 
-Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
+Source: [haplotype_reconstruction/science/pedigree/workspace_parameters.py](../../haplotype_reconstruction/science/pedigree/workspace_parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `SCORING_NUMERICS` | `ScoringNumerics()` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `PEDIGREE_WORKSPACE` | `PedigreeWorkspace()` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `INFORMATIVE_GL_SPREAD` | `SCORING_NUMERICS.informative_gl_spread` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `SELECTOR_SWITCH_FLOOR` | `SCORING_NUMERICS.selector_switch_floor` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `TRANSMISSION_SWITCH_FLOOR` | `SCORING_NUMERICS.transmission_switch_floor` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `HALL_ULPS` | `SCORING_NUMERICS.hall_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `HUB_MASS_TIE` | `SCORING_NUMERICS.hub_mass_tie` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `SITE_POLYNOMIAL_THRESHOLD` | `SCORING_NUMERICS.site_polynomial_threshold` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `LOG_FLOOR` | `SCORING_NUMERICS.log_floor` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `COMMON_EMISSION_CACHE_BYTES` | `PEDIGREE_WORKSPACE.common_emission_cache_bytes` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `TINY` | `SCORING_NUMERICS.tiny` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `FAMILY_EXP_UNDERFLOW` | `SCORING_NUMERICS.family_exp_underflow` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `ORDER_MINIMUM_UNIT_WEIGHT` | `SCORING_NUMERICS.order_minimum_unit_weight` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `ORDER_VARIANCE_OFFSET` | `SCORING_NUMERICS.order_variance_offset` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `DIRECTION_RELIABILITY_GRID` | `SCORING_NUMERICS.direction_reliability_grid` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `DIRECTION_COIN_SHARE_GRID` | `SCORING_NUMERICS.direction_coin_share_grid` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `JUNCTION_UNREACHABLE_STATE` | `SCORING_NUMERICS.junction_unreachable_state` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `JUNCTION_UNREACHABLE_COUNT` | `SCORING_NUMERICS.junction_unreachable_count` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `BOUND_WORKSPACE_BYTES` | `PEDIGREE_WORKSPACE.bound_workspace_bytes` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `BOUND_BATCH_ROWS` | `PEDIGREE_WORKSPACE.bound_batch_rows` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `EXCLUSION_PATTERN_LIMIT` | `PEDIGREE_WORKSPACE.exclusion_pattern_limit` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `NULL_ROUNDING_ULPS` | `SCORING_NUMERICS.null_rounding_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `BRIDGE_FEASIBILITY_ULPS` | `SCORING_NUMERICS.bridge_feasibility_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `BRIDGE_POST_TOLERANCE_FACTOR` | `SCORING_NUMERICS.bridge_post_tolerance_factor` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `BRIDGE_POST_ULPS` | `SCORING_NUMERICS.bridge_post_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `BRIDGE_BISECTION_LIMIT` | `SCORING_NUMERICS.bridge_bisection_limit` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `BRIDGE_FOLD_DISCRIMINANT` | `SCORING_NUMERICS.bridge_fold_discriminant` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `CERTIFICATE_GL_ULPS` | `SCORING_NUMERICS.certificate_gl_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `SELECTIVE_UPPER_ULPS` | `SCORING_NUMERICS.selective_upper_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `SELECTIVE_UPPER_STATE_FACTOR` | `SCORING_NUMERICS.selective_upper_state_factor` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `SELECTIVE_BOUND_ULPS` | `SCORING_NUMERICS.selective_bound_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `SELECTIVE_SUM_ULPS` | `SCORING_NUMERICS.selective_sum_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `SELECTIVE_FRONTIER_ULPS` | `SCORING_NUMERICS.selective_frontier_ulps` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `PAIR_NULL_RELATIVE_GUARD` | `SCORING_NUMERICS.pair_null_relative_guard` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `EXCLUSION_TINY` | `SCORING_NUMERICS.exclusion_tiny` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `EMISSION_SAMPLE_BLOCK` | `PEDIGREE_WORKSPACE.emission_sample_block` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `FAMILY_LANES_PER_THREAD` | `PEDIGREE_WORKSPACE.family_lanes_per_thread` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `FAMILY_CLAIM_WORK` | `PEDIGREE_WORKSPACE.family_claim_work` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `FAMILY_TRANSPOSE_BLOCK` | `PEDIGREE_WORKSPACE.family_transpose_block` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `SELECTIVE_BOUND_GROUP_BINS` | `PEDIGREE_WORKSPACE.selective_bound_group_bins` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
-| `EXCLUSION_DYAD_BATCH` | `PEDIGREE_WORKSPACE.exclusion_dyad_batch` | See model | Bind the pedigree decision rules to explicit, immutable parameters. |
+| `PEDIGREE_WORKSPACE` | `PedigreeWorkspace()` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `COMMON_EMISSION_CACHE_BYTES` | `PEDIGREE_WORKSPACE.common_emission_cache_bytes` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `CLASS_TRANSFER_CACHE_BYTES` | `PEDIGREE_WORKSPACE.class_transfer_cache_bytes` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `BOUND_WORKSPACE_BYTES` | `PEDIGREE_WORKSPACE.bound_workspace_bytes` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `BOUND_BATCH_ROWS` | `PEDIGREE_WORKSPACE.bound_batch_rows` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `EXCLUSION_PATTERN_LIMIT` | `PEDIGREE_WORKSPACE.exclusion_pattern_limit` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `EMISSION_SAMPLE_BLOCK` | `PEDIGREE_WORKSPACE.emission_sample_block` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `FAMILY_LANES_PER_THREAD` | `PEDIGREE_WORKSPACE.family_lanes_per_thread` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `FAMILY_CLAIM_WORK` | `PEDIGREE_WORKSPACE.family_claim_work` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `FAMILY_TRANSPOSE_BLOCK` | `PEDIGREE_WORKSPACE.family_transpose_block` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `SELECTIVE_BOUND_GROUP_BINS` | `PEDIGREE_WORKSPACE.selective_bound_group_bins` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+| `EXCLUSION_DYAD_BATCH` | `PEDIGREE_WORKSPACE.exclusion_dyad_batch` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 ## science.phase.parameters — PhaseParameters
 
 Source: [haplotype_reconstruction/science/phase/parameters.py](../../haplotype_reconstruction/science/phase/parameters.py).
@@ -1005,10 +1063,10 @@ Source: [haplotype_reconstruction/science/phase/parameters.py](../../haplotype_r
 | `junction_min_samples` | `2` | samples | FP10; require 2 distinct switching samples to nominate a founder-identity junction. |
 | `junction_pin_nats` | `10.0` | nats | FP10; require 10 nats of parental own-read evidence per flank to pin a homologue. |
 | `junction_pin_reference_bins` | `10` | reference windows | FP10; inspect up to 10 painting reference windows per flank, stopping at parental label changes. |
-| `site_deviation` | `0.001` | probability | FP16; genotype-departure mixture probability 0.001, a working value chosen on validation simulations. |
 | `genotype_posterior` | `0.9` | probability | FP17-FP19; probability cutoff 0.9 for genotype calls and informative heterozygosity. |
 | `phase_posterior` | `0.99` | probability | FP17-FP18/FP21; probability cutoff 0.99 for ordered heterozygote and meiosis-chain release. |
 | `set_posterior` | `0.999` | probability | FP08/FP18-FP19; probability cutoff 0.999 for phase-set continuation; its log odds also gate parental pairing moves. |
+| `set_site_deviation` | `0.001` | probability | 4.20's working site departure against a uniform genotype, kept for the phase-set statistic only (4.21 D3: the run's outlier rate capped every common heterozygote below set_posterior). |
 | `protected_intervals` | `()` | bp | FP02; supplied closed reference-order breakpoint intervals in bp; empty means no protected intervals. |
 ## science.phase.parameters
 
@@ -1068,25 +1126,18 @@ Source: [haplotype_reconstruction/science/refit/parameters.py](../../haplotype_r
 | `REFIT_TIE_QUANTUM_PER_CARRIER` | `2.0 ** (-18)` | See model | Settings of the founder refit (a conditional correction of the founder alleles given the painting). |
 | `SITE_TILE` | `1024` | See model | Sites per independent parallel task; each task owns one founder-pair table. |
 | `STABLE_SORT_COMPARISON_LIMIT` | `4096` | See model | Maximum keys for stable comparison sort (keys); depth <=12 beats eight radix passes here. Larger arrays use fixed-width radix sorting to keep round ordering linear in candidate count. |
+| `CARRIER_CLASS_EDGES` | `(2, 3, 5, 9, 17, 33)` | See model | 4.21 acceptance (ADVICE2 section 12): a called cell's prior error p_c is estimated per contig and per carrier class (scoring carriers at the painted state); these declare the classes and the estimator's grid, not tuned values. |
+| `MINIMUM_CLASS_CELLS` | `4096` | See model | Settings of the founder refit (a conditional correction of the founder alleles given the painting). |
+| `GAIN_BIN_WIDTH` | `0.05` | See model | Settings of the founder refit (a conditional correction of the founder alleles given the painting). |
+| `GAIN_LIMIT` | `60.0` | See model | Settings of the founder refit (a conditional correction of the founder alleles given the painting). |
 ## science.refit.parameters — RefitParameters
 
 Source: [haplotype_reconstruction/science/refit/parameters.py](../../haplotype_reconstruction/science/refit/parameters.py).
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `minimum_gain_nats` | `5.0` | nats | Minimum robust likelihood gain per changed allele cell (nats per cell); provides move hysteresis, with twice the gain required for a two-row move. |
 | `coordinate_sweeps` | `3` | 1 | Maximum single-row and two-row coordinate sweeps per site (sweeps); ends sooner if a sweep changes nothing. |
-| `fill_min_supporters` | `2` | 1 | Minimum painted carriers whose own reads favour a filled allele (samples); supplements the likelihood-gain requirement for an unknown cell. |
-## science.relatedness.parameters — AlleleFrequencyParameters
-
-Source: [haplotype_reconstruction/science/relatedness/parameters.py](../../haplotype_reconstruction/science/relatedness/parameters.py).
-
-| Name | Default expression | Units | Provenance |
-|---|---|---|---|
-| `iterations` | `6` | See model | Hardy-Weinberg EM updates per site (iterations); fixes the allele-frequency estimation schedule. |
-| `initial` | `0.5` | See model | Initial ALT frequency (probability); starts the sitewise EM at equal REF and ALT mass. |
-| `clip` | `0.0001` | See model | Lower ALT-frequency bound and distance from one (probability); keeps genotype priors away from zero. |
-| `total_floor` | `1e-300` | See model | Minimum genotype-weight sum (probability); prevents division by zero in the EM posterior. |
+| `min_supporters` | `2` | 1 | Minimum painted carriers whose own reads favour a change (samples): a declared identification rule (ADVICE2 12.2): with one carrier a wrong allele and a sample that does not carry the row are the same observation. |
 ## science.relatedness.parameters — FamilyParameters
 
 Source: [haplotype_reconstruction/science/relatedness/parameters.py](../../haplotype_reconstruction/science/relatedness/parameters.py).
@@ -1216,7 +1267,6 @@ Source: [haplotype_reconstruction/science/selection/parameters.py](../../haploty
 |---|---|---|---|
 | `posterior_threshold` | `0.99` | probability | Release a context-refitted allele only when its site posterior reaches 0.99. |
 | `min_support` | `2.0` | samples or expected carrier mass | Require context carrier count or mass support of 2. |
-| `emission_mix` | `0.01` | probability | Uniform genotype mixture weight 0.01 in bin-level carrier emissions. |
 ## science.selection.parameters — SelectionParameters
 
 Source: [haplotype_reconstruction/science/selection/parameters.py](../../haplotype_reconstruction/science/selection/parameters.py).
@@ -1284,6 +1334,8 @@ Source: [haplotype_reconstruction/simulation/parameters.py](../../haplotype_reco
 | `READS_BYTES_PER_CELL` | `48` | See model | Bytes per sample-site cell in the reported read working-set estimate. |
 | `READS_WORKER_BYTES` | `1 << 30` | See model | Bytes of fixed worker allowance in the reported read working-set estimate. |
 | `READ_BLOCKS_PER_CORE` | `2` | See model | Sample blocks per allocated CPU; execution grain, with independent sample streams. |
+| `READ_BATCH_INCIDENCES` | `1 << 24` | See model | One sample's reads are drawn in batches so the samplers' working memory is bounded at any depth (unbatched, one sample's chr19 long reads at 1000x needed ~25 GiB). About 100 bytes of arrays per read-site incidence and 80 per read keep a batch near 2.4 GiB, under the memory per CPU of common compute nodes. A sample whose reads fit in one batch draws exactly as unbatched (reads.py). Expected read-site incidences per batch, counted before target thinning. |
+| `READ_BATCH_READS` | `1 << 23` | See model | Reads (fragments) per batch at most, for designs with few sites per read. |
 | `SOURCE_BYTES_PER_SITE` | `3` | See model | Bytes per source-site cell: derived, indexed and REF-coded mutation panels. |
 | `EXAMPLE_HAPLOTYPES` | `6` | See model | Founder haplotype count for the synthetic onboarding example. |
 | `EXAMPLE_COHORTS` | `(20, 30, 30)` | See model | Individuals in each successive cohort of the synthetic example. |
@@ -1324,6 +1376,7 @@ Source: [haplotype_reconstruction/simulation/parameters.py](../../haplotype_reco
 | `SPURIOUS_FRACTION` | `0.0` | See model | Share of written sites without a genealogical ALT allele, in [0, 1). |
 | `SITE_LOSS_FINE_FRACTION` | `0.0` | See model | Impaired share of independent fine windows, dimensionless, in [0, 1). |
 | `SITE_LOSS_FINE_WINDOW_BP` | `0` | See model | bp; positive when the fine impairment fraction is positive. |
+| `UNCALLED_BASE_PROBABILITY` | `0.0` | See model | Per covered base, the dimensionless probability of falling outside REF/ALT in the short-read samplers. Default zero preserves the fully called short-read model. Positive values test intermittent loss at fixed coverage. |
 | `LONG_READ_MEAN_BP` | `0.0` | See model | Long-read mode of the read sampler (simulation/reads.py), off while long_read_mean_bp is zero. Values are the generating defaults of [simulation.reads] and the long_read_cohort preset; the preset file states its calibration. bp; mean read length; 0 = off (the paired-end and independent-site samplers apply). |
 | `LONG_READ_LENGTH_SIGMA` | `0.9` | See model | log-scale SD of the lognormal read-length law; ONT ligation libraries are broad. |
 | `LONG_READ_MIN_BP` | `500` | See model | bp; lower clipping bound of the read-length law (shorter reads are filtered upstream). |

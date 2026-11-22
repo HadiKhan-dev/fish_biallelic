@@ -19,9 +19,9 @@ from ...contracts.pedigree import M0, Alternatives, GraphSelection, LocalGraphCh
 from ...core import ties as tie_rules
 from ...core.errors import InvariantError
 from ...core.kernels import kernel
-from .kernels.signatures import OVERLOADS
+from .kernels.decision import OVERLOADS
+from .numerical_parameters import WINNER_NUMERICS
 from .orientation import Orientation, parent_role_probability
-from .parameters import WINNER_NUMERICS
 from .ties import contrast_tolerance, unique_finite_winner, winner_tolerance
 
 __all__ = ["is_acyclic", "select_local", "select_acyclic", "tie_conflict_children"]

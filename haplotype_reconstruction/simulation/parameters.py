@@ -11,6 +11,12 @@ FRAGMENT_SD_LIMIT: int = 6  # Standard deviations above the mean; upper fragment
 READS_BYTES_PER_CELL: int = 48  # Bytes per sample-site cell in the reported read working-set estimate.
 READS_WORKER_BYTES: int = 1 << 30  # Bytes of fixed worker allowance in the reported read working-set estimate.
 READ_BLOCKS_PER_CORE: int = 2  # Sample blocks per allocated CPU; execution grain, with independent sample streams.
+# One sample's reads are drawn in batches so the samplers' working memory is bounded at any depth (unbatched, one
+# sample's chr19 long reads at 1000x needed ~25 GiB). About 100 bytes of arrays per read-site incidence and 80 per read
+# keep a batch near 2.4 GiB, under the memory per CPU of common compute nodes. A sample whose reads fit in one batch
+# draws exactly as unbatched (reads.py).
+READ_BATCH_INCIDENCES: int = 1 << 24  # Expected read-site incidences per batch, counted before target thinning.
+READ_BATCH_READS: int = 1 << 23  # Reads (fragments) per batch at most, for designs with few sites per read.
 SOURCE_BYTES_PER_SITE: int = 3  # Bytes per source-site cell: derived, indexed and REF-coded mutation panels.
 EXAMPLE_HAPLOTYPES: int = 6  # Founder haplotype count for the synthetic onboarding example.
 EXAMPLE_COHORTS: tuple[int, ...] = (20, 30, 30)  # Individuals in each successive cohort of the synthetic example.
@@ -24,6 +30,8 @@ __all__ = [
     "READS_BYTES_PER_CELL",
     "READS_WORKER_BYTES",
     "READ_BLOCKS_PER_CORE",
+    "READ_BATCH_INCIDENCES",
+    "READ_BATCH_READS",
     "SOURCE_BYTES_PER_SITE",
     "EXAMPLE_HAPLOTYPES",
     "EXAMPLE_COHORTS",
@@ -99,6 +107,11 @@ SITE_LOSS_FINE_FRACTION: float = 0.0  # Impaired share of independent fine windo
 SITE_LOSS_FINE_WINDOW_BP: int = 0  # bp; positive when the fine impairment fraction is positive.
 
 __all__ += ["SITE_LOSS_FINE_FRACTION", "SITE_LOSS_FINE_WINDOW_BP"]
+
+# Per covered base, the dimensionless probability of falling outside REF/ALT in the short-read samplers.
+# Default zero preserves the fully called short-read model. Positive values test intermittent loss at fixed coverage.
+UNCALLED_BASE_PROBABILITY: float = 0.0
+__all__ += ["UNCALLED_BASE_PROBABILITY"]
 
 # Long-read mode of the read sampler (simulation/reads.py), off while long_read_mean_bp is zero. Values are the
 # generating defaults of [simulation.reads] and the long_read_cohort preset; the preset file states its calibration.
