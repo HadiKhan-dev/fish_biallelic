@@ -22,6 +22,8 @@ FILES = {
     "relatedness.HALF_SIB_COLUMNS": "relatedness/half_sib_links.csv",
     "evidence.SAMPLE_COLUMNS": "quality/samples.csv",
     "evidence.SEGMENT_COLUMNS": "quality/segments.csv",
+    "quality.FLAGGED_COLUMNS": "quality/flagged_libraries.csv",
+    "quality.CONTAMINATION_COLUMNS": "quality/contamination.csv",
     "painting.FOUNDER_SUPPORT_COLUMNS": "painting/founder_support.csv",
     "painting.FOUNDER_SUPPORT_WINDOW_COLUMNS": "painting/founder_support_windows.csv",
     "painting.ASSEMBLY_SEARCH_PREFIX_COLUMNS": "painting/assembly_search.csv (prefix)",

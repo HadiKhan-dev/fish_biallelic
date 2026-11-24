@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import numba
 import numpy as np
 from numba import prange
 
@@ -22,7 +23,7 @@ from . import exclusion
 from .exclusion_parameters import ExclusionParameters
 from .kernels.exclusion import OVERLOADS
 
-MODEL = "completed-window-exclusion-v1"
+MODEL = "completed-window-observation-exclusion-v1"  # 4.22 A11: cells mixed against the cohort law
 
 
 def observation_words(observed):
@@ -56,33 +57,31 @@ def _observed_counts(words, rows):
 def _completed_windows(
     gl,
     observed,
-    codes,
-    catalog,
-    counts,
+    cohort,
+    rates,
     rows,
     starts,
     stops,
     start_index,
     original_window,
-    deltas,
     bets,
     log_denominator,
     log_chromosomes,
     threshold,
     certifiable,
 ):
+    """Window/bet log products of each dyad (rows [R, 2]) under the observation model: every site's ratio from the
+    two samples' likelihoods gl [N, S, 3] mixed against cohort [S, 3] at their own rates [N] (exclusion._ratio).
+    The ratio depends on the site's cohort law, so there is no cache over repeated likelihood patterns; dyads are
+    independent and run in parallel."""
     lower = np.full(len(rows), -np.inf)
     visited = np.zeros(len(rows), np.int64)
     is_certificate = np.zeros(len(rows), np.bool_)
     eps = np.finfo(np.float64).eps
     for row in prange(len(rows)):
         a, b = rows[row]
-        delta = deltas[row]  # A11: the dyad's own allowance (one constant in 4.20)
-        encoded = counts[a] >= 0 and counts[b] >= 0
-        width = counts[b] if encoded else 0
-        entries = counts[a] * width if encoded else 0
-        table = np.empty((entries, len(bets)))
-        seen = np.zeros(entries, np.bool_)
+        ea = rates[a]
+        eb = rates[b]
         prefix = np.zeros(len(bets))
         absolute = np.zeros(len(bets))
         saved = np.empty((len(starts), len(bets)))
@@ -122,42 +121,24 @@ def _completed_windows(
                 break
             if not observed[a, site] or not observed[b, site]:
                 continue
-            if encoded:
-                ca, cb = codes[a, site], codes[b, site]
-                pair = ca * width + cb
-                if not seen[pair]:
-                    ratio = exclusion._ratio(
-                        catalog[a, ca, 0],
-                        catalog[a, ca, 1],
-                        catalog[a, ca, 2],
-                        catalog[b, cb, 0],
-                        catalog[b, cb, 1],
-                        catalog[b, cb, 2],
-                        delta,
-                    )
-                    for h in range(len(bets)):
-                        table[pair, h] = exclusion._log_bet(ratio, bets[h])
-                    seen[pair] = True
-                for h in range(len(bets)):
-                    value = table[pair, h]
-                    prefix[h] += value
-                    if can_certify:
-                        absolute[h] += abs(value)
-            else:
-                ratio = exclusion._ratio(
-                    gl[a, site, 0],
-                    gl[a, site, 1],
-                    gl[a, site, 2],
-                    gl[b, site, 0],
-                    gl[b, site, 1],
-                    gl[b, site, 2],
-                    delta,
-                )
-                for h in range(len(bets)):
-                    value = exclusion._log_bet(ratio, bets[h])
-                    prefix[h] += value
-                    if can_certify:
-                        absolute[h] += abs(value)
+            ratio = exclusion._ratio(
+                gl[a, site, 0],
+                gl[a, site, 1],
+                gl[a, site, 2],
+                gl[b, site, 0],
+                gl[b, site, 1],
+                gl[b, site, 2],
+                cohort[site, 0],
+                cohort[site, 1],
+                cohort[site, 2],
+                ea,
+                eb,
+            )
+            for h in range(len(bets)):
+                value = exclusion._log_bet(ratio, bets[h])
+                prefix[h] += value
+                if can_certify:
+                    absolute[h] += abs(value)
         is_certificate[row] = certified
         if not certified:
             # Every window has completed. Reduce in the declared bet/window
@@ -180,20 +161,34 @@ def score_contig(
     log_weight: float,
     sample_count: int,
     claim_threads: Callable[[], int | None] = lambda: None,
-    sample_rates: np.ndarray | None = None,
     *,
+    cohort: np.ndarray,
+    sample_rates: np.ndarray,
     certifiable: np.ndarray | None = None,
 ) -> tuple[ExclusionEvidence, dict[str, int | float]]:
     """Bounded scorer with exact fallback; a certificate proves log w_k + log E_k >= threshold (``log_weight`` =
-    log w_k, the contig's fixed weight in the genome e-value, DESIGN_417 D9). A11 (4.21, ADVICE2 14.1 item 9): with
-    ``sample_rates`` [N] each dyad (x, y) scores at delta = max(genotype_replacement_probability, e_x + e_y), the two
-    samples' own outlier-rate point estimates; without them every dyad at the constant (4.20). A working exclusion
-    score: on identical inputs, with delta >= the constant, every site ratio falls, so every exclusion statistic is at
-    most 4.20's (the change can only remove exclusions); no error control beyond 4.20's test is claimed."""
+    log w_k, the contig's fixed weight in the genome e-value, DESIGN_417 D9).
+
+    4.22 A11 (owner, 18 Nov; lab422/r4a): every site is scored under the observation model (exclusion._ratio), each
+    cell mixed against the site's cohort genotype frequencies ``cohort`` [S, 3] at its sample's own outlier rate
+    ``sample_rates`` [N] (the painting calibration's per-sample point estimates), with no replacement term and no
+    floor. On identical inputs every site ratio is at least (1 - e_x)(1 - e_y) times 4.21's (its allowance
+    max(0.01, e_x + e_y) bounded the redraws from above), so the statistic can add exclusions relative to 4.21; it
+    claims no error control for products over dependent sites beyond 4.20's test. Shared reads break its per-cell
+    model: the caller withholds certification there (``certifiable``)."""
     if not (np.isfinite(log_weight) and log_weight <= 0.0) or sample_count < 1:
         raise InputError("a finite log weight <= 0 and a positive sample count are required")
-    if certifiable is None:
-        certifiable = np.ones(len(dyads), dtype=np.bool_)
+    rates = np.ascontiguousarray(sample_rates, dtype=np.float64)
+    if rates.ndim != 1 or rates.shape[0] != likelihoods.shape[0]:
+        raise InputError("per-sample outlier rates must cover every sample of the likelihoods")
+    if not np.all((rates >= 0.0) & (rates < 1.0)):
+        raise InputError("per-sample outlier rates are probabilities in [0, 1)")
+    cohort = np.array(cohort, dtype=np.float64, order="C")  # small [S, 3]: a writable contiguous copy
+    if cohort.shape != (likelihoods.shape[1], 3):
+        raise InputError("cohort genotype frequencies must cover every site of the likelihoods")
+    rates = rates.copy()
+    certifiable = (np.ones(len(dyads), dtype=np.bool_) if certifiable is None
+                   else np.array(certifiable, dtype=np.bool_, order="C"))
     threshold = exclusion.log_threshold(sample_count, config.alpha)
     spans = exclusion.physical_windows(positions, config.window_widths_bp)
     starts = np.unique(spans[:, 0])
@@ -206,42 +201,34 @@ def score_contig(
     visited = np.empty(len(dyads), np.int64)
     certified = np.empty(len(dyads), np.bool_)
     claim_threads()
-    codes, catalog, counts = exclusion._encode_patterns(likelihoods, observed, exclusion.MAX_PATTERNS)
     words = observation_words(observed)
-    jointly_observed = _observed_counts(words, dyads)
+    jointly_observed = _observed_counts(words, np.array(dyads, dtype=np.int64, order="C"))
     del words
-    floor = float(config.genotype_replacement_probability)
-    if sample_rates is None:
-        deltas = np.full(len(dyads), floor)
-    else:
-        rates = np.asarray(sample_rates, dtype=np.float64)
-        if len(dyads) and int(dyads.max()) >= len(rates):
-            raise InputError("per-sample outlier rates do not cover the dyads' samples")
-        deltas = np.maximum(floor, rates[dyads[:, 0]] + rates[dyads[:, 1]]) if len(dyads) else np.zeros(0)
-    deltas = np.ascontiguousarray(deltas, dtype=np.float64)
     for start in range(0, len(dyads), exclusion.DYAD_BATCH):
         claim_threads()
-        stop = start + exclusion.DYAD_BATCH
-        lower[start:stop], visited[start:stop], certified[start:stop] = _completed_windows(
+        stop = min(start + exclusion.DYAD_BATCH, len(dyads))
+        # Deal the batch's dyads round-robin over the team's contiguous prange blocks: neighbouring dyads (one child's
+        # candidates) cost alike, and certificates make costs very unequal. Dyads are independent, so the values
+        # do not depend on the dealing (scatter back by the same permutation).
+        team = max(1, numba.get_num_threads())
+        dealt = np.concatenate([np.arange(start + k, stop, team) for k in range(min(team, stop - start))])
+        lower[dealt], visited[dealt], certified[dealt] = _completed_windows(
             likelihoods,
             observed,
-            codes,
-            catalog,
-            counts,
-            dyads[start:stop],
+            cohort,
+            rates,
+            np.array(dyads[dealt], dtype=np.int64, order="C"),
             starts,
             stops,
             start_index,
             order,
-            np.ascontiguousarray(deltas[start:stop]),
             bets,
             log_denominator,
             -float(log_weight),
             threshold,
-            certifiable[start:stop],
+            np.ascontiguousarray(certifiable[dealt]),
         )
     upper = np.where(certified, np.inf, lower)
-    fallback_samples = int(np.count_nonzero(counts < 0))
     work = dict(
         dyads=len(dyads),
         certified=int(certified.sum()),
@@ -252,5 +239,5 @@ def score_contig(
         final_log_weight=float(log_weight),
         threshold=threshold,
     )
-    return ExclusionEvidence(contig, dyads, lower, jointly_observed, len(positions), fallback_samples, upper,
+    return ExclusionEvidence(contig, dyads, lower, jointly_observed, len(positions), upper,
                              log_weight=float(log_weight), certifiable=certifiable), work

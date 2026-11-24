@@ -107,7 +107,7 @@ def child_evidence(
         graph_parents[child] = _row_parents(rows, graph_row)
         if graph_row >= 0:
             graph_state[child] = states[graph_row]
-        graph_conflict[child] = bool(full.tie_conflict[child] or (row >= 0 and graph_row != row))
+        graph_conflict[child] = bool(row >= 0 and graph_row != row)
         if state != UNRESOLVED:
             values["state_bootstrap"][child] = boot.fraction(boot.local_state[child, state])
             values["state_loco"][child] = loco.fraction(loco.local_state[child, state])
@@ -201,7 +201,6 @@ def tier_calls(
             passed
             and row >= 0
             and int(full.graph_row[child]) == row
-            and not full.tie_conflict[child]
             and evidence.configuration_bootstrap[child] >= thresholds.configuration_bootstrap
             and evidence.configuration_graph_bootstrap[child] >= thresholds.configuration_bootstrap
             and evidence.configuration_loco[child] >= thresholds.lobo_fraction
@@ -230,9 +229,7 @@ def tier_calls(
                 status.append(f"{label}_supported_{STATE_NAMES[state]}")
             else:
                 suffix = (
-                    "graph_tie_conflict"
-                    if full.tie_conflict[child]
-                    else "graph_conflict"
+                    "graph_conflict"
                     if evidence.graph_conflict[child]
                     else "orientation_unresolved"
                     if withheld[child]
@@ -253,9 +250,6 @@ def complete_calls(full: Selection, eligibility: ParentEligibility, alternatives
         graph_row = int(full.graph_row[child])
         if not eligibility.children[child]:
             status.append("excluded_by_parent_eligibility")
-        elif full.tie_conflict[child]:
-            state_out[child] = local_state
-            status.append("graph_tie_conflict_parent_identity_unresolved")
         elif graph_row >= 0:
             row_out[child] = graph_row
             graph_state = int(alternatives.states[graph_row])

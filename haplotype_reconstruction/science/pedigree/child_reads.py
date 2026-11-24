@@ -128,7 +128,9 @@ def scalar_batch(samples: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.n
             np.empty((0, 1, 1), dtype=np.float32), np.empty((0, 4, 1), dtype=np.float32))
 
 
-def join_reads(batches: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]], classes: int | None = None) -> ChildReads:
+def join_reads(
+    batches: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]], classes: int | None = None
+) -> ChildReads:
     """Gather sample batches into the prepared record's configured class width and sample order."""
     if classes is None:
         classes = max(batch[1].shape[1] for batch in batches)
@@ -149,35 +151,11 @@ def join_reads(batches: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarra
     return ChildReads(
         offsets=np.concatenate(([0], np.cumsum(counts))).astype(np.int64),
         initial=initial,
-        operator=np.concatenate(operators, dtype=np.float32) if operators else np.empty((0, classes, classes), np.float32),
+        operator=(
+            np.concatenate(operators, dtype=np.float32) if operators else np.empty((0, classes, classes), np.float32)
+        ),
         ratio=np.concatenate(ratios, dtype=np.float32) if ratios else np.empty((0, 4, classes), np.float32),
     )
-
-
-@kernel(overloads=OVERLOADS["child_reads._powered"], cache=True, parallel=True, nogil=True)
-def _powered(ratio, offsets, site_start, site_stop, exponent, out):
-    """out [K, 4, C] float32: each slot's four configuration ratios raised to its bin's information exponent (the
-    tempered view's corner factors; one at exponent zero)."""
-    children = offsets.shape[0] - 1
-    bins = site_start.shape[1]
-    classes = ratio.shape[2]
-    for child in prange(children):
-        start = offsets[child]
-        if offsets[child + 1] == start:
-            continue
-        base = start - site_start[child, 0]
-        for block in range(bins):
-            eta = exponent[child, block]
-            for slot in range(site_start[child, block], site_stop[child, block]):
-                k = base + slot
-                for config in range(4):
-                    for c in range(classes):
-                        value = float(ratio[k, config, c])
-                        if eta == 0.0:
-                            value = 1.0
-                        elif eta != 1.0:
-                            value = value**eta
-                        out[k, config, c] = value
 
 
 @kernel(overloads=OVERLOADS["child_reads.class_layout"], cache=True, parallel=True, nogil=True)
@@ -209,16 +187,13 @@ def class_layout(operator, offsets, site_start, site_stop):
     return reset, width
 
 
-def resident_terms(reads: ChildReads | None, children: int, site_start: np.ndarray, site_stop: np.ndarray,
-                   exponent: np.ndarray):
+def resident_terms(reads: ChildReads | None, children: int, site_start: np.ndarray, site_stop: np.ndarray):
     """The child chains' read arguments (offsets int64 [N + 1], initial float64 [N, C], operator float32 [K, C, C],
-    ratio float32 [K, 4, C], powered float32 [K, 4, C] the tempered corner ratios) of a component's ChildReads (None:
-    one class, no slots) on the children's observed-marker CSR (forward.observed_sites) with their information
-    exponents. Owned writable copies (the kernels' declared argument types)."""
+    ratio float32 [K, 4, C]) of a component's ChildReads (None: one class, no slots) on the children's observed-marker
+    CSR (forward.observed_sites). Owned writable copies (the kernels' declared argument types)."""
     if reads is None:
         return (np.zeros(children + 1, dtype=np.int64), np.ones((children, 1), dtype=np.float64),
-                np.zeros((0, 1, 1), dtype=np.float32), np.zeros((0, 4, 1), dtype=np.float32),
-                np.zeros((0, 4, 1), dtype=np.float32))
+                np.zeros((0, 1, 1), dtype=np.float32), np.zeros((0, 4, 1), dtype=np.float32))
     offsets = np.array(reads.offsets, dtype=np.int64, copy=True)
     if len(offsets) != children + 1:
         raise InvariantError("child read terms do not cover the component's samples")
@@ -229,9 +204,4 @@ def resident_terms(reads: ChildReads | None, children: int, site_start: np.ndarr
         raise InvariantError("child read slots differ from the children's observed markers")
     operator = np.array(reads.operator, dtype=np.float32, order="C", copy=True)
     ratio = np.array(reads.ratio, dtype=np.float32, order="C", copy=True)
-    powered = np.empty(ratio.shape, dtype=np.float32)
-    if len(ratio):
-        _powered(ratio, offsets, np.ascontiguousarray(site_start, dtype=np.int64),
-                 np.ascontiguousarray(site_stop, dtype=np.int64), np.ascontiguousarray(exponent, dtype=np.float64),
-                 powered)
-    return offsets, np.array(reads.initial, dtype=np.float64, order="C", copy=True), operator, ratio, powered
+    return offsets, np.array(reads.initial, dtype=np.float64, order="C", copy=True), operator, ratio

@@ -7,20 +7,17 @@ leave-one-out frequency of the founder states the other samples transmit), under
 first comes from the candidate parent's projected transmission (pi, bridges), under M2 both come from
 the two parents. Emissions multiply the child's per-marker
 likelihoods of the two transmitted alleles (with mismatch probability) over its observed markers
-of the bin. Each score pools two views with equal weight: tempered (bin emissions raised to the
-information exponent) and full strength, run in one pass that shares the emission products. Their
-average is a composite score, not two independent data sets or posterior probabilities.
+of the bin. Each configuration has one likelihood: every observed marker enters once, at full strength (4.22,
+R4 1a: no tempered view, information exponent or pooled average).
 
 Called founder alleles project to the same 0/1 value in every candidate, so their emission products
 are cached per child and bin (NaN marks entries needing the candidate-specific path) in batches of
 children bounded by a 256 MiB workspace.
 
-Method: docs/methods/pedigree.md#child-forward-model-and-composite-score
+Method: docs/methods/pedigree.md#child-forward-model
 """
 
 from __future__ import annotations
-
-import math
 
 import numpy as np
 from numba import prange
@@ -148,7 +145,7 @@ def _fill_named_first_products(
     state is BACKGROUND or a named allele is uncalled (which _common_products leaves NaN). Each such entry is
     computed exactly as score_path's general path computes it (site order, likelihood, the zero-likelihood rule);
     an entry that path would find unstable (underflow) stays NaN, so the general path still meets it and switches
-    to log space. The powered (tempered) cache is not extended: those entries keep their direct power.
+    to log space.
     Not valid for M2, whose second slot is a candidate's.
     """
     children, bins, states, _ = products.shape
@@ -179,43 +176,6 @@ def _fill_named_first_products(
                         break
                 if stable:
                     products[local_child, block, first, second] = product
-
-
-@kernel(overloads=OVERLOADS["forward.normalized_power"], cache=True, inline="always", nogil=True)
-def normalized_power(emission, maximum, exponent):
-    """The probability-domain normalized power, including eta one."""
-    base = emission / maximum
-    return base if exponent == 1.0 else math.pow(base, exponent)
-
-
-@kernel(overloads=OVERLOADS["forward._powered_products"], cache=True, parallel=True, nogil=True)
-def _powered_products(products, exponent, child_start):
-    """Cache normalized powers, plus their exact normalization maximum.
-
-    The final row stores the maximum in column zero. A consumer may reuse an
-    entry only when its complete emission matrix has exactly that maximum;
-    otherwise it evaluates the same normalized power directly. Unknown products
-    stay NaN. This makes cache capacity and completion arithmetically neutral.
-    """
-    children, bins, states, _ = products.shape
-    powered = np.full((children, bins, states + 1, states), np.nan)
-    for task in prange(children * bins):
-        child, block = task // bins, task % bins
-        eta = exponent[child_start + child, block]
-        maximum = 0.0
-        for first in range(states):
-            for second in range(states):
-                value = products[child, block, first, second]
-                if np.isfinite(value):
-                    maximum = max(maximum, value)
-        if maximum > 0.0 and 0.0 < eta < 1.0:
-            powered[child, block, states, 0] = maximum
-            for first in range(states):
-                for second in range(states):
-                    value = products[child, block, first, second]
-                    if np.isfinite(value) and value >= 0.0:
-                        powered[child, block, first, second] = normalized_power(value, maximum, eta)
-    return powered
 
 
 @kernel(overloads=OVERLOADS["forward._apply_star_bridge"], cache=True, nogil=True)
@@ -438,39 +398,6 @@ def advance(
         )
 
 
-@kernel(overloads=OVERLOADS["forward.named_column_powers"], cache=True, parallel=True, nogil=True)
-def named_column_powers(products, exponent, child_start):
-    """For the M1 screen's completed cache (_fill_named_first_products): per child and bin, the largest named-first
-    product (NaN unless every named-first entry is cached) and, for each named first state, the tempered power
-    pow(product[first, BACKGROUND] / that maximum, exponent) that _apply_probability_emission takes for the
-    BACKGROUND-second entry when the bin's maximum is that same value (fractional exponents only; NaN otherwise)."""
-    children, bins, states, _ = products.shape
-    last = states - 1
-    maximum = np.full((children, bins), np.nan)
-    powered = np.full((children, bins, last), np.nan)
-    for task in prange(children * bins):
-        child, block = task // bins, task % bins
-        largest = -np.inf
-        complete = True
-        for first in range(last):
-            for second in range(states):
-                value = products[child, block, first, second]
-                if not np.isfinite(value):
-                    complete = False
-                    break
-                largest = max(largest, value)
-            if not complete:
-                break
-        if not complete:
-            continue
-        maximum[child, block] = largest
-        eta = exponent[child_start + child, block]
-        if largest > 0.0 and np.isfinite(largest) and eta != 1.0 and eta != 0.0:
-            for first in range(last):
-                powered[child, block, first] = normalized_power(products[child, block, first, last], largest, eta)
-    return maximum, powered
-
-
 def null_frequencies(pi: np.ndarray, available: np.ndarray, prior_samples: float) -> np.ndarray:
     """float64 [N, B, S]: per child, the leave-one-out transmitted-state frequency of the other informative
     samples with a uniform pseudo-count regulariser of ``prior_samples`` samples (see ChildTerms)."""
@@ -486,11 +413,10 @@ class ChildTerms:
     """Child-side scoring inputs of one component, shared by the M0/M1 screen and the M2 score.
 
     gl float64 [N, M, 3], coefficient [N, M, 3], observed-marker CSR (site_index, site_start,
-    site_stop), exponent float64 [N, B], null transition coefficients [N, B-1] (diagonal, off),
-    null_frequency float64 [N, B, S] (the null source's initial and redraw law per child and bin), mismatch, the
-    cache batch size and whether any exponent is fractional; the children's read state (child_reads.resident_terms
-    of the component's ChildReads, one class without it): read_offset, read_initial, read_operator, read_ratio and
-    read_powered, carried by the configuration chains (read_forward).
+    site_stop), null transition coefficients [N, B-1] (diagonal, off), null_frequency float64 [N, B, S] (the null
+    source's initial and redraw law per child and bin), mismatch and the cache batch size; the children's read state
+    (child_reads.resident_terms of the component's ChildReads, one class without it): read_offset, read_initial,
+    read_operator and read_ratio, carried by the configuration chains (read_forward).
 
     The null source of a child's unobserved parent slot starts from, and redraws from, the frequency at which the
     other samples transmit each founder state, f_cb(s) = (sum_{j != c} a_j pi_jb(s) + w / S) /
@@ -508,7 +434,6 @@ class ChildTerms:
         projection: Projection,
         gl: np.ndarray,
         observed: np.ndarray,
-        exponent: np.ndarray,
         selector_switch_probability: np.ndarray,
         same: np.ndarray,
         one: np.ndarray,
@@ -527,7 +452,6 @@ class ChildTerms:
         self.site_index, self.site_start, self.site_stop = observed_sites(
             observed, projection.bin_start, projection.bin_stop
         )
-        self.exponent = exponent
         self.mismatch = float(mismatch)
         selector = np.broadcast_to(selector_switch_probability, (children, bins - 1))
         self.null_diagonal = np.ascontiguousarray(
@@ -552,27 +476,27 @@ class ChildTerms:
         if not null_prior_samples > 0.0:
             raise SettingsError("null_prior_samples must be positive")
         self.null_frequency = null_frequencies(projection.pi, projection.available, float(null_prior_samples))
-        self.fractional = bool(np.any((exponent > 0.0) & (exponent < 1.0)))
-        (self.read_offset, self.read_initial, self.read_operator, self.read_ratio,
-         self.read_powered) = resident_terms(reads, children, self.site_start, self.site_stop, exponent)
+        self.read_offset, self.read_initial, self.read_operator, self.read_ratio = resident_terms(
+            reads, children, self.site_start, self.site_stop
+        )
         self.read_reset, self.read_width = class_layout(
             self.read_operator, self.read_offset, self.site_start, self.site_stop)
         self.n_classes = int(self.read_initial.shape[1])
-        cache_children = COMMON_EMISSION_CACHE_BYTES // max(1, bins * states * (2 * states + 1) * 8)
+        cache_children = COMMON_EMISSION_CACHE_BYTES // max(1, bins * states * states * 8)
         self.cached = cache_children > 0
         self.batch = min(children, cache_children) if cache_children else children
         # the read state's class-transfer cache (class_cache): one child batch within CLASS_TRANSFER_CACHE_BYTES, the
         # batch then shared with the scalar caches; none when one child's would not fit (scored per site)
-        class_bytes = bins * 2 * states * states * self.n_classes * self.n_classes * 8 if self.n_classes > 1 else 0
+        class_bytes = bins * states * states * self.n_classes * self.n_classes * 8 if self.n_classes > 1 else 0
         self.class_cached = 0 < class_bytes <= CLASS_TRANSFER_CACHE_BYTES
         if self.class_cached:
             self.batch = max(1, min(self.batch, CLASS_TRANSFER_CACHE_BYTES // class_bytes))
 
     def common(self, projection: Projection, child_start: int, child_stop: int):
-        """(cached products, powered products) of a child batch, or (None, None) without a cache."""
+        """The cached emission products of a child batch, or None without a cache."""
         if not self.cached:
-            return None, None
-        products = _common_products(
+            return None
+        return _common_products(
             projection.state_alt,
             self.gl,
             self.coefficient,
@@ -583,8 +507,6 @@ class ChildTerms:
             child_start,
             child_stop,
         )
-        powered = _powered_products(products, self.exponent, child_start) if self.fractional else None
-        return products, powered
 
     def class_cache(self, projection: Projection, child_start: int, child_stop: int):
         """The read state's class-transfer cache of a child batch (read_transfer.class_transfers), or None without
@@ -595,13 +517,13 @@ class ChildTerms:
 
         return class_transfers(
             int(child_start), int(child_stop), projection.state_alt, self.gl, self.site_index, self.site_start,
-            self.site_stop, self.exponent, self.read_offset, self.read_reset, self.read_width, self.read_operator, self.read_ratio, self.read_powered,
+            self.site_stop, self.read_offset, self.read_reset, self.read_width, self.read_operator, self.read_ratio,
         )
 
     def common_null_second(self, projection: Projection, child_start: int, child_stop: int):
         """``common`` for M0/M1 configurations only (the M1 screen): the products also hold every entry with a named
-        first state (_fill_named_first_products); the powered cache is ``common``'s."""
-        products, powered = self.common(projection, child_start, child_stop)
+        first state (_fill_named_first_products)."""
+        products = self.common(projection, child_start, child_stop)
         if products is not None:
             _fill_named_first_products(
                 products,
@@ -614,7 +536,7 @@ class ChildTerms:
                 self.mismatch,
                 child_start,
             )
-        return products, powered
+        return products
 
 
 def model_arguments(projection: Projection) -> tuple:
@@ -640,7 +562,6 @@ def terms_args(p, t):
         t.site_index,
         t.site_start,
         t.site_stop,
-        t.exponent,
         t.null_diagonal,
         t.null_off,
         t.null_frequency,

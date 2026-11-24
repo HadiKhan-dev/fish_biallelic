@@ -22,6 +22,7 @@ class StoreLocation(os.PathLike):
     namespace: str
     keys: tuple[str, ...]
     manifest_fields: dict
+    prefixes: tuple[str, ...] = ()
 
     def __fspath__(self):
         return self.root
@@ -38,7 +39,7 @@ class _Names(Mapping):
         for key in self.records:
             if key.startswith(self.file.prefix):
                 yield key[len(self.file.prefix) :]
-            elif not key.startswith("analysis/") and key not in self.file.scoped_keys:
+            elif not key.startswith("analysis/") and not self.file.is_scoped(key):
                 yield key
 
     def __len__(self):
@@ -51,10 +52,14 @@ class NamespacedFile(CheckpointFile):
     def __init__(self, *args, location: StoreLocation, **kwargs):
         super().__init__(*args, **kwargs)
         self.prefix = "analysis/" + location.namespace + "/"
-        self.scoped_keys = frozenset(location.keys)
+        self.scoped_keys = frozenset((*location.keys, *location.prefixes))
+        self.scoped_prefixes = tuple(prefix + "/" for prefix in location.prefixes)
+
+    def is_scoped(self, key):
+        return key in self.scoped_keys or key.startswith(self.scoped_prefixes)
 
     def physical_key(self, key):
-        return self.prefix + key if key in self.scoped_keys else key
+        return self.prefix + key if self.is_scoped(key) else key
 
     def info(self, key):
         return super().info(self.physical_key(key))

@@ -78,11 +78,13 @@ def dense_bridges(stay, alpha, beta, row_arm, column_arm, pivot, branch, excursi
     return out
 
 
-@kernel(overloads=OVERLOADS["certificates.power_common"], cache=True, parallel=True, nogil=True)
-def power_common(common, children, exponent):
+@kernel(overloads=OVERLOADS["certificates.scale_common"], cache=True, parallel=True, nogil=True)
+def scale_common(common):
+    """(emission bounds relative to each child and bin's largest log bound [n, B, S, S], that largest log bound [n,
+    B]; 0 where none is finite)."""
     count, bins, k, _ = common.shape
-    powered = np.empty((count, bins, 2, k, k))
-    scales = np.zeros((count, bins, 2))
+    scaled = np.empty((count, bins, k, k))
+    scales = np.zeros((count, bins))
     for task in prange(count * bins):
         ci, b = task // bins, task % bins
         maximum = -np.inf
@@ -93,14 +95,12 @@ def power_common(common, children, exponent):
                     maximum = max(maximum, x)
         if not np.isfinite(maximum):
             maximum = 0.0
-        for view in range(2):
-            eta = exponent[children[ci], b] if view == 0 else 1.0
-            scales[ci, b, view] = eta * maximum
-            for s in range(k):
-                for t in range(k):
-                    x = common[ci, b, s, t]
-                    powered[ci, b, view, s, t] = math.exp(eta * (x - maximum)) if np.isfinite(x) else np.nan
-    return powered, scales
+        scales[ci, b] = maximum
+        for s in range(k):
+            for t in range(k):
+                x = common[ci, b, s, t]
+                scaled[ci, b, s, t] = math.exp(x - maximum) if np.isfinite(x) else np.nan
+    return scaled, scales
 
 
 @kernel(overloads=OVERLOADS["certificates.block_upper"], cache=True, parallel=True, nogil=True)
@@ -123,24 +123,17 @@ def block_upper(
     pivot,
     branch,
     excursion,
-    powered,
+    scaled,
     scales,
 ):
     """Apply the finite global emission envelope; no unreachable allele-envelope fallback."""
     groups = len(refs)
-    k = powered.shape[3]
-    length = stop - first
+    k = scaled.shape[3]
     output = np.empty((len(children), groups))
     for task in prange(len(children) * groups):
         ci, g = task // groups, task % groups
         c = children[ci]
         p = refs[g]
-        emission = np.empty((length, 2, k, k))
-        for b in range(first, stop):
-            for s in range(k):
-                for t in range(k):
-                    emission[b - first, 0, s, t] = powered[ci, b, 0, s, t]
-                    emission[b - first, 1, s, t] = powered[ci, b, 1, s, t]
         score = 0.0
         value = np.empty((k, k))
         work = np.empty_like(value)
@@ -151,80 +144,79 @@ def block_upper(
         lo_v = np.empty(k)
         hi_v = np.empty(k)
         sum_v = np.empty(k)
-        for view in range(2):
-            value[:] = 1.0
-            for b in range(stop - 1, first - 1, -1):
-                local = b - first
+        value[:] = 1.0
+        for b in range(stop - 1, first - 1, -1):
+            local = b - first
+            for s in range(k):
+                for t in range(k):
+                    value[s, t] *= scaled[ci, b, s, t]
+            score += scales[ci, b]
+            if b:
+                # Null slot (exact): stay with nd - no >= 0 (ChildTerms checks), else move to a state drawn
+                # from the child's null frequencies at bin b; every term is nonnegative.
+                keep = null_diag[c, b - 1] - null_off[c, b - 1]
+                move = k * null_off[c, b - 1]
+                for s in range(k):
+                    total = 0.0
+                    for t in range(k):
+                        total += null_frequency[c, b, t] * value[s, t]
+                    for t in range(k):
+                        work[s, t] = keep * value[s, t] + move * total
+                boundary = b - 1
+                piv = pivot[p, boundary]
+                kind = branch[p, boundary]
+                for t in range(k):
+                    lo_v[t] = np.inf
+                    hi_v[t] = 0.0
+                    sum_v[t] = 0.0
+                    arm[t] = 0.0
+                    for s in range(k):
+                        lo_v[t] = min(lo_v[t], work[s, t])
+                        hi_v[t] = max(hi_v[t], work[s, t])
+                        sum_v[t] += work[s, t]
+                        if piv >= 0:
+                            arm[t] += row_arm[p, boundary, s] * work[s, t]
+                if kind == 3:
+                    for s in range(k):
+                        for t in range(k):
+                            ref[s, t] = stay[p, boundary, s] * work[s, t]
+                            if s == piv:
+                                ref[s, t] += arm[t]
+                            else:
+                                ref[s, t] += alpha[p, boundary, s] * work[piv, t]
+                else:
+                    prefix[0, :] = 0.0
+                    suffix[k, :] = 0.0
+                    for s in range(k):
+                        for t in range(k):
+                            prefix[s + 1, t] = prefix[s, t] + beta[p, boundary, s] * work[s, t]
+                    for s in range(k - 1, -1, -1):
+                        for t in range(k):
+                            suffix[s, t] = suffix[s + 1, t] + beta[p, boundary, s] * work[s, t]
+                    for s in range(k):
+                        for t in range(k):
+                            x = stay[p, boundary, s] * work[s, t] + alpha[p, boundary, s] * (
+                                prefix[s, t] + suffix[s + 1, t]
+                            )
+                            if piv >= 0:
+                                x += column_arm[p, boundary, s] * work[piv, t]
+                                if s == piv:
+                                    x += arm[t]
+                            ref[s, t] = x
+                ex = excursion[p, boundary]
                 for s in range(k):
                     for t in range(k):
-                        value[s, t] *= emission[local, view, s, t]
-                score += 0.5 * scales[ci, b, view]
-                if b:
-                    # Null slot (exact): stay with nd - no >= 0 (ChildTerms checks), else move to a state drawn
-                    # from the child's null frequencies at bin b; every term is nonnegative.
-                    keep = null_diag[c, b - 1] - null_off[c, b - 1]
-                    move = k * null_off[c, b - 1]
-                    for s in range(k):
-                        total = 0.0
-                        for t in range(k):
-                            total += null_frequency[c, b, t] * value[s, t]
-                        for t in range(k):
-                            work[s, t] = keep * value[s, t] + move * total
-                    boundary = b - 1
-                    piv = pivot[p, boundary]
-                    kind = branch[p, boundary]
-                    for t in range(k):
-                        lo_v[t] = np.inf
-                        hi_v[t] = 0.0
-                        sum_v[t] = 0.0
-                        arm[t] = 0.0
-                        for s in range(k):
-                            lo_v[t] = min(lo_v[t], work[s, t])
-                            hi_v[t] = max(hi_v[t], work[s, t])
-                            sum_v[t] += work[s, t]
-                            if piv >= 0:
-                                arm[t] += row_arm[p, boundary, s] * work[s, t]
-                    if kind == 3:
-                        for s in range(k):
-                            for t in range(k):
-                                ref[s, t] = stay[p, boundary, s] * work[s, t]
-                                if s == piv:
-                                    ref[s, t] += arm[t]
-                                else:
-                                    ref[s, t] += alpha[p, boundary, s] * work[piv, t]
-                    else:
-                        prefix[0, :] = 0.0
-                        suffix[k, :] = 0.0
-                        for s in range(k):
-                            for t in range(k):
-                                prefix[s + 1, t] = prefix[s, t] + beta[p, boundary, s] * work[s, t]
-                        for s in range(k - 1, -1, -1):
-                            for t in range(k):
-                                suffix[s, t] = suffix[s + 1, t] + beta[p, boundary, s] * work[s, t]
-                        for s in range(k):
-                            for t in range(k):
-                                x = stay[p, boundary, s] * work[s, t] + alpha[p, boundary, s] * (
-                                    prefix[s, t] + suffix[s + 1, t]
-                                )
-                                if piv >= 0:
-                                    x += column_arm[p, boundary, s] * work[piv, t]
-                                    if s == piv:
-                                        x += arm[t]
-                                ref[s, t] = x
-                    ex = excursion[p, boundary]
-                    for s in range(k):
-                        for t in range(k):
-                            r = ref[s, t]
-                            if ex > 0.0:
-                                r = (1 - ex) * r + ex * sum_v[t] / k
-                            bounded = r / ref_mass[g, local, s] + tv[g, local, s] * (hi_v[t] - lo_v[t])
-                            value[s, t] = mass[g, local, s] * min(hi_v[t], bounded)
-                maximum = np.max(value)
-                if maximum <= 0.0 or not np.isfinite(maximum):
-                    score = np.inf
-                    break
-                value /= maximum
-                score += 0.5 * math.log(maximum)
+                        r = ref[s, t]
+                        if ex > 0.0:
+                            r = (1 - ex) * r + ex * sum_v[t] / k
+                        bounded = r / ref_mass[g, local, s] + tv[g, local, s] * (hi_v[t] - lo_v[t])
+                        value[s, t] = mass[g, local, s] * min(hi_v[t], bounded)
+            maximum = np.max(value)
+            if maximum <= 0.0 or not np.isfinite(maximum):
+                score = np.inf
+                break
+            value /= maximum
+            score += math.log(maximum)
         output[ci, g] = score
     return output
 

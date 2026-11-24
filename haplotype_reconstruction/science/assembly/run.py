@@ -43,6 +43,7 @@ class AssemblyInputs:
     evidence: AssemblyEvidence
     genetic_map: ChromosomeGeneticMap
     panels_identity: str | None = None
+    search_alleles_reversed: bool = False
 
 
 @dataclass(frozen=True)

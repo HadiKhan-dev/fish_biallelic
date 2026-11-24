@@ -4,6 +4,9 @@ Discovery searches binary local founder panels under a known/unknown copying mod
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
 
+The ordered block search uses one allele coding per contig, with the first distinct input nucleotide pair in alphabetical order. All founder calls and ALT probabilities return in the input coding.
+
+
 <a id="di01"></a>
 ## di01 Block inputs and preparation (informative test, neutral missing cells, canonical sample order, active samples, K ceiling)
 

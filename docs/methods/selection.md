@@ -4,6 +4,9 @@ Selection refits local copying panels with a regularised dictionary objective, t
 
 The sections below identify semantic units, not separately configurable pipeline steps. [Outputs](../user/outputs.md), [record contracts](../reference/records.md) and [costs](../developer/costs.md) describe their public boundaries.
 
+The candidate bank, path search and tie consensus use the contig allele coding defined by discovery. Allele calls and ALT probabilities return in the input coding. The memo uses the search coding across rounds.
+
+
 <a id="ls01"></a>
 ## ls01 Copying model and block log likelihood
 
@@ -309,7 +312,7 @@ Cost and scope: Three block-selection rounds and two context assembly/refit pass
 <a id="ls26"></a>
 ## ls26 Context coverage and component founder rows (de-duplication, template consensus)
 
-Restrict evidence to kept discovery sites, match complete component coverage, and collapse duplicate context rows into consensus templates. Use the map object’s interval distances for the context chain. Skip incompatible coverage explicitly; disagreeing called duplicate alleles yield unknown template cells.
+Restrict evidence to kept discovery sites, match complete component coverage, and collapse duplicate context rows into consensus templates. Deduplicate and fit in the contig’s canonical allele coding. Context proposals return in input coding. Use the map object’s interval distances for the context chain. Skip incompatible coverage explicitly; disagreeing called duplicate alleles yield unknown template cells.
 
 Implementation: [science/selection/context_refit.py](../../haplotype_reconstruction/science/selection/context_refit.py).
 

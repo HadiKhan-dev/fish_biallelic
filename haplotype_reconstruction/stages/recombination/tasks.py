@@ -22,7 +22,7 @@ from ...core.errors import InvariantError
 from ...science.recombination.follow import map_chromosome
 from ...science.recombination.parameters import RecombinationParameters
 from ...store.container import CheckpointFile
-from ...store.protocol import Derivation, mark_complete
+from ...store.protocol import Derivation, is_complete, mark_complete, read_items
 from . import records
 
 
@@ -102,13 +102,26 @@ def run(
     from ..relatedness.working_map import working_maps
 
     reader, store = task_inputs(root)
-    phase = required_product(reader, phase_records, "phase", contig)
-    pedigree = required_product(reader, pedigree_records, "pedigree", None)
+    from ...contracts.roles import require_schema
+
+    file = store.contig(contig)
     reverse = reader.manifest["ties"]["reverse"]
     expected = records.expected(store, reader.manifest, product="recombination", contig=contig,
                                 parameters=resolved.parameters.recombination)
+    saved = read_items(file, records.KEY, expected.identity, ("schema",))
+    if saved is not None:
+        require_schema(saved.payload, records.RecombinationAdapter.schema)
+        configuration = records.configuration_identity(contig, tuple(reader.manifest["sample_ids"]), expected.inputs)
+        if not is_complete(file, {records.BINDING_KEY: expected.identity, records.CONFIGURATION_KEY: configuration}):
+            records.bind(file, expected)
+        if not file.has("complete/" + records.KEY):
+            mark_complete(file, records.KEY, {records.KEY: expected.identity})
+        return expected.identity
+
+    phase = required_product(reader, phase_records, "phase", contig)
+    pedigree = required_product(reader, pedigree_records, "pedigree", None)
     publish_contig(
-        store.contig(contig),
+        file,
         phase,
         pedigree.edges,
         resolved.parameters.recombination,

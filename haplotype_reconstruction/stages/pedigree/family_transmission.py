@@ -45,7 +45,7 @@ def run(
     parts = [
         (
             junctions.schedules(c.state_classes, c.named_alleles, c.bin_sizes, reverse=parameters.reverse_conventions,
-                                label_error=c.label_error),
+                                label_error=c.label_error, search_alleles_reversed=prepared.search_alleles_reversed),
             np.asarray(c.selector_switch_probability, dtype=np.float64),
         )
         for c in prepared.components

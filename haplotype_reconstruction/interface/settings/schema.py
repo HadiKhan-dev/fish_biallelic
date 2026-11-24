@@ -281,7 +281,7 @@ class ExportSection:
 class SimulationReadsSection:
     preset: str = setting(
         "", "str", "Generating read preset; explicit read keys override its values.",
-        ("", "realistic", "short_read_cohort", "long_read_cohort")
+        ("", "realistic", "realistic_long_reads", "short_read_cohort", "long_read_cohort")
     )
     error_rate: float = setting(0.02, "float", "Generating sequencing error rate.")
     uncalled_base_probability: float = setting(
@@ -290,7 +290,11 @@ class SimulationReadsSection:
         "Depth is before this loss. Zero preserves the fully called model."
     )
     depth_cv: float = setting(0.0, "float", "Between-sample depth coefficient of variation.")
-    heterozygote_alt_probability: float = setting(0.5, "float", "Alternate-read probability in heterozygotes.")
+    heterozygote_alt_probability: float = setting(
+        0.5, "float",
+        "Alternate-read probability in heterozygotes, independent-site sampler only (0.5 with reads; their "
+        "imbalance is reference_bias).",
+    )
     dropout_fraction: float = setting(0.0, "float", "Contiguous missing-marker fraction per sample.")
     read_length_bp: int = setting(
         0, "int", "Read length; > 0 samples paired-end fragments shared by neighbouring sites."
@@ -346,10 +350,13 @@ class SimulationReadsSection:
     )
     reference_bias: float = setting(
         generating.REFERENCE_BIAS, "float",
-        "Loss hazard scale of a long read's base: 1 - exp(-bias x k^power), k = ALT alleles of its homologue nearby."
+        "Reference mapping-bias hazard scale: a paired-end mate (all its bases), or a long read's base, is lost "
+        "with probability 1 - exp(-bias x k^power), k = ALT alleles of its homologue under the mate (paired-end) "
+        "or within the window (long reads)."
     )
     reference_bias_window_bp: int = setting(
-        generating.REFERENCE_BIAS_WINDOW_BP, "int", "Half-width in bp of the reference-bias ALT-count window."
+        generating.REFERENCE_BIAS_WINDOW_BP, "int",
+        "Half-width in bp of the long-read reference-bias ALT-count window (long reads only; 0 with paired-end)."
     )
     reference_bias_power: float = setting(
         generating.REFERENCE_BIAS_POWER, "float", "Exponent of the ALT count in the reference-bias loss hazard."
@@ -357,8 +364,62 @@ class SimulationReadsSection:
     reference_pull: float = setting(
         generating.REFERENCE_PULL, "float", "Mean probability that a long read's ALT base is reported as REF."
     )
+    exogenous_read_share: float = setting(
+        generating.EXOGENOUS_READ_SHARE, "float",
+        "Other-species contamination: mean share of a contaminated sample's mapped reads that are exogenous (each "
+        "contaminated sample draws this x Exponential(1)); 0 = off. Any sampler."
+    )
+    exogenous_sample_fraction: float = setting(
+        generating.EXOGENOUS_SAMPLE_FRACTION, "float", "Probability that a sample is contaminated (genome-wide)."
+    )
+    exogenous_window_fraction: float = setting(
+        generating.EXOGENOUS_WINDOW_FRACTION, "float",
+        "Share of windows conserved enough for exogenous reads to map (they map nowhere else)."
+    )
+    exogenous_window_bp: int = setting(generating.EXOGENOUS_WINDOW_BP, "int", "Conserved-window width in bp.")
+    exogenous_alt_probability: float = setting(
+        generating.EXOGENOUS_ALT_PROBABILITY, "float",
+        "Probability that the other species' base at a site is ALT (fixed per site, shared by all its reads)."
+    )
     foreign_read_share: float = setting(
-        generating.FOREIGN_READ_SHARE, "float", "Share of long reads from another sequenced sample (contamination)."
+        generating.FOREIGN_READ_SHARE, "float",
+        "Share of every sample's reads (long reads or paired-end fragments) from a uniform other sequenced sample, "
+        "drawn per read (barcode misassignment, low-level bleed)."
+    )
+    contamination_share: float = setting(
+        generating.CONTAMINATION_SHARE, "float",
+        "Cross-sample contamination law: mean share of a contaminated library's reads from its one donor (each draws "
+        "this x Exponential(1), clipped at 1); 0 = off. Paired-end, long-read and independent-site samplers."
+    )
+    contamination_sample_fraction: float = setting(
+        generating.CONTAMINATION_SAMPLE_FRACTION, "float", "Probability that a library is contaminated (genome-wide)."
+    )
+    contamination_samples: tuple[str, ...] = setting(
+        (), "strings", "Explicit contaminated libraries (sample names); replaces the law."
+    )
+    contamination_shares: tuple[float, ...] = setting(
+        (), "floats", "Share of each listed library's reads from its donor, in (0, 1] (1 = a sample mix-up)."
+    )
+    contamination_donors: tuple[str, ...] = setting(
+        (), "strings", "Donor of each listed library (sample names); empty = a uniform other sequenced sample each."
+    )
+    duplicate_rate: float = setting(
+        generating.DUPLICATE_RATE, "float",
+        "PCR duplicates (paired-end): mean share of a library's reads that are duplicates, left in (each library draws "
+        "this x Exponential(1)); 0 = off."
+    )
+    library_error_sigma: float = setting(
+        generating.LIBRARY_ERROR_SIGMA, "float",
+        "Library-to-library error spread: each library's error factor is lognormal (mean one, this log-scale sd) and "
+        "multiplies its error_rate and the call-set layer's systematic rates; 0 = every library alike."
+    )
+    chimera_share: float = setting(generating.CHIMERA_SHARE, "float", "Share of long reads that are chimeric; 0 = off.")
+    chimera_min_segment_bp: int = setting(
+        generating.CHIMERA_MIN_SEGMENT_BP, "int", "A chimera's shorter segment below this length (bp) does not align."
+    )
+    chimera_mismap_share: float = setting(
+        generating.CHIMERA_MISMAP_SHARE, "float",
+        "Share of those short segments aligned at the partner's locus instead, with unrelated alleles."
     )
     injected_outlier_rate: float = setting(
         0.0, "float",
@@ -457,10 +518,9 @@ class SimulationArtefactsSection:
         generating.ARTEFACT_HOM_ALT_MISS_FACTOR, "float",
         "Miss probability of a homozygous-ALT cell relative to a heterozygote (callers rarely miss hom-ALT)."
     )
-    call_min_alt_fraction: float = setting(
-        generating.ARTEFACT_CALL_MIN_ALT_FRACTION, "float", "Minimum ALT fraction calling a hom-reference cell."
+    block_band: float = setting(
+        generating.ARTEFACT_BLOCK_BAND, "float", "Relative logarithmic depth-band width of missed-cell runs."
     )
-    block_band: float = setting(generating.ARTEFACT_BLOCK_BAND, "float", "Relative logarithmic depth-band width.")
     balance_dispersion: float = setting(
         generating.ARTEFACT_BALANCE_DISPERSION, "float", "Beta-binomial heterozygote intraclass correlation."
     )
@@ -526,6 +586,24 @@ class SimulationStructureSection:
     carrier_frequency: float = setting(
         generating.STRUCTURE_CARRIER_FREQUENCY, "float",
         "File sources: probability that a source haplotype carries a polymorphic variant (coalescent: genealogy)."
+    )
+    collapsed_fraction: float = setting(
+        generating.STRUCTURE_COLLAPSED_FRACTION, "float",
+        "Expected share of each contig in collapsed paralogs (duplications the reference assembly collapsed: every "
+        "copy's reads align to one segment); 0 = off."
+    )
+    collapsed_mean_bp: float = setting(
+        generating.STRUCTURE_COLLAPSED_MEAN_BP, "float", "Mean exponential collapsed-segment length in bp."
+    )
+    collapsed_psv_share: float = setting(
+        generating.STRUCTURE_COLLAPSED_PSV_SHARE, "float",
+        "Share of written sites inside a collapsed segment that are paralogous sequence variants "
+        "(cohort reference-only, the copy ALT)."
+    )
+    collapsed_carrier_frequency: float = setting(
+        generating.STRUCTURE_COLLAPSED_CARRIER_FREQUENCY, "float",
+        "Probability that a source haplotype carries a collapsed segment's copy: 1 = fixed in every sample; below 1 a "
+        "copy-number polymorphism inherited through the pedigree."
     )
     variants: tuple = setting(
         (), "variants",

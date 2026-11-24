@@ -69,6 +69,7 @@ def _workspace(panels, latent, evidence, settings: RefinementSettings) -> Compon
         map_probability_floor=config.map_probability_floor,
         windows_factory=_windows,
         latent=None if all(item is None for item in latent) else tuple(latent),
+        search_alleles_reversed=settings.search_alleles_reversed,
     )
 
 

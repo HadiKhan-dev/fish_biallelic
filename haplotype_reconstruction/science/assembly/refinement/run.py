@@ -50,6 +50,7 @@ class RefinementSettings:
     census: Callable[[TieCensus], None] | None = field(
         default=None, repr=False, compare=False, metadata={"stored": False}
     )
+    search_alleles_reversed: bool = False
 
 
 def _tie_record(counter):

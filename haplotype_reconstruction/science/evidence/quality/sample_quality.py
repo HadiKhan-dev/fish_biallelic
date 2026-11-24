@@ -8,7 +8,7 @@ balance instead, its errors a small rate of their own, and a local artefact (a c
 a private haplotype tract with mapping bias) whatever fraction it has, in a few places.
 
 **Eligible cells.** At the biallelic SNPs that pass the site filter's quality rules r1-r4 (whole analysed cohort),
-the cohort-minor allele is ALT when the cohort's ALT reads do not exceed its REF reads. A library carries it at a site
+the cohort-minor allele has the smaller read total. Ties use the contig's canonical allele order. A library carries it
 when its k minor reads of depth d are improbable as errors at the scale of the cohort, P(K >= k | d, e) <= q / (N - 1)
 with K ~ Binomial(d, e), e the contig's clean wrong-allele rate (r3's eps0) and q ``carrier_tail_level``. A cell
 (library, site) is eligible when the library is observed there and no other library carries the minor allele; every
@@ -19,7 +19,9 @@ the library's other eligible cells within the contig's read-sharing range), phi(
 at distance d (science.evidence.read_sharing; 4.21, replacing a fixed 1,000 bp window): a working weight for this
 selected mixture score, not its covariance. Without measured sharing every weight is 1.
 
-**Cell model.** a_min = ``minimum_foreign_fraction`` / 2 is a working foreign-allele amplitude. An eligible cell in
+**Cell model.** a_min, the larger of ``minimum_foreign_fraction`` / 2 and the clean error rate times the error
+separation (so own errors stay resolvable; a noisy library is tested above a higher floor, not refused), is the
+smallest foreign-allele amplitude tested. An eligible cell in
 depth class j (the library's eligible-cell depth quantiles, ``heterozygote_depth_classes`` of them) has minor reads k
 with probability
 
@@ -33,7 +35,7 @@ with probability
   orientations (a complemented library gives the same likelihood);
 * c: the foreign-component share within the non-artefact mixture, common to depth classes and regions;
   its marginal share in region R is (1 - pi_R) c;
-* a: the foreign allele's read fraction on G log-spaced values over (a_min, a_hi], a_hi = f h_lo / 2
+* a: the foreign allele's read fraction on G log-spaced values over (a_min, a_hi], a_hi = f min(h_lo, 1 - h_hi) / 2
   (f ``heterozygote_floor_ratio``); grosser contamination is fitted at that ceiling.
 
 **Local artefacts.** The contig's passing sites are cut into ``artefact_regions`` contiguous regions of equal site
@@ -84,6 +86,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import replace
 
 import numpy as np
 from numba import get_num_threads, prange, types
@@ -91,7 +94,7 @@ from scipy.stats import binom, chi2
 
 from haplotype_reconstruction.contracts.evidence import InheritedSegment, SampleQualityDecision
 from haplotype_reconstruction.core import ties
-from haplotype_reconstruction.core.kernels import bounded_team, kernel, sample_team
+from haplotype_reconstruction.core.kernels import bounded_team, kernel
 from haplotype_reconstruction.core.ties import TieCount, TieCounts
 
 from .parameters import (
@@ -202,69 +205,83 @@ def _region_bounds(passing_positions, regions):
 @kernel(
     overloads=(
         (
-            types.Array(types.int64, 1, "C", readonly=True), types.Array(types.int64, 1, "C", readonly=True),
-            types.Array(types.int64, 1, "C", readonly=True), types.Array(types.float64, 1, "C", readonly=True),
-            types.int64, types.Array(types.float64, 1, "C"),
+            types.Array(types.int64, 1, "C", readonly=True), types.int64[::1], types.int64[::1], types.int64[::1],
+            types.int64[::1], types.int64[::1], types.int64[::1], types.float64[::1], types.float64[::1],
         ),
     ),
     cache=True,
     parallel=True,
     nogil=True,
 )
-def _shared_sums(sample, position, edges, phi, reach, out):
-    """out[c] = sum of phi(|x_c - x_c'|) over the other cells c' of c's sample within ``reach`` bp; cells sorted by
-    (sample, position), phi per bin of ``edges``. Every cell's sum is independent (parallel over cells)."""
-    n = sample.shape[0]
-    for c in prange(n):
-        total = 0.0
-        for side in (-1, 1):
-            o = c + side
-            while 0 <= o < n and sample[o] == sample[c]:
-                distance = abs(position[o] - position[c])
-                if distance >= reach:
-                    break
-                k = 0
-                while edges[k + 1] <= distance:
-                    k += 1
-                total += phi[k]
-                o += side
-        out[c] = total
+def _binned_sums(position, block_start, block_stop, block_first, block_end, lower, upper, weights, out):
+    """out[c] = sum over bins b of weights[b] x (number of the other cells of c's sample at distance [lower[b],
+    upper[b]) bp from c), for cells sorted by (sample, position). The read-sharing curve is constant on each bin, so
+    this is the sum of phi over c's neighbours (4.22 EVQ: the earlier pair loop's cost grew with the cells inside the
+    reach).
 
-
-@kernel(
-    overloads=((types.Array(types.int64, 1, "C", readonly=True), types.int64[::1],
-                types.int64[::1], types.int64[::1], types.float64[::1], types.float64[::1]),),
-    cache=True, parallel=True, nogil=True,
-)
-def _add_tail_sums(position, sample_edges, lower, upper, weights, out):
-    """Add the sparse tail with two moving endpoints on each side of a cell.
-
-    Cells are sorted by sample and position. For each nonzero tail bin, every endpoint traverses the sample once,
-    so time depends on the cell count and the number of positive tail bins and is independent of the width in bp.
-    """
-    for s in prange(len(sample_edges) - 1):
-        first, stop = sample_edges[s], sample_edges[s + 1]
+    Block i holds cells [block_start[i], block_stop[i]) of one sample whose cells are [block_first[i], block_end[i]).
+    Within a block, every bin's four endpoints (left and right, near and far) start by bisection and then only move
+    forward, so time is O(cells x bins + blocks x bins x log cells), independent of the width in bp. Blocks are
+    independent (parallel over blocks)."""
+    for i in prange(len(block_start)):
+        start, stop, first, end = block_start[i], block_stop[i], block_first[i], block_end[i]
+        x0 = position[start]
         for b in range(len(weights)):
-            left_low = left_high = right_low = right_high = first
             low, high, weight = lower[b], upper[b], weights[b]
-            for i in range(first, stop):
-                x = position[i]
-                while left_low < stop and position[left_low] <= x - high:
+            # left neighbours at distance [low, high): positions in (x - high, x - low], or (x - high, x) for the first
+            # bin, whose distance-0 cells (the cell itself, and a duplicate position) the right side counts
+            strict = low == 0
+            left_low = first + np.searchsorted(position[first:end], x0 - high, side="right")
+            if strict:
+                left_high = first + np.searchsorted(position[first:end], x0, side="left")
+            else:
+                left_high = first + np.searchsorted(position[first:end], x0 - low, side="right")
+            # right neighbours: positions in [x + low, x + high)
+            right_low = first + np.searchsorted(position[first:end], x0 + low, side="left")
+            right_high = first + np.searchsorted(position[first:end], x0 + high, side="left")
+            for c in range(start, stop):
+                x = position[c]
+                while left_low < end and position[left_low] <= x - high:
                     left_low += 1
-                while left_high < stop and position[left_high] <= x - low:
+                while left_high < end and (position[left_high] < x if strict else position[left_high] <= x - low):
                     left_high += 1
-                while right_low < stop and position[right_low] < x + low:
+                while right_low < end and position[right_low] < x + low:
                     right_low += 1
-                while right_high < stop and position[right_high] < x + high:
+                while right_high < end and position[right_high] < x + high:
                     right_high += 1
-                out[i] += (left_high - left_low + right_high - right_low) * weight
+                count = left_high - left_low + right_high - right_low
+                if strict:
+                    count -= 1  # the cell itself, at distance 0 on the right side
+                out[c] += count * weight
+
+
+_BLOCKS_PER_THREAD = 4
+"""Work blocks per thread for the binned sums: a sample's cells are split into blocks so the sum runs in parallel over
+cells rather than samples (a cohort of fewer samples than threads, or one deep sample, would otherwise idle threads)."""
+
+
+def _sum_blocks(sample, threads):
+    """Blocks (start, stop, first, end) over cells sorted by sample: each sample's run split into about equal blocks of
+    at least one cell, about ``_BLOCKS_PER_THREAD`` per thread overall."""
+    n = len(sample)
+    edges = np.flatnonzero(np.r_[True, sample[1:] != sample[:-1], True])
+    first, end = edges[:-1], edges[1:]
+    target = max(1, -(-n // max(1, threads * _BLOCKS_PER_THREAD)))
+    pieces = np.maximum(1, -(-(end - first) // target))
+    owner = np.repeat(np.arange(len(first)), pieces)
+    within = np.arange(len(owner)) - np.repeat(np.cumsum(pieces) - pieces, pieces)
+    length = end[owner] - first[owner]
+    start = first[owner] + (within * length) // pieces[owner]
+    stop = first[owner] + ((within + 1) * length) // pieces[owner]
+    return (np.ascontiguousarray(start, dtype=np.int64), np.ascontiguousarray(stop, dtype=np.int64),
+            np.ascontiguousarray(first[owner], dtype=np.int64), np.ascontiguousarray(end[owner], dtype=np.int64))
 
 
 class _Collector:
     """One pass over position-ordered tiles: per-library weighted histograms of eligible cells (sample, region,
-    orientation, depth, minor reads) and the near-private carrier cells of the segment report. The eligible cells
-    of a tile's last fragment window wait for the next tile, so every window's cell count is complete when its
-    cells are weighted."""
+    orientation, depth, minor reads) and the near-private carrier cells of the segment report. Eligible cells within
+    the read-sharing reach of the last site seen wait for later tiles, so every cell's neighbour count is complete when
+    it is weighted; complete cells are weighted once they outnumber the cells they are weighted against."""
 
     def __init__(
         self, n_samples, error_rate, level, heterozygote_balance, read_sharing, region_bounds, *, reverse=False
@@ -277,12 +294,19 @@ class _Collector:
         self.edges = np.ascontiguousarray(edges, dtype=np.int64)
         self.phi = np.ascontiguousarray(bins, dtype=np.float64)
         self.reach = int(reach)
-        self.molecular_reach = self.reach
-        self.tail = None
+        # Each cell's neighbour weight sums phi over the bins below the fitted range (the whole curve when the range is
+        # unresolved) and, separately, over the conservative tail bins of the first omitted octave.
+        molecular_reach = self.reach if read_sharing.applied_tail is None else int(read_sharing.range_bp)
+        lower = self.edges[:-1]
+        bin_weight = np.where(lower < molecular_reach, self.phi, 0.0)
         if read_sharing.applied_tail is not None:
-            positive = np.flatnonzero(read_sharing.applied_tail)
-            self.molecular_reach = int(read_sharing.range_bp)
-            self.tail = (edges[positive], edges[positive + 1], bins[positive])
+            tail = np.zeros(len(self.phi), bool)
+            tail[np.flatnonzero(read_sharing.applied_tail)] = True
+            bin_weight = bin_weight + np.where(tail, self.phi, 0.0)
+        used = np.flatnonzero(bin_weight != 0.0)
+        self.bin_lower = np.ascontiguousarray(lower[used], dtype=np.int64)
+        self.bin_upper = np.ascontiguousarray(self.edges[used + 1], dtype=np.int64)
+        self.bin_weight = np.ascontiguousarray(bin_weight[used], dtype=np.float64)
         self.bounds = region_bounds
         self.regions = len(region_bounds) + 1
         self.context = (np.zeros(0, np.int64), np.zeros(0, np.int64))  # (sample, position) of cells weighed last
@@ -291,7 +315,8 @@ class _Collector:
         self.eligible = np.zeros(n_samples, np.int64)
         self.minor_cells = np.zeros(n_samples, np.int64)
         self.codes, self.weights, self.entries = [], [], 0
-        self.open = tuple(np.zeros(0, np.int64) for _ in range(5))  # (sample, position, orientation, depth, k)
+        self.open = []  # position-ordered chunks of (sample, position, orientation, depth, k) not yet weighed
+        self.open_cells = 0
         self.columns = [[] for _ in range(8)]
         self.passing_sites = self.contributing = self.tied = 0
 
@@ -313,15 +338,11 @@ class _Collector:
             all_position = np.concatenate((neighbours[1], position))
             order = np.lexsort((all_position, all_sample))
             sums = np.zeros(len(order))
-            frozen = [np.ascontiguousarray(a) for a in (all_sample[order], all_position[order], self.edges, self.phi)]
-            for a in frozen:
-                a.flags.writeable = False
-            _shared_sums(*frozen, self.molecular_reach, sums)
-            if self.tail is not None:
-                sample_edges = frozen[0].searchsorted(np.arange(self.n + 1))
-                threads = sample_team(self.n, get_num_threads(), len(order) // self.n)
-                with bounded_team(threads):
-                    _add_tail_sums(frozen[1], sample_edges, *self.tail, sums)
+            sorted_position = np.ascontiguousarray(all_position[order])
+            sorted_position.flags.writeable = False
+            blocks = _sum_blocks(all_sample[order], get_num_threads())
+            with bounded_team(len(blocks[0])):
+                _binned_sums(sorted_position, *blocks, self.bin_lower, self.bin_upper, self.bin_weight, sums)
             shared = np.empty(len(order))
             shared[order] = sums
             weight = 1.0 / (1.0 + shared[len(neighbours[0]):])
@@ -367,10 +388,26 @@ class _Collector:
             d.astype(np.int64),
             k.astype(np.int64),
         )
-        cells = tuple(np.concatenate((held, new)) for held, new in zip(self.open, cells, strict=False))
-        complete = cells[1] < int(positions[-1]) - self.reach if self.reach > 0 else np.ones(len(cells[0]), bool)
-        self._weigh(*(column[complete] for column in cells), self._neighbours(cells, complete))
-        self.open = tuple(column[~complete] for column in cells)
+        # Cells arrive in position order, so the complete cells are a prefix of the open ones. They are weighed once
+        # they outnumber the cells they must be weighed against (the left context and the rest of the open cells):
+        # each weighing then sorts at most about twice its own cells, so a long read-sharing reach costs no more
+        # than a short one per cell (4.22 EVQ). A cell's weight does not depend on when it is weighed.
+        self.open.append(cells)
+        self.open_cells += len(cells[0])
+        boundary = int(positions[-1]) - self.reach
+        ready = (
+            sum(int(np.searchsorted(chunk[1], boundary, side="left")) for chunk in self.open)
+            if self.reach > 0
+            else self.open_cells
+        )
+        if ready and ready >= len(self.context[0]) + self.open_cells - ready:
+            cells = tuple(np.concatenate(columns) for columns in zip(*self.open, strict=True))
+            complete = np.zeros(len(cells[0]), bool)
+            complete[:ready] = True
+            self._weigh(*(column[:ready] for column in cells), self._neighbours(cells, complete))
+            rest = tuple(column[ready:].copy() for column in cells)  # a copy frees the weighed cells' buffer
+            self.open = [rest] if len(rest[0]) else []
+            self.open_cells = len(rest[0])
 
         # Near-private carriers (at most two per site) for the inherited-segment report.
         near = np.flatnonzero((carriers >= 1) & (carriers <= 2))
@@ -427,7 +464,8 @@ class _Collector:
         return neighbours
 
     def finish(self):
-        self._weigh(*self.open, self.context)
+        if self.open:
+            self._weigh(*(np.concatenate(columns) for columns in zip(*self.open, strict=True)), self.context)
         self._reduce()
         code = self.codes[0] if self.codes else np.zeros(0, np.int64)
         weight = self.weights[0] if self.weights else np.zeros(0)
@@ -1299,9 +1337,10 @@ def assess_counts(
     counts: int32 (samples, input sites, 2), REF then ALT; passing: bool[input sites] selecting the r1-r4-passing
     sites; heterozygote_balance: r4's clean ALT fraction h0; error_rate: r3's clean wrong-allele rate eps0;
     balance_interval, balance_reason: the own-heterozygote balance interval and why it is wider than h0 (default
-    (h0, h0); see ``balance_support``). Dense scratch is
-    bounded by ``chunk_sites`` passing sites (plus the eligible cells of one fragment window); retained summaries are
-    the per-library histograms and at most two near-private carriers per passing site.
+    (h0, h0); see ``balance_support``). Dense scratch is bounded by ``chunk_sites`` passing sites; eligible cells within
+    the read-sharing reach wait for later tiles (at most about four reach-widths of cells, the whole contig's when the
+    range is unresolved); retained summaries are the per-library histograms and at most two near-private carriers per
+    passing site.
     """
     selected = np.flatnonzero(passing)
     passing_positions = np.asarray(positions[selected], np.int64)
@@ -1327,20 +1366,32 @@ def assess_counts(
     )
 
 
+def reflect_alt_balance(result: SampleQualityDecision) -> SampleQualityDecision:
+    """Express the fitted ALT quantities in the opposite allele coding."""
+    return replace(
+        result,
+        heterozygote_balance=1.0 - result.heterozygote_balance,
+        heterozygote_fit=1.0 - result.heterozygote_fit,
+        balance_interval=(1.0 - result.balance_interval[1], 1.0 - result.balance_interval[0]),
+    )
+
+
 def _grids(error_rate, interval, config):
-    """The error, own-heterozygote and foreign grids with a_min and a_hi, or the reason the QC cannot run."""
-    minimum = 0.5 * config.minimum_foreign_fraction
-    floor = config.heterozygote_floor_ratio * interval[0]
+    """The error, own-heterozygote and foreign grids with a_min and a_hi, or the reason the QC cannot run.
+
+    a_min, the smallest foreign-allele amplitude tested (the detection floor, reported as ``minimum_fraction``), is
+    the larger of half ``minimum_foreign_fraction`` and the clean error rate times the error separation: own errors
+    must stay resolvable below it. A noisy library (long reads) is therefore tested above a higher floor rather than
+    refused (4.22); the QC refuses only when no resolvable foreign range is left below a_hi."""
+    minimum = max(0.5 * config.minimum_foreign_fraction, _ERROR_SEPARATION * error_rate)
+    # Bound the foreign amplitude by the lower clean balance in either orientation.
+    floor = config.heterozygote_floor_ratio * min(interval[0], 1.0 - interval[1])
     ceiling = 0.5 * floor
-    if not error_rate * _ERROR_SEPARATION < minimum:
-        return None, (
-            f"clean error rate {error_rate:.3g} not below the minimum foreign fraction {minimum:g} / "
-            f"{_ERROR_SEPARATION:g}"
-        )
     if not ceiling > _MINIMUM_FOREIGN_RANGE * minimum:
         return None, (
             f"foreign ceiling {ceiling:.3g} (half the balance floor) not above {_MINIMUM_FOREIGN_RANGE:g} x "
-            f"the minimum foreign fraction {minimum:g}"
+            f"the detection floor {minimum:.3g} (the larger of half the minimum foreign fraction and "
+            f"{_ERROR_SEPARATION:g} x the clean error rate {error_rate:.3g})"
         )
     bottom = _ERROR_GRID_BOTTOM * error_rate
     steps = max(int(math.ceil(math.log(minimum / bottom) / math.log(_ERROR_GRID_RATIO))), 1)
@@ -1415,8 +1466,11 @@ def _assess(
             profile = np.maximum(alternative[s], null[s])
             best = ties.conv_argmax(profile, reverse=False)
             lrt[s] = 2.0 * (profile[best] - null[s])
-            fraction[s] = fractions[best]
             share[s] = alternative_share[s, best] if profile[best] > null[s] else 0.0
+            # A zero-weight component has no identifiable amplitude. A flat
+            # profile can select different grid cells under REF/ALT roundoff.
+            if share[s] > 0.0:
+                fraction[s] = fractions[best]
             artefact[s], peak[s] = artefact_share[s], artefact_peak[s]
         flagged = np.isfinite(lrt) & (lrt >= threshold)
     return SampleQualityDecision(

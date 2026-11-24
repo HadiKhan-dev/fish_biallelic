@@ -16,7 +16,7 @@ from ...core.errors import InvariantError
 from ...core.files import staged_path
 from ..reports.tables import record_mapping, write_json
 from .founders import write_identity_flags
-from .records import project_sites
+from .records import FOUNDER_IDENTITY_FILE, project_sites
 
 if TYPE_CHECKING:
     from ...contracts.assembly import FounderRelease
@@ -61,8 +61,10 @@ def export_contig(
     phase_ambiguity=None,
     founder_release=None,
     map_work=None,
+    sample_header: str = "",
 ) -> dict:
-    """Write one chromosome's files; returns its manifest entry.
+    """Write one chromosome's files; returns its manifest entry. ``sample_header``: extra meta-information lines of the
+    sample VCF (samples.contamination_header).
 
     ``founders``: (stage, [(positions int64 [L], released int8 [K, L])]) in component order; ``phase``:
     (sample_ids, positions, component_ids, calls int8 [N, L, 2]) as family_phase.records.load_calls returns;
@@ -162,6 +164,7 @@ def export_contig(
                 phase_breaks=breaks,
                 frame_undetermined=undetermined,
                 threads=threads,
+                extra_header=sample_header,
             )
             return place(
                 temporary,
@@ -300,6 +303,7 @@ def export_records(
     synthetic: bool = False,
     index: bool = True,
     map_work=None,
+    sample_header: str = "",
 ) -> dict:
     """Render contract records and the product-dependent manifest entry.
 
@@ -354,11 +358,12 @@ def export_records(
         phase_ambiguity=ambiguity,
         founder_release=metadata,
         map_work=map_work,
+        sample_header=sample_header,
     )
     if need_founders:
         assert founders is not None
         entry["refit_ambiguous_alleles"] = int(founders.refit_ambiguous_alleles)
-        entry["files"].append("founder_identity.csv")
+        entry["files"].append(FOUNDER_IDENTITY_FILE)
         entry["founder_identity_flags"] = len(founders.identity_flags)
         entry.update(
             assembly_release_work_counters=dict(founders.work_counters),
@@ -384,4 +389,4 @@ def write_founder_identity(destination: Path, results, contigs, products, *, col
 
     records = collected if collected is not None else map(record, contigs)
 
-    return write_identity_flags(Path(destination) / "founder_identity.csv", records)
+    return write_identity_flags(Path(destination) / FOUNDER_IDENTITY_FILE, records)

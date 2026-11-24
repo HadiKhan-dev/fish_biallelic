@@ -32,9 +32,10 @@ stretch_sites = 1.0
 stretch_miss = 0.0
 miss = 0.0
 miss_sample_cv = 0.0
-call_min_alt_fraction = 0.0
 block_band = 0.5
-balance_dispersion = 0.026
+# 4.22: the per-cell heterozygote redraw is refused with reads (it made reads disagree with their homologue at
+# single sites); the short_read_cohort read preset gives the balance through its mate mapping loss.
+balance_dispersion = 0.0
 systematic_sites = 0.0
 systematic_lo = 0.0
 systematic_hi = 0.0

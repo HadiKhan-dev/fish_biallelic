@@ -7,14 +7,16 @@ direct observation of latent 0 or 1 (role 0, 1), a child of the pair (role 2: a 
 homologues and a maternal selector over latent 1's, each switching with the meiotic probability theta), ignored
 (role 3), an outsider explained by its own best mosaic (role 4) or a half child of latent 0 or 1 (roles 5, 6: one
 homologue through a meiotic selector over that latent's homologues, the other a free founder mosaic under the same
-law). Emission of an unordered painted pair {x, y} given true classes (u, v): f(x,u) f(y,v) + f(y,u) f(x,v)
-(x != y) or f(x,u) f(x,v), with f = 1 - delta when equal and delta otherwise (PD06's convention); bins without both
-labels emit 1. Each painted label carries its own delta per bin (4.21, ADVICE2 11.1 applied to this consumer of the
-direction mismatch): min(1/2, max(floor, v)), v the reference painting's probability that this member's label on
-that homologue is wrong (only the member's label can be wrong: the latent trajectories' classes are not painted), the
-4.20 constant as the floor; ``mdelta`` float64 [M, B, 2] per member, ``dm`` float64 [B, 2] for one member. The profile log likelihood maximises over the latent paths and the flexible members' roles (MAP-EM
-with exact selector posteriors, pair-path Viterbi M steps, exact homologue-label flip moves and role updates;
-monotone); member selectors are summed exactly.
+law). Emission of an unordered painted pair {x, y} given true classes (u, v): the probability of the member labels'
+error pattern under the orientation x <- u, y <- v, plus that of x <- v, y <- u when x != y (_emit); bins without
+both labels emit 1. Each member and bin carries its error-pattern law (4.22 R4b;
+family_transmission.member_allowances): both right, label 0 wrong only, label 1 wrong only, both wrong, a wrong
+label's whole mass given to whichever class a hypothesis needs, from the reference painting's untempered label-error
+statistic (u, v_0, v_1) under the 4.20 floor (only the member's labels can be wrong: the latent trajectories'
+classes are not painted); ``mdelta`` float64 [M, B, 4] per member, ``dm`` float64 [B, 4] for one member. The profile
+log likelihood maximises over the latent paths and the flexible members' roles (MAP-EM with exact selector
+posteriors, pair-path Viterbi M steps, exact homologue-label flip moves and role updates; monotone); member
+selectors are summed exactly.
 
 Method: docs/methods/pedigree.md#pd29
 """
@@ -31,16 +33,23 @@ from .kernels.family_transmission import OVERLOADS
 NEG = -1e300
 
 
-@kernel(overloads=OVERLOADS["family_likelihood._f"], cache=True, nogil=True)
-def _f(a, b, delta):
-    return 1.0 - delta if a == b else delta
-
-
 @kernel(overloads=OVERLOADS["family_likelihood._emit"], cache=True, nogil=True)
-def _emit(x, y, u, v, dx, dy):
+def _emit(x, y, u, v, rr, wr, rw, ww):
+    """Emission of a member's painted unordered pair {x, y} (label 0 = x, label 1 = y) given true classes (u, v):
+    the error-pattern probabilities (rr both right, wr label 0 wrong only, rw label 1 wrong only, ww both wrong;
+    member_allowances) of the orientation x <- u, y <- v, plus those of x <- v, y <- u
+    when x != y. Exactly one pattern applies per orientation (selected, never summed with zero weights)."""
+    if x == u:
+        first = rr if y == v else rw
+    else:
+        first = wr if y == v else ww
     if x == y:
-        return _f(x, u, dx) * _f(x, v, dy)
-    return _f(x, u, dx) * _f(y, v, dy) + _f(y, u, dy) * _f(x, v, dx)
+        return first
+    if x == v:
+        second = rr if y == u else rw
+    else:
+        second = wr if y == u else ww
+    return first + second
 
 
 @kernel(overloads=OVERLOADS["family_likelihood._switch"], cache=True, nogil=True)
@@ -64,7 +73,7 @@ def _child_fb(tc, cls, known, paths, theta, floor, dm, want_gamma, gamma, inc):
                 u = tc[paths[0, s, t], t]
                 for r in range(2):
                     v = tc[paths[1, r, t], t]
-                    e[2 * s + r] = _emit(cls[t, 0], cls[t, 1], u, v, dm[t, 0], dm[t, 1])
+                    e[2 * s + r] = _emit(cls[t, 0], cls[t, 1], u, v, dm[t, 0], dm[t, 1], dm[t, 2], dm[t, 3])
         if t == 0:
             for q in range(4):
                 fw[t, q] = 0.25 * e[q]
@@ -134,7 +143,8 @@ def _half_fb(tc, cls, known, paths, latent, theta, floor, dm, want_gamma, gamma,
                 for f in range(T):
                     e = 1.0
                     if known[t]:
-                        e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], dm[t, 0], dm[t, 1])
+                        e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t],
+                                dm[t, 0], dm[t, 1], dm[t, 2], dm[t, 3])
                     if want_gamma:
                         emissions[t, sl, f] = e
                     fw[t, sl, f] = 0.5 / T * e
@@ -151,7 +161,8 @@ def _half_fb(tc, cls, known, paths, latent, theta, floor, dm, want_gamma, gamma,
                     v = sel[f] * (1.0 - th) + (tot - sel[f]) * ch
                     e = 1.0
                     if known[t]:
-                        e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], dm[t, 0], dm[t, 1])
+                        e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t],
+                                dm[t, 0], dm[t, 1], dm[t, 2], dm[t, 3])
                     if want_gamma:
                         emissions[t, sl, f] = e
                     fw[t, sl, f] = v * e
@@ -227,7 +238,8 @@ def _direct_inc(tc, cls, known, paths, latent, dm, inc):
     total = 0.0
     for t in range(B):
         if known[t]:
-            v = math.log(_emit(cls[t, 0], cls[t, 1], tc[paths[latent, 0, t], t], tc[paths[latent, 1, t], t], dm[t, 0], dm[t, 1]))
+            v = math.log(_emit(cls[t, 0], cls[t, 1], tc[paths[latent, 0, t], t], tc[paths[latent, 1, t], t],
+                    dm[t, 0], dm[t, 1], dm[t, 2], dm[t, 3]))
             inc[t] += v
             total += v
     return total

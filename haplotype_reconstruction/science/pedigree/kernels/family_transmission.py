@@ -18,8 +18,7 @@ _ft_f4 = types.Array(types.float64, 4, "C")
 _ft_f, _ft_n, _ft_q = types.float64, types.int64, types.boolean
 OVERLOADS.update(
     {
-        "family_likelihood._f": ((_ft_n, _ft_n, _ft_f),),
-        "family_likelihood._emit": ((_ft_n, _ft_n, _ft_n, _ft_n, _ft_f, _ft_f),),
+        "family_likelihood._emit": ((_ft_n, _ft_n, _ft_n, _ft_n, _ft_f, _ft_f, _ft_f, _ft_f),),
         "family_likelihood._switch": ((_ft_f, _ft_f),),
         "family_likelihood._child_fb": tuple(
             (_ft_i2, _ft_i2, _ft_b1, _ft_i3, _ft_f1, _ft_f, _ft_f2, want, _ft_f2, _ft_f1)

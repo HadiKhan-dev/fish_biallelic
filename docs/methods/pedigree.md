@@ -309,15 +309,15 @@ Parameters by name: `markers_per_bin`. Values and provenance are in the [generat
 Cost and scope: O(L); O(N M). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps03"></a>
-## ps03 Information exponents of the tempered view
+## ps03 One likelihood per configuration
 
-Group bins across the contig in prepared-component order, starting a new information group only after the preceding running count reaches the marker budget. Count every empty bin as one for grouping. Per child, count the n nonidentical likelihood triples in the selected markers of the bin's group and form the tempered view's exponent x = 1 / (1 + (n - 1) r_T); no informative markers gives zero. r_T = (d - 1) / (reference_snps_per_bin - 1) with d the painting's confidence divisor (4.21 B1, `information_temperature` = confidence): a TRANSFERRED working temperature, estimated by this run under the painting's model, not the pedigree's (at d = 128 the implied correlation exceeds 1), so no calibrated pedigree evidence is claimed. The path divisor and 4.20's min(3, n) / n (`fixed`) are the gate's other arms. For a fixed path the net coefficient on the log emissions is (1 + x) / 2 >= 1/2. Split the exponents back into component arrays.
+Every observed selected marker of a child enters each configuration's forward chain once, at full strength (4.22 R4 1a): there is no tempered view, information exponent, information group or pooled average of two views, and no transferred working temperature from the painting's confidence divisor. The dependence of markers covered by the same reads stays inside the model through the child's read state ([child read state](#child-read-state)); the parents' source chains keep the painting's path strength ([ps05](#ps05)), a declared design that keeps full sibs apart from parents.
 
-Implementation: [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
+Implementation: [science/pedigree/read_forward.py](../../haplotype_reconstruction/science/pedigree/read_forward.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
 
-Parameters by name: `markers_per_information_block`, `information_temperature`, `effective_markers_per_information_block`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: none (the information-block, effective-marker and transferred-temperature settings are removed).
 
-Cost and scope: O(N ΣM). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: one forward chain per configuration, O((M_obs + B)·S²).
 
 <a id="ps04"></a>
 ## ps04 Selector switch probabilities and configured material
@@ -335,6 +335,30 @@ Cost and scope: O(B). These terms describe the unit's work/storage dimensions; i
 ## ps05 Source chain with the painting's read state
 
 Every sample as a candidate parent is an HMM over (ordered diplotype u, read class c), S² C states, read at the painting's path strength on its reference grid. From (u, c) at bin b to (v, c') at bin b + 1 the weight is A_b(u, v) E_{b+1}(v)[c, c'], E_b(v)[c, c'] = exp(e_b(v) + l_b(v)) M_b(v)[c, c']: A_b the painting's label-level Hamming transition, e_b the tempered scalar bin emission, M_b the bin's read matrix and l_b its log scale (the class at the previous bin's last selected site carried through the bin's sites to the class at its last site; the first bin starts from the first site's class law). An ordered v with v1 > v2 reads the unordered pair's matrix with both class indices permuted by J (the homologue swap of the classes), so the chain is invariant under (a, b, c) ↔ (b, a, J c). Without read state (`read_classes` = 1, or a sample deep at every site) C = 1 and M = 1: the scalar chain, through the same kernels. The diplotype prior is uniform; the painting's panel-error state is left out.
+
+The read matrix tempers each site's per-class read factor with the bin's weight w, f_l(c) = R_l(c)^w.
+The untempered factors average to one over the site's class law, Σ_c π_l(c) R_l(c) = 1. By Jensen's inequality the
+tempered average is strictly below one when 0 < w < 1 and R_l varies among classes with positive probability under
+π_l. This deficit arises at heterozygous allele configurations, which can also occur for a repeated BACKGROUND
+label. Over a bin the class-path average of the tempered product is at most the untempered bin likelihood to the
+power w. The source chain uses the bin-level correction (4.22 D5) to remove this deficit.
+
+Each pair's bin matrix keeps its tempered shape (its class dynamics), and its log scale becomes
+l_b(v) = w log(α_b M_b^1(v) 1) − log(α_b M̂_b(v) 1), with M_b^1 the untempered bin matrix including its scale and
+M̂_b the stored, rescaled tempered matrix. Thus α_b exp(l_b) M̂_b 1 = (α_b M_b^1 1)^w. The total from the entering
+class law α_b is the bin's untempered read likelihood to the power w, the same exponent used for the scalar
+emission. A second pass over (sample, label pair) starts with the first bin's entry site class law and normalises
+α_{b−1} M̂_{b−1}(v) to get α_b. This approximates the source predictor by carrying the class law along the fixed
+label pair, omitting label transitions and scalar emissions from the carry. Each pair carries its own α even
+when pairs share a bin's matrix. In exact arithmetic the correction multiplier is at least one and equals one
+at w = 1, where rounding contributes about 10⁻⁸ nats. The correction makes a bin without read sharing exactly
+neutral.
+
+Without the correction, short paired-end reads at low per-sample depth, whose read evidence is weak, lost their
+true parents to the penalty. Zero_stress kept 41 of 68 Tier B edges (68 with the correction or without the read
+state) and bc8 at 2.5x released none (120 with the correction). Long reads kept their read-state gains, which the
+scalar source chain loses entirely (famhs 0 of 98). The painting, its calibration, family phase and the map-scale
+frames take the same correction (4.22 D5P, [painting](painting.md), read-state tempering).
 
 Exact forward-backward per sample: backward class vectors β_b(u, c) (one Hamming contraction per class, max-normalised per bin), then the transmission-oriented propagation over (x, y, c), x the transmitted homologue's label: P_{b+1}(x, y, c') = (1 − τ_b) D(x, y, c') + τ_b D(y, x, J c'), D(v, c') = Σ_{u, c} P_b(u, c) A_b(u, v) E_{b+1}(v)[c, c'] β_{b+1}(v, c') / β_b(u, c), from the homologue-symmetrised first-bin posterior, τ_b the meiotic switch probability ([PS04](#ps04)). Its class-free law is the homologue-symmetrised marginal at every bin (the selector is stationary at one half and independent of the parent's data); the transmitted marginal π and the three flows of the transmitted coordinate (same state, leaving, entering) are the class-summed scalar formulas with each class's right weights r_b(v, c) = Σ_{c'} E_{b+1}(v)[c, c'] β_{b+1}(v, c'), and are normalised with the propagated law. Preparation computes and stores, class-free: the unordered pair masses (exposure), π, the flows and BACKGROUND's transmitted ALT probability ([PS06](#ps06)); no class axis is stored. Evidence-free samples keep the uniform chain (no emission, no read state). Available samples losing supported mass raise an invariant error naming the original sample, the component and the boundary. One bounded, contiguous evidence slice supplies the painting builder at a time. In a mixed slice, the source recurrence uses a one-class batch for samples of unshared libraries and samples that bypass the read state at every site. The read-state samples use their carried widths. Both sets of results are restored to the canonical sample order. Map-scale frames use one-class matrices for bypassed rows, with no class transfer in the gaps.
 
@@ -389,9 +413,9 @@ Parameters by name: `null_prior_samples`. Values and provenance are in the [gene
 Cost and scope: O(N B S). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps10"></a>
-## ps10 Child emission and composite forward score of M0, M1 and M2
+## ps10 Child emission and forward likelihood of M0, M1 and M2
 
-Initialise M0, M1 and M2 from null or observed-parent source laws. At each boundary update the first slot then the second, bridge before excursion. Multiply observed-marker emissions in site order; recompute a whole unstable bin in log space. Emission normalization uses correctly rounded division followed by the power on every probability/cache route, skipping the power at unit exponent. A zero exponent still runs normalisation and can have a rounding-sized increment. Pool full and tempered log scores at the fixed composite weight; this is not an independent-marker likelihood. With the painting's read state the chains also carry the child's read class ([child read state](#child-read-state)).
+Initialise M0, M1 and M2 from null or observed-parent source laws. At each boundary update the first slot then the second, bridge before excursion. Multiply observed-marker emissions in site order; recompute a whole unstable bin in log space. Each bin's emissions are divided by their largest value before they multiply the forward state, and the normaliser enters the log likelihood. The score is the configuration's one forward log likelihood ([ps03](#ps03)). With the painting's read state the chains also carry the child's read class ([child read state](#child-read-state)).
 
 
 Implementation: [science/pedigree/forward.py](../../haplotype_reconstruction/science/pedigree/forward.py), [science/pedigree/read_forward.py](../../haplotype_reconstruction/science/pedigree/read_forward.py), [science/pedigree/selective_m1.py](../../haplotype_reconstruction/science/pedigree/selective_m1.py).
@@ -403,18 +427,18 @@ Cost and scope: O((M_obs + B)·S²); O(S); O(N (M + B) S²). These terms describ
 <a id="child-read-state"></a>
 ## Child read state in the configuration chains
 
-With the painting's read state (`read_classes` > 1) every configuration chain of a child (M0, M1, M2 and the second-degree and full-sib proxies) carries the child's read class c (which homologue the covering reads come from) besides its transmitted founder pair (f, s): S² C states. The founder pair moves at bin edges by the bridges and the null source, the same for every class; the class moves between the child's observed selected markers by the painting's class operators composed over the selected sites between them (the read state is defined on the evidence grid), whatever the founders do, and the chain starts from the class law at the component's first selected marker. At an observed marker the emission of the slots' transmitted ALT probabilities (a, b) (slot 1 = homologue 1) is E_c(a, b) = G(a, b) R_c(a, b): G the scalar site likelihood ([PS10](#ps10)) and R_c the GL-anchored read ratio of the painting's factor at full strength, R_c(a, b) = Σ_g W_g(a, b) L′_g R_c(g) / Σ_g W_g(a, b) L′_g, R_c(g) = [(1 − ε) L_g κ_c(g) + ε B] / [(1 − ε) L_g + ε B] (W the product law of the ordered configuration g, L′ the mixed and L the raw genotype likelihoods, κ the class likelihood ratio, B the cohort law). Σ_c π(c) R_c(g) = 1, so without read sharing (operator rows equal to the next marker's class law) the full-strength chain is the scalar chain. The full view applies E itself; the tempered view raises the scalar part's bin product to the information exponent η ([PS03](#ps03)) and tempers the read factor per site as the painting does, R_c ** η. Tempering instead each site's predicted read factor along the transmitted-slot path is not used: its exact forward needs the class filter of every path history, which a chain over (class, pair) does not carry, and a per-pair approximation is not that model. Preparation stores each child's operators into its observed markers and its four configuration ratios per class (float32) and the first marker's class law (ChildReads); a sample deep at every site (the painting's bypass) stores none and keeps the scalar chain exactly, as does every child with one read class, through the same kernels.
+With the painting's read state (`read_classes` > 1) every configuration chain of a child (M0, M1, M2 and the second-degree and full-sib proxies) carries the child's read class c (which homologue the covering reads come from) besides its transmitted founder pair (f, s): S² C states. The founder pair moves at bin edges by the bridges and the null source, the same for every class; the class moves between the child's observed selected markers by the painting's class operators composed over the selected sites between them (the read state is defined on the evidence grid), whatever the founders do, and the chain starts from the class law at the component's first selected marker. At an observed marker the emission of the slots' transmitted ALT probabilities (a, b) (slot 1 = homologue 1) is E_c(a, b) = G(a, b) R_c(a, b): G the scalar site likelihood ([PS10](#ps10)) and R_c the GL-anchored read ratio of the painting's factor at full strength, R_c(a, b) = Σ_g W_g(a, b) L′_g R_c(g) / Σ_g W_g(a, b) L′_g, R_c(g) = [(1 − ε) L_g κ_c(g) + ε B] / [(1 − ε) L_g + ε B] (W the product law of the ordered configuration g, L′ the mixed and L the raw genotype likelihoods, κ the class likelihood ratio, B the cohort law). Σ_c π(c) R_c(g) = 1, so without read sharing (operator rows equal to the next marker's class law) the chain is the scalar chain. The chain applies E itself at every observed marker ([ps03](#ps03)). Preparation stores each child's operators into its observed markers and its four configuration ratios per class (float32) and the first marker's class law (ChildReads); a sample deep at every site (the painting's bypass) stores none and keeps the scalar chain exactly, as does every child with one read class, through the same kernels.
 
 When the stored transition into the child's next observed marker has identical rows, its destination law is
 independent of the incoming class. For each founder pair, summing the incoming class mass before that transition
 gives the same forward likelihood. The recursion can propagate a single value per founder pair across preceding
 bin edges, including empty bins, up to that marker. Its class law is restored from the common row for the
 marker emission. At the end of the observations only total mass is needed. Tests use exact row equality on the
-stored operator. An arbitrarily small difference between rows keeps the full class dimension. The tempered and
-full chains each use their own factors. The relative proxies apply the same rule within each inheritance layer.
+stored operator. An arbitrarily small difference between rows keeps the full class dimension. The relative proxies
+apply the same rule within each inheritance layer.
 The pair bound retains its entrywise group maxima over founders before summing destination classes.
 
-The pair bound carries the class too. Each site factor is nonnegative and bilinear in (a, b) (its power monotone), so over an allele box (the pair bound's BACKGROUND range) every class entry is largest at a corner: r̄_c = max_corner E_c / max_corner G per view, and the bin's class transfer bound Π_k T_k diag(r̄_k) is entrywise above the chain's; the pair bound aggregates (class, group, group) with each group pair's entrywise maximum (no partner caps on this route). The M1 screen's certificate of a pair is its exact M1 with the read state: every eligible pair of a child batch is scored once and the screen's queries read those scores. A class-carrying group bound cost a third to a half of that exact pass, and the screen queried 85–100 % of the eligible chromosome pairs on every simulated cohort; the screen's record (best, cutoff, retained pairs, chromosome maxima, floors) depends only on exact scores, so the choice of valid certificates changes no value.
+The pair bound carries the class too. Each site factor is nonnegative and bilinear in (a, b), so over an allele box (the pair bound's BACKGROUND range) every class entry is largest at a corner: r̄_c = max_corner E_c / max_corner G, and the bin's class transfer bound Π_k T_k diag(r̄_k) is entrywise above the chain's; the pair bound aggregates (class, group, group) with each group pair's entrywise maximum (no partner caps on this route). The M1 screen's certificate of a pair is its exact M1 with the read state: every eligible pair of a child batch is scored once and the screen's queries read those scores. A class-carrying group bound cost a third to a half of that exact pass, and the screen queried 85–100 % of the eligible chromosome pairs on every simulated cohort; the screen's record (best, cutoff, retained pairs, chromosome maxima, floors) depends only on exact scores, so the choice of valid certificates changes no value.
 
 Implementation: [science/pedigree/child_reads.py](../../haplotype_reconstruction/science/pedigree/child_reads.py), [science/pedigree/read_forward.py](../../haplotype_reconstruction/science/pedigree/read_forward.py), [science/pedigree/read_bounds.py](../../haplotype_reconstruction/science/pedigree/read_bounds.py), [science/pedigree/relatives.py](../../haplotype_reconstruction/science/pedigree/relatives.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
 
@@ -438,11 +462,11 @@ Cost and scope: O(batch B S² m); O(batch·G·B·S²). These terms describe the 
 
 Query the complete maximal-bound tie class first, then exhaust the best frontier and floor frontier in that order. Compute retention with the dimension-fixed contiguous chromosome reduction before completing every local maximum. Apply the resulting floor profile exactly once to nonretained eligible identities. Every query verifies finite exact scores below their bounds; every unknown local cell must lie strictly below the completed local maximum. Batch width and cache lifecycle cannot change retention or the floor.
 
-The retention band is 60 T nats with T = (sum over the chromosome's information groups of n_g / (1 + (n_g - 1) r_T)) ** power, n_g the group's selected markers and r_T the transferred temperature of ps03, minimum 1 (4.21 B2: an effective-count retention temperature; 4.20's ceil(markers / markers_per_information_block) ** power is its r_T = 1 limit and stays the `fixed` arm). The genome band uses the summed units.
+The retention band is 60 T nats with T = units ** power, minimum 1, units the chromosome's selected markers with an empty bin counted as one (4.21 B2's effective units at r_T = 0); the genome band uses the summed units. The band and the pair cap ([ps15](#ps15)) are a compute budget of the birth-order decision ([pd08](#pd08)): on every measured root the wide band with the cap and with no cap gave the same decisions (4.22 R4).
 
 Implementation: [science/pedigree/selective_screen.py](../../haplotype_reconstruction/science/pedigree/selective_screen.py), [science/pedigree/selective_m1.py](../../haplotype_reconstruction/science/pedigree/selective_m1.py), [science/pedigree/m1.py](../../haplotype_reconstruction/science/pedigree/m1.py).
 
-Parameters by name: `LOG_FLOOR`, `markers_per_information_block`, `information_tempering_power`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `LOG_FLOOR`, `information_tempering_power`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(C·batch·N); O(C ΣR). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -517,9 +541,9 @@ Cost and scope: O(N B J²); O(J²). These terms describe the unit’s work/stora
 <a id="ps19"></a>
 ## ps19 Minimum-switch schedules and joint transmission likelihood
 
-Canonicalise selected-marker trajectory content and pool locally identical classes. Trace each sample's
-minimum-switch unordered trajectory pair per bin, taking the first minimum path in pair order or the last under
-the explicit reversal convention. Alternative equally parsimonious whole paths are not integrated. Build the
+Order selected-marker trajectories in the contig's canonical REF/ALT coding and pool locally identical classes.
+Trace each sample's minimum-switch unordered trajectory pair per bin, taking the first minimum path in pair order
+or the last under the explicit reversal convention. Alternative equally parsimonious whole paths are not integrated. Build the
 schedule, its local homologue classes, the mask of bins with both painted labels known and the number T of distinct
 whole-component trajectories together. Count summaries for graph ordering come from that same trace.
 [PD28](#pd28) rebuilds these schedules for relationship evidence.
@@ -542,9 +566,15 @@ likelihood O(D B) time with four states and constant workspace per dyad. Stored 
 <a id="ps20"></a>
 ## ps20 Full-marker exclusion e-value
 
-At jointly observed sites compare opposing homozygote evidence with the compatible-genotype replacement bound. Average products over the fixed bets and deduplicated whole-contig/half-overlapping windows. The genome e-value is the weighted mean sum_k w_k E_k over the analysed contigs, with w_k their configured material m_k(L_k) - m_k(0) over the total (the run map and its fallback-rate tails; L_k the last evidence position): fixed before any genotype is read, so under the scalar site-independence assumption the mean is an e-value under any dependence between contigs (linearity of conditional expectation). Uninformative contigs keep their weight; a contig without material has weight zero and no task. Pattern encoding and direct evaluation must agree. For certifiable dyads, release uses the genome lower endpoint. An interval straddling the threshold requires exact refinement.
+At jointly observed sites compare opposing homozygote evidence with the best Mendelian-compatible genotype pair, both scored under the observation model. Average products over the fixed bets and deduplicated whole-contig/half-overlapping windows. The genome e-value is the weighted mean sum_k w_k E_k over the analysed contigs, with w_k their configured material m_k(L_k) - m_k(0) over the total (the run map and its fallback-rate tails; L_k the last evidence position): fixed before any genotype is read, so under the scalar site-independence assumption the mean is an e-value under any dependence between contigs (linearity of conditional expectation). Uninformative contigs keep their weight; a contig without material has weight zero and no task. For certifiable dyads, release uses the genome lower endpoint. An interval straddling the threshold requires exact refinement.
 
-Each dyad (x, y) scores at its own allowance delta = max(genotype_replacement_probability, e_x + e_y), e the two samples' own outlier-rate point estimates from the painting calibration (4.21 A11: each sample's grid maximum refined between its grid neighbours by the three-point parabola in log e, clamped to them and only where concave; a sample at the grid's top is flagged unresolved). A11 is a working exclusion score; its condition is that separate allowances sum to delta. On identical inputs, with delta at least the constant, every site ratio falls, so every exclusion statistic is at most 4.20's: the change can only remove exclusions, and it claims no error control beyond 4.20's test. The exclusion identity binds the per-sample rates.
+The site ratio (4.22 A11) uses the observation model of [observation.md](observation.md): each sample's genotype likelihoods L(g) are mixed against the site's cohort genotype frequencies q at the sample's own outlier rate e, L'(g) = (1 - e) L(g) + e q·L, the generative reading being that with probability e the cell's genotype is redrawn from q. The ratio is A'/D' with A' = (x'(0) y'(2) + x'(2) y'(0)) / 2 and D' the largest x'(g) y'(h) over Mendelian-compatible pairs (no opposite homozygotes). D' bounds the likelihood of the two cells under every parent-offspring law whose cells are redrawn independently at their rates, and A' is a density of the cells, so the site ratio has expectation at most one under that null. There is no genotype-replacement constant and no floor: the allowances are the samples' own rates, the painting calibration's per-sample point estimates (each sample's grid maximum refined between its grid neighbours by the three-point parabola in log e, clamped to them and only where concave). A calibration with a single candidate rate estimates no per-sample rates; every sample then takes the run's rate. No error control is claimed for products over dependent sites beyond the scalar site-independence assumption above. On identical inputs every site ratio is at least (1 - e_x)(1 - e_y) times the 4.21 ratio, whose allowance max(0.01, e_x + e_y) bounded the redraws from above: the statistic can add exclusions relative to 4.21. A sample whose rate sits at the top of the calibration grid has an unresolved rate (it may be larger): its dyads receive the working score with `certifiable` false and stay compatible for the count decision; the exclusion summary reports how many samples are flagged (`unresolved_rate_samples`).
+
+Measured on truth (lab422/r4a, 4.21 release-matrix and G1i saved roots): with independent sites and per-sample redraws, heterogeneous, clustered and misspecified arms included, no true parent was excluded among 2,556 true parent-offspring pairs, with margins unchanged from 4.21. Two departures from the cell model are not absorbed by a per-sample rate. Shared reads make runs of sites overconfident (on 30-kb simulated libraries, a few molecules from one homologue read a heterozygote as homozygous at consecutive sites), and the score then excluded 7 true parents; all were in libraries flagged for read sharing below, which never certify. A long hemizygous tract (a deletion carried by parent and child) excluded a synthetic true parent from about 435 opposite-homozygote sites over 0.7 Mb at 10.5x (4.21: about 1,260 over 1.45 Mb).
+
+The exclusion identity binds the per-sample rates, the unresolved-rate flags and the read-sharing flags.
+
+The e-value is only as valid as the plug-in rates. At confident homozygous sites an understated rate inflates the per-site null expectation by about the ratio of the true to the modelled rate; in a simulation with rates understated tenfold at depth 25, a true parent reached 9.0 nats against a 10.4-nat threshold. The rates are calibrated on the painting's sites and applied to every evidence site; that transfer is an assumption, not a measurement.
 
 The scalar exclusion e-value is invalid under read sharing because successive site bets can depend on the same
 molecules. In the 4.21 LR replay the sound physical-split bound made every bet after the first grid row at most one
@@ -562,7 +592,7 @@ binds the sample flags.
 
 Implementation: [stages/pedigree/exclusion.py](../../haplotype_reconstruction/stages/pedigree/exclusion.py), [science/pedigree/exclusion.py](../../haplotype_reconstruction/science/pedigree/exclusion.py), [science/pedigree/exclusion_bound.py](../../haplotype_reconstruction/science/pedigree/exclusion_bound.py).
 
-Parameters by name: `alpha`, `genotype_replacement_probability`, `bet_sizes`, `window_widths_bp`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `alpha`, `bet_sizes`, `window_widths_bp`; the per-sample outlier rates are the painting calibration's (`robustness_grid`). Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(D L). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -573,7 +603,7 @@ Visit sites in order, saving starting-window prefixes before evaluating complete
 
 Implementation: [science/pedigree/exclusion_bound.py](../../haplotype_reconstruction/science/pedigree/exclusion_bound.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py).
 
-Parameters by name: `alpha`, `genotype_replacement_probability`, `bet_sizes`, `window_widths_bp`, `exclusion_pattern_limit`, `exclusion_dyad_batch`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `alpha`, `bet_sizes`, `window_widths_bp`, `exclusion_dyad_batch`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: At most the full bet/window dyad scan; certification can stop a dyad after a completed window proves the threshold.
 
@@ -648,7 +678,7 @@ prepared meiotic selector probabilities (numerically bounded by `transmission_sw
 At an informative bin the emission is 1 − m if the copied child's and selected parent's local painted classes
 agree, and m otherwise, with the bin's allowance m = min(1/2, max(0.01, v_c + v_p)): v the painting's per-bin
 label-error statistic of each sample's matched homologue (the reference painting's posterior allocation of expected
-lost copies; 4.21 h, A9). The floor 0.01 is `DirectionParameters.mismatch_probability`, 4.20's constant. These
+lost copies; 4.21 h, A9, read from the painting's untempered chain). The floor 0.01 is `DirectionParameters.mismatch_probability`, 4.20's constant. These
 allowances are data-dependent working scores: penalties stay finite and one bin's contrast is bounded, but no union
 bound or validity under any dependence is claimed. If either sample
 has an unknown painted label in that bin, the copy emission is 1: the bin supplies no class comparison. Scheduled
@@ -730,10 +760,10 @@ They are recorded with the junction evidence (`reliability`, `coin_share`, `refe
 
 Require positive bins and callability. Jointly impossible or exactly equal directions contribute zero. Sum in
 unit order with resampling multiplicities, then apply the pair-failure direction correction to finite configuration
-scores. Reciprocal messages, resampling and release tiers retain their existing definitions; the relationship guard
-is defined in [PD23](#pd23). The junction-density `order_probability` in [PD07](#pd07) still supplies graph search
+scores, which the birth-order layer ([PD08](#pd08)) then reads. Resampling and release tiers retain their existing
+definitions; the relationship guard is defined in [PD23](#pd23). The junction-density `order_probability` in [PD07](#pd07) still supplies graph search
 order and reports; it is a separate quantity. This intermediate direction evidence differs from the released
-orientation log odds ([PD10](#pd10)).
+orientation log odds ([PD08](#pd08)).
 
 **Identifiability limit.** A parent-offspring pair sharing one unrecombined homologue on every chromosome is
 near-neutral under this evidence. Alternative mismatch paths can leave residual direction odds of a fraction of a
@@ -755,14 +785,19 @@ totals do not identify biological ages in an inferred founder frame.
   descent with the parent, the reverse transmission explains the paintings as well, and the unit votes can oppose
   the true orientation. The pair-level failure keeps the direction correction within ln((2 − e)/e) = 4.60 nats,
   and the configuration evidence of such children (two sequenced parents) decides.
-- *The structural orientation is not calibrated.* The released orientation log odds ([PD10](#pd10)) add the
-  direction contrast to a difference of composite configuration likelihoods. On known-truth calibration layouts
-  that structural part had the wrong sign for 0.13 % of linked true pairs (111 of 84,075; over half of them with a
-  contrast below 4 nats); where it is wrong by more and the direction evidence is weak, the edge is released
-  reversed. Direction evidence that is honestly weak cannot veto it. Two calibrations of the structural part were
-  tested and withheld more correct edges than they removed errors (the same pair-level failure applied to it: 1 to
-  2 % of correct edges, mostly in pedigree loops; a jackknife over units: 3 % of correct low-material edges), so
-  neither is used.
+- *The released orientation follows from the birth-order posterior.* The released orientation log odds
+  ([PD08](#pd08)) are log P̂(p born before c) − log P̂(c born before p) over the full fit's kept sweep-end orders,
+  counts smoothed by half, so bounded at ±8.29 nats with 2000 kept sweeps. A named parent precedes its child in every
+  order consistent with the row, so P(p before c) ≥ P(X_c names p): an edge whose full-data posterior is at least
+  0.98 passes the orientation cut (`orientation_reversal_probability` 0.02, 3.89 nats) by construction, and for such
+  edges the cut is no independent check; the bootstrap and leave-one-unit-out support cuts remain the independent
+  checks. For moderate posteriors the cut still binds. The direction model's structural prior (above) reads the same
+  statistic from the neutral fit. Where the configuration evidence orients a pair wrongly and the direction evidence
+  is weak, the edge can still be released reversed: honestly weak direction evidence cannot veto it. On the 16
+  known-truth replay roots of the 4.22 build (N = 60–120, standard and low material) Tier B at the decision had no
+  direction error apart from one known edge of the zero-stress design; the 4.21 statistic's wrong-sign rate on
+  calibration layouts (0.13 % of linked true pairs) belongs to a different statistic and was not re-measured for this
+  one.
 - *Few linked pairs.* With few reference pairs rho and eta stay near their priors and the run gets little
   direction evidence. The estimate conditions on the full data; resampled fits do not propagate its uncertainty.
 
@@ -794,7 +829,7 @@ removes the omitted unit's four additive moment contributions before normalizati
 
 **Accretion:** retained with its declared behaviour; see the [accretion register](../developer/accretions.md).
 
-Compute a weighted junction-density contrast over material units with common callability, including missingness variance. Insufficient total weight leaves a neutral order probability; otherwise use the weighted sum, not its mean, in the normal approximation. This retained heuristic supplies the graph visit order’s primary key and can therefore affect which cyclic child is displaced.
+Compute a weighted junction-density contrast over material units with common callability, including missingness variance. Insufficient total weight leaves a neutral order probability; otherwise use the weighted sum, not its mean, in the normal approximation. This retained heuristic supplies the role probability and the reporting order of the selected rows; it decides no row.
 
 Implementation: [science/pedigree/orientation.py](../../haplotype_reconstruction/science/pedigree/orientation.py).
 
@@ -803,42 +838,28 @@ Parameters by name: `order_minimum_unit_weight`, `order_variance_offset`. Values
 Cost and scope: O(C N²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd08"></a>
-## pd08 Preparatory reciprocal cavity messages (fixed passes)
+## pd08 Birth-order layer: the latent birth order inside every fit
 
-Starting from zero, execute the fixed number of synchronous reciprocal cavity passes after adding direction evidence. Add incoming slot terms before equal-state log multiplicity, retaining the specified first-maximum and exclusion scans. Children with no finite row send a neutral avoidance message. These preparatory messages build the ancestry factor only and are discarded afterwards; there is no convergence test here.
+Every sample has an unknown birth order π, all N! total orders equally likely a priori, and a parent is born before its child. Given π, a configuration row r of child c is admissible when every parent it names precedes c; rows that name no parent (M0) and exposure-untestable rows are always admissible. With w_r = exp(score_r + direction_r − log m_r), the configuration's genetic score ([pd04](#pd04), [pd05](#pd05)), the orientation term ([pd06](#pd06)) and m_r the full multiplicity of r's state (states weigh equally here; the configured state priors act in [pd12](#pd12)), the joint posterior is P(π, X) ∝ Π_c w_{X_c} 1[X_c admissible under π]. Over configurations P(π) ∝ Π_c Z_c(π), Z_c(π) the sum of w_r over c's admissible rows; over orders the prior weight of a pedigree is proportional to its number of consistent birth orders (the birth-order prior). Every pedigree consistent with an order is acyclic, so no separate acyclicity rule enters. The prior favours shallow pedigrees: for a child whose named parents are otherwise unconstrained a one-parent row carries 1/2 and a two-parent row 1/3 of its M0 row's prior weight, and a full sib named as a parent costs log 2 against the true pair; the cost of a two-parent row grows with the generations of named parents above it, about log(2L + 1) for L layered parental pairs (log 3 among founders, log 5 for an F2 child, log 7 for an F3 child; log(L + 1) along a single-parent chain). True pairs usually lead the M0 row by tens of nats, so these factors weigh deep against shallow explanations, where the reversal errors of a likelihood alone arise, and rarely decide M0 against a parent row; where they do (a weak late-generation child at low depth or material) the call is conservative, M0 instead of a parent, and such a child is rarely releasable. The layer reads no cohort or sex label; every sample is a candidate parent of every other. It replaces 4.21's reciprocal cavity messages, short-ancestry path factor and greedy acyclic repair.
 
-Implementation: [science/pedigree/family.py](../../haplotype_reconstruction/science/pedigree/family.py).
+Each fit (the full data, the direction model's neutral fit, every bootstrap and leave-one-unit-out fit; the prior-sensitivity selections reuse the full fit) samples π exactly by Gibbs sampling: each sweep visits the samples in a fresh random order and reinserts each at an index drawn from its exact conditional, proportional to Π_c Z_c with the sample at that index. After the burn-in each sweep adds the Rao-Blackwellised P(X_c = r | π) = w_r 1[r admissible] / Z_c(π); their mean P̂(X_c = r) gives the configuration scores log P̂ + log m_r, so the marginal state evidence of [pd12](#pd12) is the sampled state posterior. The kept sweep-end orders give every fit's consensus birth order (each sample's mean number of predecessors, its mean position), which the joint read ([pd13](#pd13)) uses, and in the full fit only each pair's order counts, from which the release orientation log odds log P̂(p before c) − log P̂(c before p), counts smoothed by half ([pd06](#pd06)).
 
-Parameters by name: `message_passes`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Each move is incremental: a sample's own rows are binned by their later-born named parent, and for each child naming it only that child's rows naming it are visited; Z_c without them is the maintained Z_c minus their weight unless that keeps less than `cancellation_guard` of Z_c, when it is recomputed exactly. The N insertion weights come from one linear scan of ratios each at most 1, with no exponential or logarithm; every Z_c is recomputed exactly at each sweep end. Weights stay linear relative to the child's best always-admissible row; a row more than `max_weight_span` above it raises the reference. The full fit's raised references and guarded recomputes are recorded in the product's `birth_order` record. Above about 1,345 nats of margin P̂(M0) underflows to 0 and M0's log evidence reports as −inf; no decision changes.
 
-Cost and scope: O(4 (A + N²)); O(N). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Each fit draws from its own PCG64 stream (`pedigree.order.chain`), keyed by SHA-256 of its unit multiplicities and its left-out unit under the run's `bootstrap_seed`, in a fixed order (the initial order, one visiting permutation per sweep, one uniform per move): results depend on neither thread count, process count nor task order. The permutations are drawn over the samples in sorted-identifier order, as the relationship reference stream is, so reordering the input's columns does not change the realisation; renaming samples does, so reversal and renaming checks are judged within the seed spread. Monte Carlo error on P̂ is about √(P̂(1 − P̂)/S_eff), about 1 % of P̂ for a row near one half; at 400 kept sweeps the state-evidence margin of a near tie varies by about 0.12 nats between streams, so a child whose resample support sits within one draw of a release threshold can be released under one stream and not another; a run's stream is fixed, so its decisions are reproducible. Exactly tied configurations (equal likelihood and prior weight) are split by the chain's realisation, not routed by the tie protocol ([pd11](#pd11)). Each move equals a brute-force replay of the exact conditional, and long-run estimates equal exact enumeration over all N! orders for N ≤ 7 within Monte Carlo error.
 
-<a id="pd09"></a>
-## pd09 Short-ancestry path factor (bounded panels)
+Implementation: [science/pedigree/order.py](../../haplotype_reconstruction/science/pedigree/order.py), [science/pedigree/order_parameters.py](../../haplotype_reconstruction/science/pedigree/order_parameters.py).
 
-Build a bounded panel of finite configurations per sample by strict replacement of the first minimum slot. If a boundary tie overfills the panel, move the entire boundary class to the tail. Compute short-ancestry avoidance, excluding rows that name the child and counting each permitted ancestor once in slot order. Add the resulting nonpositive term once and freeze it before the reciprocal solve. The tail and bounded panel approximate longer ancestry dependence.
+Parameters by name: `burn_in_sweeps`, `resample_sweeps`, `full_sweeps`, `cancellation_guard`, `max_weight_span`, `pair_failure_probability`, `bootstrap_seed`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Implementation: [science/pedigree/family.py](../../haplotype_reconstruction/science/pedigree/family.py).
-
-Parameters by name: `ancestry_path_budget`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
-
-Cost and scope: O(A R); O(N² R); O(T R²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
-
-<a id="pd10"></a>
-## pd10 Converged final reciprocal solve and release orientation log odds
-
-Run the undamped reciprocal solve from zero, returning newly computed messages when residual meets tolerance. At the declared progress checks, pause an unpromising trajectory; if needed restart damped from zero, then resume the paused undamped state within its remaining budget. Preserve the NaN residual refold and accumulation order. Full-fit nonconvergence is fatal; resampled nonconvergence abstains while retaining its draws. Apply final incoming messages once and form release orientation from cavity differences.
-
-Implementation: [science/pedigree/family.py](../../haplotype_reconstruction/science/pedigree/family.py).
-
-Parameters by name: `final_max_iterations`, `final_tolerance`, `final_progress_window`, `final_pause_budgets`, `retry_iterations`, `retry_damping`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
-
-Cost and scope: O(I (A + N²)); O(N + widest child rows). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: per sweep O(A + Σ_s A_s + N) in resampled fits and O(A + Σ_s A_s + N²) in the full fit (A rows, A_s rows naming sample s, N² the full fit's pair order counts), about 34 ns per row-sweep: 0.14–0.7 s per resampled fit at N = 80–116 (0.1–2.6 % of 4.21.0's pedigree-stage CPU) and about 3 s at N = 320. One chain is sequential, so a fit runs on one thread; fits are independent and run in parallel across the resampling workers.
 
 <a id="pd11"></a>
 ## pd11 Tie-aware winners, tie tolerance and the full-fit tie census
 
-Scan rows for the first strict finite maximum and runner-up. Abstain when their margin is within the magnitude-aware winner tolerance, including exact ties; never use row index to resolve a scientific winner. Rank-probability groups instead anchor at their first value. The explicit recorder captures only the full-fit/state/informative census; diagnostics never enter resampled selection.
+Scan rows for the first strict finite maximum and runner-up. Abstain when their margin is within the magnitude-aware winner tolerance, including exact ties of the values compared; never use row index to resolve a scientific winner. Rank-probability groups instead anchor at their first value. The explicit recorder captures only the full-fit/state/informative census; diagnostics never enter resampled selection.
+
+The fits' configuration scores are the birth-order layer's sampled posteriors ([pd08](#pd08)), whose Monte Carlo error is far above the winner tolerance. Configurations tied exactly in the evidence (equal likelihood and prior weight) therefore reach the winner scan already split by the chain's realisation, and the scan abstains only where the sampled values tie. For such ties the complete view ([pd19](#pd19)), the unresolved and tier reason codes and the full-fit tie census depend on the Monte Carlo realisation. Released calls do not: a release needs leave-one-unit-out and bootstrap support, each fit on its own stream, so an exact tie splits the support and stays unresolved, and the count release ([pd22](#pd22)) can only withhold a count on a complete row that disagrees with the supported parents.
 
 
 Implementation: [science/pedigree/ties.py](../../haplotype_reconstruction/science/pedigree/ties.py).
@@ -850,7 +871,7 @@ Cost and scope: O(n). These terms describe the unit’s work/storage dimensions;
 <a id="pd12"></a>
 ## pd12 Marginal state, then identity
 
-Marginalise configuration scores by state using full eligible multiplicities and configured state priors. First require a unique finite parent-count state, then a unique finite identity within that state. Preserve separate unresolved-state and unresolved-identity reasons. Record the compared score scale for graph conflict handling, then pass local choices to acyclic selection.
+Marginalise configuration scores by state using full eligible multiplicities and configured state priors. First require a unique finite parent-count state, then a unique finite identity within that state. Preserve separate unresolved-state and unresolved-identity reasons. These local choices go to the joint read ([pd13](#pd13)).
 
 Implementation: [science/pedigree/selection.py](../../haplotype_reconstruction/science/pedigree/selection.py).
 
@@ -859,20 +880,20 @@ Parameters by name: `state_priors`. Values and provenance are in the [generated 
 Cost and scope: O(A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd13"></a>
-## pd13 Acyclic graph selection
+## pd13 Joint read
 
-Keep local rows immediately if they form a DAG. Otherwise peel cyclic components, removing all tied weakest children as conflicts and uniquely weakest children for reconsideration. Run greedy selection on the original local rows excluding only tie conflicts, in role/confidence/convention order. Prefer the local row when feasible; otherwise seek unique feasible winners from its state downward. Iterate the same coordinate order to the pass limit and report exhaustion. This bounded acyclic repair is not global graph optimisation.
+The local choices of [pd12](#pd12) read the birth-order posterior child by child; where they form a DAG they are the fit's pedigree. Marginal choices of different children can still form a cycle (two siblings each naming the other with posterior near one half). The children on a cycle (strongly connected components of the chosen parent → child edges) then take their marginal state and identity among the configurations that the fit's consensus birth order allows ([pd08](#pd08): every named parent born before the child; equal ranks in the run's index convention), and the rule repeats until no cycle remains. Every cycle holds a child not yet restricted (the restricted children's parents precede them in one total order), so each round restricts at least one more child and the result is acyclic. No greedy search or tie-conflict peeling remains. The restricted children are reported (`order_restricted`), and resampled fits count how often the restriction was needed.
 
-Implementation: [science/pedigree/graph.py](../../haplotype_reconstruction/science/pedigree/graph.py).
+Implementation: [science/pedigree/selection.py](../../haplotype_reconstruction/science/pedigree/selection.py), [science/pedigree/graph.py](../../haplotype_reconstruction/science/pedigree/graph.py).
 
-Parameters by name: `graph_local_search_passes`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: none (the greedy repair's pass budget is removed).
 
-Cost and scope: O(N + edges); O(N·(N + edges) + A). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(N + edges) per round, at most N rounds.
 
 <a id="pd14"></a>
 ## pd14 M0 prior sensitivity
 
-Reselect the full adjusted scores under each declared M0 sensitivity prior, reusing the nominal prior result when equal. Do not recompute family-message terms. Require agreement for an M0 state and its exact graph configuration at release; a sensitivity veto has explicit status precedence. Resampled fits do not repeat this prior analysis.
+Reselect the full-data birth-order posterior under each declared M0 sensitivity prior, reusing the nominal prior result when equal. Do not resample the birth order. Require agreement for an M0 state and its exact graph configuration at release; a sensitivity veto has explicit status precedence. Resampled fits do not repeat this prior analysis.
 
 Implementation: [science/pedigree/decision.py](../../haplotype_reconstruction/science/pedigree/decision.py).
 
@@ -894,13 +915,13 @@ Cost and scope: O(H A). These terms describe the unit's work/storage dimensions;
 <a id="pd16"></a>
 ## pd16 Unit bootstrap and LOBO resampling
 
-Draw all unit bootstrap multiplicities first from the named fixed stream, then coalesce identical vectors in lexicographic order. Schedule the leave-one-unit-out (LOBO) fits first, each read from the full totals minus the left-out unit, and bootstrap fits by the declared stable sparsity order. Accumulate integer selection counts with each vector's multiplicity. A family-message nonconvergence makes the entire fit abstain but leaves its multiplicity in the denominator; other failures stop the stage. Scheduling cannot change support fractions. The stage groups consecutive planned fits into batches by estimated alternative-row scans, with a work ceiling and a target of two waves per planned worker when the fit count allows. Each process attaches the read-only inputs once per batch and evaluates its fits serially. The gather restores the complete original plan before reducing integer counts; batching neither redraws multiplicities nor changes denominators.
+Draw all unit bootstrap multiplicities first from the named fixed stream, then coalesce identical vectors in lexicographic order. Schedule the leave-one-unit-out (LOBO) fits first, each read from the full totals minus the left-out unit, and bootstrap fits by the declared stable sparsity order. Accumulate integer selection counts with each vector's multiplicity; a failure stops the stage. Scheduling cannot change support fractions. The stage groups consecutive planned fits into batches by estimated alternative-row scans, with a work ceiling and a target of two waves per planned worker when the fit count allows. Each process attaches the read-only inputs once per batch and evaluates its fits serially. The gather restores the complete original plan before reducing integer counts; batching neither redraws multiplicities nor changes denominators. The decision's full-data fit reads the same fit inputs (after the direction model's neutral fit) and nothing of the resampled fits, nor they of it, so it runs as one more single-core task beside the batches and the gather joins it to the counts; each fit's birth-order chain draws from its own keyed stream, so this placement cannot change any result.
 
 Implementation: [stages/pedigree/execution.py](../../haplotype_reconstruction/stages/pedigree/execution.py), [science/pedigree/resampling.py](../../haplotype_reconstruction/science/pedigree/resampling.py).
 
 Parameters by name: `bootstrap_replicates`, `bootstrap_seed`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(H A + H N² (PD07) + (4 + I)(A + N²) + R A + R N² + R² T + graph). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
+Cost and scope: O(H A + H N² (PD07) + (H + R)(birth-order fit, [pd08](#pd08)) + graph). These terms describe the unit's work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="pd17"></a>
 ## pd17 Tier reach and the material statement
@@ -927,7 +948,7 @@ Cost and scope: O(N). These terms describe the unit’s work/storage dimensions;
 <a id="pd19"></a>
 ## pd19 Complete (full-data acyclic) view
 
-Publish the complete acyclic best-guess view from graph rows, retaining explicit tie-conflict, displacement and unresolved-state reasons. A displaced row is not tier eligible merely because it is acyclic. The complete view is not a release and remains unchanged by the sibling guard.
+Publish the complete acyclic best-guess view from graph rows, retaining the order-restriction ([pd13](#pd13)), displacement and unresolved-state reasons. A displaced row is not tier eligible merely because it is acyclic. The complete view is not a release and remains unchanged by the sibling guard.
 
 Implementation: [science/pedigree/release.py](../../haplotype_reconstruction/science/pedigree/release.py).
 
@@ -1186,10 +1207,22 @@ theta / (T - 1)):
 - UNR: p is not in the family: the children are children of the two latent diploids and p is its own best mosaic
   (grandparents, double grandparents, half sibs, avuncular and other relatives).
 
-A member's unordered painted pair {x, y} given true classes (u, v) emits f(x,u) f(y,v) + f(y,u) f(x,v) (x != y) or
-f(x,u) f(x,v), with f = 1 - delta when equal and delta otherwise; delta is the member's per-bin, per-label allowance
-min(1/2, max(0.01, v)) from the painting's label-error statistic (4.21 h; the floor 0.01 is
-`DirectionParameters.mismatch_probability`, PD06's convention); bins without both labels emit 1. A witness may instead be a half child of latent 0 or of latent
+A member's unordered painted pair {x, y} (label 0 = x, label 1 = y) given true classes (u, v) emits the probability
+of its labels' error pattern: g(x <- u, y <- v) + g(x <- v, y <- u) for x != y, the first term alone for x = y, with
+g = p00 when both labels equal their true classes, p10 when only label 0 differs, p01 when only label 1 differs and
+p11 when both differ. The statistic keeps no class-specific mass for a wrong label, so a wrong label's whole mass goes
+to whichever class a hypothesis needs: the vote is never more decisive about a wrong label than this law, whatever the
+number of local classes (spreading the mass over the K_b - 1 other classes would make each wrong label cost
+ln(K_b - 1) more and erode true-parent votes at large K_b). The joint law comes from the painting's label-error
+statistic of the member (h, from the untempered chain, on its scheduled homologues): v_t the probability that label t
+is wrong and u that the pair is wrong. Since the pair is right exactly when both released classes are carried,
+u = P(label 0 wrong or label 1 wrong) and p11 = v_0 + v_1 - u, p10 = v_0 - p11, p01 = v_1 - p11, p00 = 1 - u. The floor
+stays because the posterior is overconfident: each marginal lies in [0.01, 1/2] (`DirectionParameters.mismatch_probability`,
+PD06's convention), p11 is clipped to what the marginals allow, and every error pattern is at least its independence
+value at the floor (p10, p01 >= 0.01 (1 - 0.01), p11 >= 0.01^2), p00 being the remainder. No pattern is zero, so every
+emission is positive: a hypothesis needing a wrong label is penalised, never excluded. Without label errors the law is
+4.21's, (1 - 0.01)^2, 0.01 (1 - 0.01), 0.01 (1 - 0.01), 0.01^2. The per-bin posterior marginals enter every bin as
+emissions; their dependence along the chain is not modelled. Bins without both labels emit 1. A witness may instead be a half child of latent 0 or of latent
 1 (one homologue through a meiotic selector over that diploid's homologues, the other a free founder mosaic under
 the same law, summed), a direct observation of a latent diploid (a sequenced parent of the family; under PAR only
 latent 1) or an outsider explained by its own mosaic, each at log prior ln(`role_prior`), a child at
@@ -1284,17 +1317,25 @@ work runs as independent tasks after the guard's fixed point and is not checkpoi
 
 ## Named mechanisms
 
-<a id="acyclic-graph-selection"></a>
+<a id="birth-order-layer"></a>
 
-**Acyclic graph selection:** see [PD13](#pd13).
+**Birth-order layer:** see [PD08](#pd08).
+
+<a id="birth-order-prior"></a>
+
+**Birth-order prior:** see [PD08](#pd08).
+
+<a id="joint-read"></a>
+
+**Joint read:** see [PD13](#pd13).
 
 <a id="candidate-panel"></a>
 
 **Candidate panel:** see [PS15](#ps15).
 
-<a id="child-forward-model-and-composite-score"></a>
+<a id="child-forward-model"></a>
 
-**Child forward model and composite score:** see [PS10](#ps10).
+**Child forward model:** see [PS10](#ps10).
 
 <a id="unit-resampling-mechanism"></a>
 
@@ -1303,11 +1344,6 @@ work runs as independent tasks after the guard's fixed point and is not checkpoi
 <a id="configuration-likelihoods-and-the-exposure-gate"></a>
 
 **Configuration likelihoods and the exposure gate:** see [PD04](#pd04).
-
-<a id="converged-final-reciprocal-solve"></a>
-
-**Converged final reciprocal solve:** see [PD10](#pd10).
-
 
 <a id="exposure-and-junction-counts"></a>
 
@@ -1337,9 +1373,9 @@ work runs as independent tasks after the guard's fixed point and is not checkpoi
 
 **Parent candidates:** see [PS01](#ps01).
 
-<a id="preparation-markers-source-factors-and-information-blocks"></a>
+<a id="preparation-markers-and-source-factors"></a>
 
-**Preparation markers source factors and information blocks:** see [PS02](#ps02).
+**Preparation markers and source factors:** see [PS02](#ps02).
 
 <a id="products-and-published-tables"></a>
 

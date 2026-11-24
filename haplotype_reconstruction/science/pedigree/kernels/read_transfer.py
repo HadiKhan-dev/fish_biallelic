@@ -11,22 +11,17 @@ OVERLOADS.update({
     "child_reads._fill": tuple(
         (_F64_4, _F64_3, _F64_4, _F64_3, _F64_2, types.float64, _I64_1, observed, _I64_1, _F32_3, _F32_3)
         for observed in (_BOOL_2, types.Array(types.boolean, 2, "C", readonly=True))),
-    "child_reads._powered": tuple((_F32_3, _I64_1, _I64_2, _I64_2, exponent, _F32_3)
-                                  for exponent in (_F64_2, types.Array(types.float64, 2, "C", readonly=True))),
     "read_transfer.read_ratio": tuple((_F64_1, _F32_3, types.int64, types.float64, types.float64, gl)
                                      for gl in _GL_ROWS),
-    "read_transfer.tempered_factor": tuple((_F64_1, _F32_3, _F32_3, types.int64, types.float64, types.float64, gl,
-                                           types.float64) for gl in _GL_ROWS),
     "read_transfer.class_transfers": tuple(
-        (types.int64, types.int64, _F64_2, gl, _I64_1, _I64_2, _I64_2, exponent, _I64_1, _F32_3, _F32_3, _F32_3)
-        for gl in (_F64_3, types.Array(types.float64, 3, "C", readonly=True))
-        for exponent in (_F64_2, types.Array(types.float64, 2, "C", readonly=True))),
+        (types.int64, types.int64, _F64_2, gl, _I64_1, _I64_2, _I64_2, _I64_1, _F32_3, _F32_3)
+        for gl in (_F64_3, types.Array(types.float64, 3, "C", readonly=True))),
 })
 OVERLOADS["read_transfer.carry_bin"] = ()
 
 
 OVERLOADS["read_transfer.class_transfers"] = tuple(
-    sig[:9] + (_reset, _width) + sig[9:] for sig in OVERLOADS["read_transfer.class_transfers"])
+    sig[:8] + (_reset, _width) + sig[8:] for sig in OVERLOADS["read_transfer.class_transfers"])
 OVERLOADS["read_transfer.carry_bin"] = tuple(
     sig[:15] + (_reset, _width) + sig[15:] for sig in OVERLOADS["read_transfer.carry_bin"])
 
@@ -40,8 +35,8 @@ OVERLOADS["read_transfer.multiply_classes"] = ((
 ),)
 
 
-# The inline call boundary normalizes signed indices and the view flag before
-# entering the shared carry kernel. Prepared arrays keep their read-only views.
+# The inline call boundary normalizes signed indices before entering the shared
+# carry kernel. Prepared arrays keep their read-only views.
 _carry_gl = types.Array(types.float64, 3, "C", readonly=True)
 _carry_state = types.Array(types.float64, 2, "C", readonly=True)
 _carry_site = types.Array(types.int64, 1, "C", readonly=True)
@@ -55,8 +50,7 @@ _carry_layouts = (
 OVERLOADS["read_transfer._carry_bin"] = tuple(
     (_F64_3, _F64_3, _F64_1, _F64_1,
      types.int64, types.int64, types.int64, types.int64, *layout,
-     _I64_1, _reset, _width, _F32_3, _F32_3, _F32_3,
-     types.boolean, types.float64, cache, types.int64, _F64_1)
+     _I64_1, _reset, _width, _F32_3, _F32_3, cache, types.int64, _F64_1)
     for layout in _carry_layouts
-    for cache in (types.none, types.Array(types.float64, 7, "C"))
+    for cache in (types.none, types.Array(types.float64, 6, "C"))
 )

@@ -34,7 +34,8 @@ class PreparedEvidence:
 
 
 def prepare_contig(
-    reads: ContigReads, config: EvidenceParameters, team: ThreadSource = 1, *, map_work=map, reverse: bool = False
+    reads: ContigReads, config: EvidenceParameters, team: ThreadSource = 1, *, map_work=map, reverse: bool = False,
+    search_alleles_reversed: bool = False,
 ) -> PreparedEvidence:
     """The evidence of one contig from its allele depths.
 
@@ -56,6 +57,7 @@ def prepare_contig(
         team=team,
         map_work=map_work,
         reverse=reverse,
+        search_alleles_reversed=search_alleles_reversed,
     )
     if site.kept.all():
         kept = reads
@@ -103,6 +105,7 @@ def prepare_contig(
         discovery_sites=discovery_sites,
         founder_excluded=founder_excluded,
         block_spans=_block_spans(kept.n_sites, config.block_sites),
+        search_alleles_reversed=search_alleles_reversed,
     )
     return PreparedEvidence(
         evidence,

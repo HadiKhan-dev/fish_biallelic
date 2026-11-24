@@ -91,7 +91,8 @@ def component_bytes(panels, samples, *, min_sites_per_bin, max_bins) -> int:
         8 * samples * (panel.rows * (panel.rows + 1) // 2) * ((panel.sites + bin_size - 1) // bin_size)
         for panel in panels
     )
-    leaves = 4 * sum(panel.rows * panel.sites for panel in panels)
+    # The original and reversed coded leaves plus the polish beam's canonical byte keys.
+    leaves = sum(panel.rows * (6 * panel.sites + 64) for panel in panels)
     # One more cost array: an evicted array can stay referenced by an active search while its
     # replacement is built.
     # The polish beam's resident per-bin table (8 S J (3 + Rmax(Rmax + 1)/2), beam.rank_table)

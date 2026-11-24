@@ -191,19 +191,16 @@ class SampleQualityParameters:
             ),
         },
     )
-    # f: foreign alleles are resolved up to a_hi = f h_lo / 2 (h0/4: a foreign heterozygote at alpha/2 with alpha up
-    # to h0/2), with h_lo the lower end of the balance interval (h0, or the lower of r4's two component means when r4's
-    # labelling is unresolved); grosser contamination is detected at that ceiling, its fraction reported as at least
-    # it. Own private heterozygotes are beta-binomial about the balance interval with a latent SD up to 0.1, the same
-    # for a private ALT and a private REF allele. Own private alleles shown below about h_lo - 0.2 (reference or
-    # haplotype bias) can resemble foreign alleles, even locally if other regions carry little eligible information.
-    # The fitted fraction is not a calibrated contamination estimate.
+    # Foreign alleles are resolved up to f / 2 times the lowest clean mean in either allele orientation.
+    # Own private heterozygotes are beta-binomial about the balance interval with a latent SD up to 0.1.
+    # Grosser contamination is fitted at the ceiling. The fitted fraction is a working amplitude.
     heterozygote_floor_ratio: float = field(
         default=0.5,
         metadata={
             "role": "state", "axes": (), "dtype": "float64", "stored": True, "units": "1",
             "provenance": (
-                "Foreign-allele ceiling multiplier of half the lower clean heterozygote balance "
+                "Foreign-allele ceiling multiplier of half the lowest clean heterozygote balance "
+                "across allele orientations "
                 "(dimensionless); separates the foreign grid from own heterozygotes."
             ),
         },
@@ -284,6 +281,10 @@ SITE_MIXTURE_ITERATIONS = 300
 # Histogram range endpoints (percentiles); limits the empirical core fit to the central depth/heterogeneity
 # range.
 SITE_HISTOGRAM_RANGE_PERCENTILES = (0.5, 99.5)
+
+# Largest number of bins the window walk adds beyond the core histogram's percentile range (count, of the core's
+# width): a tail beyond that range is assessed rather than skipped; values past this many bins lie outside the window.
+SITE_WALK_MAXIMUM_BINS = 16000
 
 # Projected-gradient stopping scale of the error-mixture M step (dimensionless).
 SITE_M_STEP_GRADIENT = 1e-09

@@ -24,21 +24,32 @@ import numpy as np
 from ..contracts.genetic_map import ChromosomeGeneticMap
 from ..contracts.roles import freeze_record_arrays, record_field
 from ..contracts.source import ContigReads
-from ..core.errors import InputError
+from ..core.errors import InputError, SettingsError
 from ..core.random import read_seeds, stream
 from .artefacts import ArtefactModel, ArtefactResult, apply_artefacts
 from .design import PedigreeRow, ReadModel, SimulationConfig, observed_indices
 from .genealogy import mutations, separating_length
 from .haplotypes import Extent, Mosaic, alleles, founder_mosaic, source_at
 from .pedigree import PedigreeTable, materialise_founders, pair_founders, simulate_explicit_pedigree, simulate_pedigree
-from .reads import ReadInputs, read_inputs
+from .reads import (
+    ReadInputs,
+    contamination_levels,
+    duplicate_rates,
+    exogenous_shares,
+    library_error_factors,
+    read_inputs,
+)
 from .sites import draw_site_set, realise_profile, relative_morgans
 from .stocks import stock_founders, stock_record, stock_stream
 from .structure import (
+    CollapsedParalogs,
     ContigStructure,
     StructureReads,
     StructureTruth,
+    collapsed_copies,
+    collapsed_psv_sites,
     copy_alleles,
+    draw_collapsed,
     draw_structure,
     haplotype_carriers,
     paralog_sites,
@@ -264,6 +275,11 @@ class ContigSimulation:
     structure: ContigStructure | None = record_field("obs", dtype="ContigStructure | None", default=None)
     # With structure: (offsets int64[G + 1], positions float64) of reference-axis switches, gametes as in crossovers.
     switches: tuple | None = record_field("obs", dtype="tuple | None", default=None)
+    # Collapsed paralogs (simulation/structure.py), or None when off; the panel already holds their PSV sites.
+    collapsed: CollapsedParalogs | None = record_field("obs", dtype="CollapsedParalogs | None", default=None)
+    # Unsequenced contamination donors (explicit pedigrees): identifiers and their haplotype pairs (Mosaic).
+    donor_ids: tuple[str, ...] = record_field("obs", dtype="tuple[str, ...]", default=())
+    donor_haplotypes: tuple = record_field("obs", dtype="tuple", default=())
 
     def __post_init__(self):
         freeze_record_arrays(self)
@@ -383,6 +399,10 @@ def contig_read_inputs(task: ContigSimulation) -> ReadInputs:
 
     hap0 = np.array([gather(individual[0]) for individual in task.offspring], dtype=np.int8)
     hap1 = np.array([gather(individual[1]) for individual in task.offspring], dtype=np.int8)
+    donor0 = donor1 = None
+    if task.donor_ids:
+        donor0 = np.array([gather(individual[0]) for individual in task.donor_haplotypes], dtype=np.int8)
+        donor1 = np.array([gather(individual[1]) for individual in task.donor_haplotypes], dtype=np.int8)
     injected = None
     if task.read_model.injected_outlier_rate > 0:
         # G1i: ordered genotypes replaced before any read is drawn (simulation/injection.py, its own streams)
@@ -394,6 +414,39 @@ def contig_read_inputs(task: ContigSimulation) -> ReadInputs:
     inputs = read_inputs(hap0, hap1, task.positions, task.depth, task.read_model, rng)
     if injected is not None:
         inputs = replace(inputs, original0=original[0], original1=original[1], injected=injected)
+    if task.read_model.exogenous_read_share:
+        # Each sample's share is genome-wide: keyed by the generating seed and its identifier, not by contig.
+        shares = exogenous_shares(task.sample_ids, task.read_model, task.generating_seed)
+        inputs = replace(inputs, exogenous_share=shares)
+    if task.read_model.contamination_share or task.read_model.contamination_samples:
+        # Each library's share and donor are genome-wide: keyed by the generating seed and its identifier.
+        shares, donors = contamination_levels(task.sample_ids, task.read_model, task.generating_seed,
+                                              extra_donors=task.donor_ids)
+        inputs = replace(inputs, contamination_share=shares, contamination_donor=donors, donor_hap0=donor0,
+                         donor_hap1=donor1)
+    if task.read_model.duplicate_rate:
+        # Each library's duplicate rate is genome-wide: keyed by the generating seed and its identifier.
+        inputs = replace(inputs, duplicate_rate=duplicate_rates(task.sample_ids, task.read_model, task.generating_seed))
+    if task.read_model.library_error_sigma:
+        # Each library's error factor is genome-wide: keyed by the generating seed and its identifier.
+        inputs = replace(inputs, error_factor=library_error_factors(task.sample_ids, task.read_model,
+                                                                    task.generating_seed))
+    if task.collapsed is not None:
+        # The copy's base: ALT at a PSV, the ancestral base elsewhere inside a segment (REF unless the reference genome
+        # holds the derived allele), -1 outside every segment.
+        inside = task.collapsed.index(task.positions) >= 0
+        psv = collapsed_psv_sites(task.collapsed, task.positions)
+        allele = np.where(inside, (psv | task.panel.reference_derived).astype(np.int8), np.int8(-1)).astype(np.int8)
+        inputs = replace(
+            inputs,
+            collapsed_start=task.collapsed.start,
+            collapsed_end=task.collapsed.end,
+            collapsed_copies=collapsed_copies(task.offspring, task.collapsed),
+            collapsed_allele=np.ascontiguousarray(allele),
+            collapsed_donor_copies=(
+                collapsed_copies(list(task.donor_haplotypes), task.collapsed) if task.donor_ids else None
+            ),
+        )
     if task.structure is None:
         return inputs
     paralog = paralog_sites(task.structure, task.positions)
@@ -417,9 +470,10 @@ def contig_result(
             task.sample_ids,
             task.artefacts,
             heterozygote_alt_probability=task.read_model.heterozygote_alt_probability,
+            library_factor=inputs.error_factor,
         )
     else:
-        transformed = ArtefactResult(counts, None, None, None)
+        transformed = ArtefactResult(counts, None, None)
     truth = ContigTruth(
         sample_ids=task.sample_ids,
         positions=task.positions,
@@ -442,14 +496,29 @@ def contig_result(
         flips=truth_flips(task.offspring),
         dropped_positions=task.dropped_positions,
         missed=transformed.missed,
-        block=transformed.block,
         systematic_site=transformed.systematic_site,
         spurious=task.panel.spurious,
         structure=None if task.structure is None else _structure_truth(task, inputs),
+        **_library_truth(task, inputs),
     )
     return cast("_ContigReadsFactory", ContigReads)(
         task.contig, task.sample_ids, task.positions, transformed.counts
     ), truth
+
+
+def _library_truth(task: ContigSimulation, inputs: ReadInputs) -> dict:
+    """Realised per-library contamination (share and donor identifier, "" when clean) and PCR duplicate rates, for the
+    truth; empty when both modes are off (the released record)."""
+    out = {}
+    if inputs.contamination_share is not None:
+        names = (*map(str, task.sample_ids), *task.donor_ids)
+        out["contamination_share"] = np.asarray(inputs.contamination_share, np.float64)
+        out["contamination_donor"] = tuple("" if d < 0 else names[d] for d in inputs.contamination_donor)
+    if inputs.duplicate_rate is not None:
+        out["duplicate_rate"] = np.asarray(inputs.duplicate_rate, np.float64)
+    if inputs.error_factor is not None:
+        out["library_error_factor"] = np.asarray(inputs.error_factor, np.float64)
+    return out
 
 
 def _structure_truth(task: ContigSimulation, inputs: ReadInputs) -> StructureTruth:
@@ -468,6 +537,12 @@ def _structure_truth(task: ContigSimulation, inputs: ReadInputs) -> StructureTru
         switch_positions=task.switches[1],
         paralog_offsets=inputs.structure.paralog_offsets,
         paralog_sites=inputs.structure.paralog_sites,
+        **({} if inputs.collapsed_copies is None else dict(
+            collapsed_start=inputs.collapsed_start,
+            collapsed_end=inputs.collapsed_end,
+            collapsed_copies=inputs.collapsed_copies,
+            collapsed_psv_sites=np.flatnonzero(collapsed_psv_sites(task.collapsed, task.positions)).astype(np.int64),
+        )),
     )
 
 
@@ -646,6 +721,11 @@ def prepare_contig(config, seed, index, maps, rows, records, order, template=Non
         panel, dropped = coalescent_panel(config, records, founders, extent, chromosome_map, seed, contig)
     elif not records:
         founders = pair_founders([founder_mosaic(extent.start_bp, int(h), int(h)) for h in panel.source_id])
+    collapsed = draw_collapsed(
+        config.structure, seed, contig, int(extent.start_bp), int(extent.end_bp), int(panel.total_sources)
+    )
+    if collapsed is not None:
+        panel = _with_psv_sites(panel, collapsed_psv_sites(collapsed, panel.positions))
     # The generated extent is [1, length_bp], independently of its retained sites.
     # A terminal sentinel keeps the released no-map traversal on the whole extent.
     # Scalar clock origin and actual marker coordinates remain separate.
@@ -657,6 +737,16 @@ def prepare_contig(config, seed, index, maps, rows, records, order, template=Non
         structure=structure,
     )
     offspring = [simulated.haplotypes[row] for row in selected]
+    # Contamination donors that are not sequenced (explicit pedigrees): their haplotypes travel with the task.
+    observed_names = set(map(str, observed.samples))
+    generated_names = [str(s) for s in generated.samples]
+    donor_ids = tuple(dict.fromkeys(d for d in config.reads.contamination_donors if d not in observed_names))
+    missing = [d for d in donor_ids if d not in generated_names]
+    if missing:
+        raise SettingsError(f"contamination_donors name individuals the simulation does not generate: {missing[:5]}")
+    donor_rows = [generated_names.index(d) for d in donor_ids]
+    n_offspring = len(offspring)
+    offspring = offspring + [simulated.haplotypes[row] for row in donor_rows]
     if config.source.kind == "coalescent":
         retained = np.searchsorted(cross_positions, panel.positions)
         translated = []
@@ -672,6 +762,15 @@ def prepare_contig(config, seed, index, maps, rows, records, order, template=Non
                 members.append(Mosaic(haplotype.starts, haplotype.source, haplotype.founder, flips))
             translated.append(tuple(members))
         offspring = translated
+    elif collapsed is not None and np.any(panel.spurious):
+        # A PSV site is reference-only in every haplotype: drop meiotic mutations there, as at spurious sites.
+        reference_only = np.flatnonzero(panel.spurious)
+        offspring = [
+            tuple(Mosaic(h.starts, h.source, h.founder, h.flips[~np.isin(h.flips, reference_only)]) for h in pair)
+            for pair in offspring
+        ]
+    donor_haplotypes = tuple(offspring[n_offspring:])
+    offspring = offspring[:n_offspring]
     analysed = {int(row): i for i, row in enumerate(selected)}
     return ContigSimulation(
         contig,
@@ -690,6 +789,21 @@ def prepare_contig(config, seed, index, maps, rows, records, order, template=Non
         dropped,
         structure,
         None if structure is None else _switch_truth(simulated, analysed),
+        collapsed,
+        donor_ids,
+        donor_haplotypes,
+    )
+
+
+def _with_psv_sites(panel: SourcePanel, psv: NDArray[np.bool_]) -> SourcePanel:
+    """The panel with its PSV sites reference-only in every source haplotype and marked spurious (structure.py)."""
+    alleles = np.array(panel.alleles, copy=True)
+    alleles[:, psv] = 0
+    return replace(
+        panel,
+        alleles=alleles,
+        reference_derived=np.asarray(panel.reference_derived, bool) & ~psv,
+        spurious=np.asarray(panel.spurious, bool) | psv,
     )
 
 

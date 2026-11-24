@@ -276,8 +276,6 @@ Each carried core or accretion unit has one section. The [accretion register](..
 - [PD06](pedigree.md#pd06) — Core
 - [PD07](pedigree.md#pd07) — Accretion
 - [PD08](pedigree.md#pd08) — Core
-- [PD09](pedigree.md#pd09) — Core
-- [PD10](pedigree.md#pd10) — Core
 - [PD11](pedigree.md#pd11) — Core
 - [PD12](pedigree.md#pd12) — Core
 - [PD13](pedigree.md#pd13) — Core

@@ -18,6 +18,7 @@ from ...contracts.pedigree import (
     CountExclusion,
     CountReleaseBasis,
     Decision,
+    DecisionInputs,
     ExclusionEvidence,
     ExclusionRequest,
     ExclusionSummary,
@@ -45,6 +46,9 @@ __all__ = [
     "exclusion_contigs",
     "precheck",
     "start_full_fit",
+    "start_inputs",
+    "full_selection",
+    "full_fit_state",
     "complete_decision",
     "exclusion_request",
     "release_decision",
@@ -61,6 +65,26 @@ def precheck(n_samples: int, *, basis: str = "informative") -> PedigreePrecheck:
 
 def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters) -> decision.FullFit | Pedigree:
     """Fit the supplied unit evidence; a run below the assessable material gets the completed unresolved product."""
+    start = start_inputs(scores, parameters)
+    if isinstance(start, Pedigree):
+        return start
+    return full_fit_state(start, full_selection(start.inputs, parameters))
+
+
+def full_selection(inputs: DecisionInputs, parameters: PedigreeParameters) -> decision.FullSelection:
+    """The decision's full-data fit from its inputs alone (it reads nothing of the resampled fits, which read nothing
+    of it), under the inputs' regime."""
+    return decision.full_selection(inputs, regimes.effective(parameters, inputs.regime))
+
+
+def full_fit_state(start: decision.FitStart, chosen: decision.FullSelection) -> decision.FullFit:
+    """The decision state before resampling: the fit inputs joined with their full-data fit."""
+    return decision.assemble(start, chosen)
+
+
+def start_inputs(scores: GenomeScores, parameters: PedigreeParameters) -> decision.FitStart | Pedigree:
+    """The decision's fit inputs (the direction model's neutral fit included) from the supplied unit evidence; a run
+    below the assessable material gets the completed unresolved product."""
     precheck(len(scores.sample_ids))
     classified = regimes.classify(scores.regime_basis_morgans, len(scores.contigs), parameters)
     if classified.name != scores.regime:
@@ -71,8 +95,8 @@ def start_full_fit(scores: GenomeScores, parameters: PedigreeParameters) -> deci
             raise InputError("not-assessable scored inputs require their prepared chromosome summaries")
         return not_assessable.product(scores.sample_ids, scores.informative_contigs,
                                       scores.chromosome_summary, classified.reach, parameters)
-    return decision.start_fit(scores, ParentEligibility.unrestricted(scores.sample_ids),
-                              regimes.effective(parameters, scores.regime))
+    return decision.start_inputs(scores, ParentEligibility.unrestricted(scores.sample_ids),
+                                 regimes.effective(parameters, scores.regime))
 
 
 def complete_decision(state: decision.FullFit, resampled: Resampling, parameters: PedigreeParameters) -> Decision:
@@ -128,8 +152,11 @@ def release_decision(
     *,
     relationship_evidence=(),
     transmission_evidence=(),
+    unresolved_rate_samples: int = 0,
 ) -> ReleasedDecision:
-    """Combine configured evidence, guard/count, orient and check the second guard; no scoring."""
+    """Combine configured evidence, guard/count, orient and check the second guard; no scoring.
+    ``unresolved_rate_samples``: samples whose outlier rate sits at the calibration grid's top (their exclusion dyads
+    were withheld from certification), reported in the exclusion summary."""
     parameters = regimes.effective(parameters, decided.scores.regime)
     sample_ids, rows = decided.scores.sample_ids, decided.alternatives.rows
     if request.sample_ids != sample_ids or relatedness.sample_ids != sample_ids:
@@ -166,8 +193,7 @@ def release_decision(
                     raise InvariantError(f"exclusion certification axis differs on {value.contig}")
                 certifiable &= value.certifiable
         chromosomes = [
-            dict(contig=value.contig, markers=value.markers, pattern_fallback_samples=value.pattern_fallback_samples,
-                 weight=float(np.exp(value.log_weight)))
+            dict(contig=value.contig, markers=value.markers, weight=float(np.exp(value.log_weight)))
             for value in evidence
         ]
         if targets:
@@ -240,9 +266,9 @@ def release_decision(
         pre_guard_calls, api.calls(decided.tier_a, rows, orientation), ordered_edges, final_guard
     )
     summary = ExclusionSummary(
-        model="full-marker-mendelian-directed-v1",
+        model="full-marker-mendelian-directed-observation-v1",
         alpha=parameters.exclusion.alpha,
-        genotype_replacement_probability=parameters.exclusion.genotype_replacement_probability,
+        unresolved_rate_samples=int(unresolved_rate_samples),
         conditional_on_supported_edge_directions=True,
         candidate_dyads=targets,
         contigs=len(request.contigs),
@@ -287,6 +313,7 @@ def assemble(
         parameters,
     )
     from dataclasses import replace
+
     from ...contracts.pedigree import BlockSummaryView
     from .low_labels import label_views
     numeric = label_views(numeric, released, low_material=decided.scores.regime == "low_material",
@@ -319,7 +346,7 @@ def assemble(
         support_record(decided),
         released.guard,
         views=numeric,
-        family_solve=decided.family_solve,
+        birth_order=decided.birth_order,
         guard_summary=guard_summary(released.guard),
         exclusion=released.exclusion,
         retained=PedigreeRetained(decided, released.count_release, released.orientation_ranks, released.request),
@@ -399,7 +426,6 @@ def support_record(decided: Decision) -> SupportRecord:
         worker_count=support.worker_count,
         bootstrap_fractions=fractions(support.bootstrap),
         loco_fractions=fractions(support.loco),
-        bootstrap_graph_budget_exhausted=support.bootstrap_graph_budget_exhausted,
-        loco_graph_budget_exhausted=support.loco_graph_budget_exhausted,
-        maximum_graph_passes_used=support.maximum_graph_passes_used,
+        bootstrap_order_restricted=support.bootstrap_order_restricted,
+        loco_order_restricted=support.loco_order_restricted,
     )

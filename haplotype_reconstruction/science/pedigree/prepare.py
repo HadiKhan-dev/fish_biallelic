@@ -3,15 +3,13 @@
 Per painted component: every sample's source laws as a candidate parent (science.pedigree.read_sources: the
 painting's emissions at its path strength with its read state, and its own normalised transition table), at most
 ``markers_per_bin`` evenly spaced selected markers per painting bin with their genotype likelihoods, the painted state
-classes (junction counts), the meiotic switch probability and the measured map length between bins, and the
-information exponent of the tempered view.
+classes (junction counts), and the meiotic switch probability and the measured map length between bins.
 
-Method: docs/methods/pedigree.md#preparation-markers-source-factors-and-information-blocks
+Method: docs/methods/pedigree.md#preparation-markers-and-source-factors
 """
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from dataclasses import replace
 
@@ -86,46 +84,6 @@ def _informative_counts(likelihoods, observed, sites, spread):
                 count += 1
         counts[sample] = count
     return counts
-
-
-@kernel(overloads=OVERLOADS["prepare._information_exponent"], cache=True, parallel=True, nogil=True)
-def _information_exponent(likelihoods, bin_sizes, markers_per_block, effective_markers, correlation):
-    """float64 [N, B]: per child and bin the tempered view's exponent for the n non-uniform GL markers of the bin's
-    information group (consecutive bins of >= ``markers_per_block`` selected markers): 1 / (1 + (n - 1) r) with the
-    transferred working temperature r = ``correlation`` >= 0 (4.21 B1), or min(effective, n) / n when ``correlation``
-    is negative (the 4.20 rule, gate G6-B1's fixed arm)."""
-    n_samples = likelihoods.shape[0]
-    n_bins = len(bin_sizes)
-    group_of_bin = np.empty(n_bins, dtype=np.int64)
-    group = 0
-    markers_in_group = 0
-    for block in range(n_bins):
-        if block > 0 and markers_in_group >= markers_per_block:
-            group += 1
-            markers_in_group = 0
-        group_of_bin[block] = group
-        markers_in_group += max(int(bin_sizes[block]), 1)
-    starts = np.zeros(n_bins, dtype=np.int64)
-    for block in range(1, n_bins):
-        starts[block] = starts[block - 1] + bin_sizes[block - 1]
-    exponent = np.zeros((n_samples, n_bins), dtype=np.float64)
-    for child in prange(n_samples):
-        informative = np.zeros(group + 1, dtype=np.int64)
-        for block in range(n_bins):
-            for site in range(starts[block], starts[block] + bin_sizes[block]):
-                gl0 = likelihoods[child, site, 0]
-                gl1 = likelihoods[child, site, 1]
-                gl2 = likelihoods[child, site, 2]
-                if gl0 != gl1 or gl1 != gl2:
-                    informative[group_of_bin[block]] += 1
-        for block in range(n_bins):
-            count = informative[group_of_bin[block]]
-            if count > 0:
-                if correlation < 0.0:
-                    exponent[child, block] = min(effective_markers, float(count)) / float(count)
-                else:
-                    exponent[child, block] = 1.0 / (1.0 + (float(count) - 1.0) * correlation)
-    return exponent
 
 
 def _evidence_sites(evidence_positions: np.ndarray, positions: np.ndarray, *, contig: str = "unknown") -> np.ndarray:
@@ -384,66 +342,15 @@ def _prepare_component(
         genotype_likelihoods=gl,
         observed=observed,
         state_classes=np.ascontiguousarray(np.transpose(state_classes, (0, 2, 1))),
-        information_exponent=np.empty((gl.shape[0], 0)),
         selector_fallback_bp=np.ascontiguousarray(
             chromosome_map.fallback_bp(bins.centers[:-1], bins.centers[1:]), dtype=np.float64
         ),
         # Per-bin label-error allowances of A9 and A10 (ADVICE2 11.1), tracks in the order of state_classes.
-        label_error=None if painted.label_error is None else np.ascontiguousarray(painted.label_error, dtype=np.float32),
+        label_error=(
+            None if painted.label_error is None else np.ascontiguousarray(painted.label_error, dtype=np.float32)
+        ),
         child_reads=reads,
     )
-
-
-def effective_units(bin_sizes: np.ndarray, markers_per_block: int, correlation: float) -> float:
-    """B2's effective information units of a chromosome (ADVICE2 11.3): sum over its information groups (consecutive
-    bins of >= ``markers_per_block`` selected markers, the grouping of _information_exponent) of
-    n_g / (1 + (n_g - 1) r_T), n_g the group's selected markers. Groups are sequential by construction (each closes
-    when it reaches the size); the sum over them is a short exact loop."""
-    sizes = np.maximum(np.asarray(bin_sizes, dtype=np.int64), 1)
-    groups, current = [], 0
-    for size in sizes:
-        if current >= markers_per_block:
-            groups.append(current)
-            current = 0
-        current += int(size)
-    if current:
-        groups.append(current)
-    n = np.asarray(groups, dtype=np.float64)
-    return float(math.fsum(n / (1.0 + (n - 1.0) * float(correlation))))
-
-
-def transferred_temperature(painting: Painting, config: PreparationParameters) -> float:
-    """r_T of B1 (ADVICE2 11.3): (d - 1) / (reference_snps_per_bin - 1) for the painting's confidence divisor
-    (emission_divisor) or its path divisor; -1 for the 4.20 rule (information_temperature = fixed)."""
-    if config.information_temperature == "fixed":
-        return -1.0
-    divisor = painting.emission_divisor if config.information_temperature == "confidence" else painting.path_divisor
-    return (float(divisor) - 1.0) / (int(painting.parameters.reference_snps_per_bin) - 1)
-
-
-def _information_exponents(
-    prepared: list[PreparedComponent], config: PreparationParameters, claim_threads: Callable[[], None],
-    correlation: float = -1.0,
-) -> np.ndarray:
-    """Chromosome-wide marker groups with only one sample batch's concatenated GL live."""
-    samples = prepared[0].genotype_likelihoods.shape[0]
-    bin_sizes = np.concatenate([c.bin_sizes for c in prepared])
-    exponent = np.empty((samples, len(bin_sizes)), dtype=np.float64)
-    # Information groups cross component boundaries. Keep that complete bin/marker axis,
-    # but concatenate only one independent sample batch rather than all N marker GL rows.
-    for first in range(0, samples, _EMISSION_SAMPLE_BLOCK):
-        last = min(samples, first + _EMISSION_SAMPLE_BLOCK)
-        claim_threads()
-        selected_gl = np.concatenate([c.genotype_likelihoods[first:last] for c in prepared], axis=1)
-        exponent[first:last] = _information_exponent(
-            selected_gl,
-            bin_sizes,
-            config.markers_per_information_block,
-            float(config.effective_markers_per_information_block),
-            float(correlation),
-        )
-        del selected_gl
-    return exponent
 
 
 def prepare_chromosome(
@@ -456,7 +363,7 @@ def prepare_chromosome(
     read_builder: Callable | None = None,
 ) -> PreparedChromosome:
     """Prepared components of one contig from its painting (ChromosomePainting) and evidence
-    (ContigEvidence, all samples), with the chromosome-wide information exponents, and the contig's configured
+    (ContigEvidence, all samples), and the contig's configured
     material (configured_morgans: m(L) - m(0) of ChromosomeGeneticMap.cumulative_morgans, L its last evidence
     position: the configured map and its fallback-rate tails, fixed before any genotype is read). ``read_builder``:
     the painting's read-state emission builder over scalar_emissions (painting.read_inputs.ReadEmissionBuilder, made
@@ -488,26 +395,9 @@ def prepare_chromosome(
         )
         if component is not None:
             prepared.append(component)
-    if not prepared:
-        return PreparedChromosome(painting.contig, len(painting.components), (), OMITTED, configured)
-    claim_threads()
-    temperature = transferred_temperature(painting, config)
-    exponent = _information_exponents(prepared, config, claim_threads, temperature)
-    components = []
-    offset = 0
-    for component in prepared:
-        components.append(
-            replace(
-                component, information_exponent=np.ascontiguousarray(exponent[:, offset : offset + component.n_bins])
-            )
-        )
-        offset += component.n_bins
-    units = (
-        effective_units(np.concatenate([c.bin_sizes for c in prepared]), config.markers_per_information_block, temperature)
-        if temperature >= 0.0 else float("nan")
-    )
     return PreparedChromosome(
-        painting.contig, len(painting.components), tuple(components), None, configured, effective_units=units
+        painting.contig, len(painting.components), tuple(prepared), None if prepared else OMITTED, configured,
+        search_alleles_reversed=evidence.search_alleles_reversed,
     )
 
 

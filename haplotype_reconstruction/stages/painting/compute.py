@@ -18,7 +18,7 @@ from ...core.errors import InvariantError
 from ...science.painting import emissions, fidelity
 from ...science.painting.emissions import ArraySource, EmissionBuilder
 from ...science.painting.label_continuity import relabel_component
-from ...science.painting.parameters import EMISSION_CACHE_MAX_BYTES, PaintingParameters
+from ...science.painting.parameters import EMISSION_CACHE_MAX_BYTES, LABEL_ERROR_CORRELATION, PaintingParameters
 from ...science.painting.run import (ComponentDecoding, PaintingEvidence, _raw_batches,
                                       component_model, decoding_grid, decoding_model, decode_batch, release_component)
 from ...science.painting.states import PaintingStates, build_states, build_bins
@@ -72,6 +72,7 @@ def decode_component(
     robustness_epsilon: float,
     site_correlation: float,
     confidence_model: fidelity.ChainModel | None = None,
+    label_model: fidelity.ChainModel | None = None,
     emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     batch_samples: int = 1,
     reverse: bool,
@@ -95,7 +96,11 @@ def decode_component(
     emissions are kept when they fit ``emission_cache_bytes``. ``reverse``: the run's tie-convention reversal
     (TieSettings.reverse), required so that no caller falls back to the forward convention by omission.
     ``label_errors``: also the label-error statistic of the decoded labels (fidelity.label_errors; the reference
-    painting, ADVICE2 11.1).
+    painting, ADVICE2 11.1), read from the chain at the label-error strength (parameters.LABEL_ERROR_CORRELATION, the
+    untempered chain): from the release pass when the release chain is at that strength, else from a second pass
+    over that strength's emissions (the path emissions rescaled by emissions.confidence_scale, with the read state's
+    matrices at its weights) and ``label_model``, the copying model fitted at it (required when the strength differs
+    from both run strengths). The labels, their release and the packed emissions do not depend on it.
     """
     n_samples = likelihoods.shape[0]
     states, bins = decoding_grid(panel, config)
@@ -136,15 +141,24 @@ def decode_component(
     group = config.reference_snps_per_bin // config.snps_per_bin
     if confidence_model is not None:
         transitions = replace(transitions, site_correlation=float(confidence_model.site_correlation))
+    # The label-error statistic's chain: a pass of its own when its strength differs from the release chain's, with
+    # emissions of its own when it differs from the path strength too.
+    release_correlation = float(site_correlation if confidence_model is None else confidence_model.site_correlation)
+    label_pass = bool(label_errors) and float(LABEL_ERROR_CORRELATION) != release_correlation
+    label_scaled = label_pass and float(LABEL_ERROR_CORRELATION) != float(site_correlation)
+    if label_scaled and label_model is None:
+        raise InvariantError("the label-error statistic needs the copying model fitted at the label-error strength")
 
     n_packed = n_states * (n_states + 1) // 2
     packed_bytes = 8 * n_samples * n_packed * n_bins
     fixed_bytes = packed_bytes if packed_bytes <= emission_cache_bytes else 0
-    bytes_per_sample = _decoder_bytes(states, n_bins)
+    bytes_per_sample = _decoder_bytes(states, n_bins) + (8 * n_states * n_states * n_bins if label_scaled else 0)
     read_state, columns = _read_state(emission_builder)
     if read_state is not None:      # the batch's read matrices, label-independent parts and their transient inputs
         selected = emissions.contig_columns(np.asarray(evidence_sites, dtype=np.int64)[states.site_indices], columns)
-        bytes_per_sample += read_state.sample_bytes(selected, n_states, n_bins, confidence_model is not None)
+        bytes_per_sample += read_state.sample_bytes(
+            selected, n_states, n_bins, int(confidence_model is not None) + int(label_scaled)
+        )
     packed = np.empty((n_samples, n_packed, n_bins)) if fixed_bytes else None
     size = max(1, min(n_samples, int(batch_samples)))
     budget = fixed_bytes + size * bytes_per_sample
@@ -189,6 +203,18 @@ def decode_component(
                 informative, bins.starts, site_correlation, confidence_model.site_correlation, group
             )[:, None, :]
             confident = raw.at_confidence(scaled) if hasattr(raw, "read") else scaled
+        label = None
+        if label_pass and not label_scaled:
+            label = (model, raw)                    # the label-error strength is the path strength
+        elif label_scaled:
+            labelled = scalar * emissions.confidence_scale(
+                informative, bins.starts, site_correlation, LABEL_ERROR_CORRELATION, group
+            )[:, None, :]
+            if hasattr(raw, "read"):
+                if raw.label is None and raw.read.shape[-1] > 1:
+                    raise InvariantError("the emission builder carries no label-error strength (stage_builder)")
+                labelled = raw.at_label(labelled)
+            label = (label_model, labelled)
         if packed is not None:
             # later stages (pedigree, family phase) read the emissions without read state (the scalar part)
             emissions.pack_emissions(scalar if confident is None else (confident.raw if hasattr(confident, "read")
@@ -197,12 +223,13 @@ def decode_component(
             raw, batch_eligible, batch_observed, informative, states, bins, model, capable,
             local_keys, public_ids, config, reverse=reverse,
             confidence=None if confident is None else (confidence_model, confident), errors=label_errors,
+            label=label,
         )
         batch_paths, batch_masks, batch_switches, batch_qf, batch_qaf, batch_support = decoded[:6]
         if label_error is not None:
             label_error[start:stop, :, 0] = decoded[6]
             label_error[start:stop, :, 1:] = np.transpose(decoded[7], (0, 2, 1))
-        del confident
+        del confident, label
         qf[start:stop], qaf[start:stop] = batch_qf, batch_qaf
         del raw
         paths[start:stop] = batch_paths
@@ -330,6 +357,12 @@ def paint_chromosome(
     cache_remaining = max(0, int(emission_cache_bytes))
     components: list[ComponentPainting] = []
     continuity: list[LabelContinuity] = []
+    # The label-error statistic's own copying model (parameters.LABEL_ERROR_CORRELATION, the untempered chain): fitted
+    # when the reference painting reads the statistic and its strength differs from both run strengths.
+    release_correlation = float(site_correlation if confidence_correlation is None else confidence_correlation)
+    label_strength = bool(label_errors) and float(LABEL_ERROR_CORRELATION) not in (
+        float(site_correlation), release_correlation
+    )
     for component_index, panel in enumerate(panels):
         if label_continuity is not None:
             outcome = label_continuity[component_index]
@@ -353,7 +386,7 @@ def paint_chromosome(
                     site_correlation
                 )
                 component_batch = read_state.batch_samples(
-                    selected, states.n_states, bins.n_bins, confidence, batch_samples
+                    selected, states.n_states, bins.n_bins, int(confidence) + int(label_strength), batch_samples
                 )
                 held_read_bytes = component_likelihoods.shape[0] * read_state.matrix_bytes(
                     states.n_states, bins.n_bins
@@ -431,6 +464,30 @@ def paint_chromosome(
                         f"c{component_index}/confidence_model",
                         dict(model=None if confidence_model is None else to_payload(confidence_model)),
                     )
+        label_model = None
+        if label_strength:
+            saved = None if progress is None else progress.load(f"c{component_index}/label_model")
+            if saved is not None:
+                label_model = None if saved["model"] is None else from_payload(fidelity.ChainModel, saved["model"])
+            else:
+                label_model = component_model(
+                    painted,
+                    component_likelihoods,
+                    component_observed,
+                    sites,
+                    config,
+                    genetic_map,
+                    robustness_epsilon=epsilon, site_correlation=float(LABEL_ERROR_CORRELATION),
+                    batch_samples=component_batch,
+                    cache_emissions=_packed_bytes(painted, component_likelihoods.shape[0], config) + held_read_bytes
+                    <= budget,
+                    emission_builder=builder,
+                )
+                if progress is not None:
+                    progress.save(
+                        f"c{component_index}/label_model",
+                        dict(model=None if label_model is None else to_payload(label_model)),
+                    )
         decoding = decode_component(
             painted,
             component_likelihoods,
@@ -440,6 +497,7 @@ def paint_chromosome(
             genetic_map,
             model=model,
             confidence_model=confidence_model,
+            label_model=label_model,
             robustness_epsilon=epsilon, site_correlation=site_correlation,
             emission_cache_bytes=budget,
             batch_samples=component_batch,

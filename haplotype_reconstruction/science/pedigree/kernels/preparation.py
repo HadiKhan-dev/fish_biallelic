@@ -3,15 +3,6 @@
 from numba import types
 
 OVERLOADS = {
-    "prepare._information_exponent": (
-        (
-            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
-            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
-            types.int64,
-            types.float64,
-            types.float64,
-        ),
-    ),
     "prepare._informative_counts": (
         (
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),

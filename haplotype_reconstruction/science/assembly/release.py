@@ -25,6 +25,7 @@ from haplotype_reconstruction.contracts.assembly import (
 )
 from haplotype_reconstruction.contracts.panels import FounderComponent, partner_changes
 from haplotype_reconstruction.core.errors import InvariantError
+from haplotype_reconstruction.science.shared.alleles import complement_calls
 
 if TYPE_CHECKING:
     from typing import TypedDict
@@ -417,6 +418,7 @@ def release_founders(
     prepared_alleles: Sequence[NDArray[np.int8]] | None = None,
     identity_paths: Sequence[tuple[int, NDArray[np.int64], NDArray[np.int64], NDArray[np.int32]]] = (),
     refit_ambiguous_alleles: int = 0,
+    search_alleles_reversed: bool = False,
 ) -> FounderRelease:
     """Slice already carrier-masked painted/refit panels at final assembly ambiguity.
 
@@ -652,10 +654,11 @@ def release_founders(
             row_order = list(range(len(calls)))
             if len(ordered) > 2 or np.any(mask):
                 paths = np.asarray(panel.rows)[:, start - panel.start : stop - panel.start]
-                # Segment labels name released local content. This removes a suffix
-                # relabelling of the point representative from the displayed columns.
+                # Name segments by released content in the contig's canonical
+                # coding so REF/ALT exchange preserves the displayed row map.
+                key_calls = complement_calls(segment_calls) if search_alleles_reversed else segment_calls
                 row_order.sort(
-                    key=lambda row: (segment_calls[row].tobytes(), bool(no_fill[row]), tuple(paths[row].tolist()))
+                    key=lambda row: (key_calls[row].tobytes(), bool(no_fill[row]), tuple(paths[row].tolist()))
                 )
                 segment_calls = segment_calls[row_order]
                 no_fill = no_fill[row_order]

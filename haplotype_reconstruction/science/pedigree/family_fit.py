@@ -41,7 +41,8 @@ def _prepare(tc, mcls, mknown, theta, floor, mdelta):
             x, y = mcls[m, t, 0], mcls[m, t, 1]
             for a in range(T):
                 for b in range(T):
-                    out[m, t, a, b] = math.log(_emit(x, y, tc[a, t], tc[b, t], mdelta[m, t, 0], mdelta[m, t, 1]))
+                    out[m, t, a, b] = math.log(_emit(x, y, tc[a, t], tc[b, t],
+                            mdelta[m, t, 0], mdelta[m, t, 1], mdelta[m, t, 2], mdelta[m, t, 3]))
     return out, representatives, transition
 
 
@@ -233,7 +234,8 @@ def _emis4(tc, cls, known, paths, t, dm, e):
         for s in range(2):
             u = tc[paths[0, s, t], t]
             for r in range(2):
-                e[2 * s + r] = _emit(cls[t, 0], cls[t, 1], u, tc[paths[1, r, t], t], dm[t, 0], dm[t, 1])
+                e[2 * s + r] = _emit(cls[t, 0], cls[t, 1], u, tc[paths[1, r, t], t],
+                        dm[t, 0], dm[t, 1], dm[t, 2], dm[t, 3])
 
 
 @kernel(overloads=OVERLOADS["family_fit._half_flip"], cache=True, nogil=True)
@@ -252,7 +254,8 @@ def _half_flip(tc, cls, known, paths, latent, theta, floor, dm, gains):
                 for f in range(T):
                     e = 1.0
                     if known[t]:
-                        e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], dm[t, 0], dm[t, 1])
+                        e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t],
+                                dm[t, 0], dm[t, 1], dm[t, 2], dm[t, 3])
                     emissions[t, sl, f] = e
                     fw[t, sl, f] = 0.5 / T * e
         else:
@@ -267,7 +270,8 @@ def _half_flip(tc, cls, known, paths, latent, theta, floor, dm, gains):
                     sel = fw[t - 1, sl, f] * st + fw[t - 1, 1 - sl, f] * th
                     e = 1.0
                     if known[t]:
-                        e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t], dm[t, 0], dm[t, 1])
+                        e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t],
+                                dm[t, 0], dm[t, 1], dm[t, 2], dm[t, 3])
                     emissions[t, sl, f] = e
                     fw[t, sl, f] = (sel * (1.0 - th) + (tot - sel) * ch) * e
         z = 0.0

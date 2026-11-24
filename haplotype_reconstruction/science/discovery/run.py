@@ -13,6 +13,7 @@ from ...contracts.roles import record_field
 from ...core.concurrency import ThreadSource
 from ...core.errors import InvariantError
 from ...core.progress import Progress
+from ..shared.alleles import complement_calls
 from ..shared.observation import mix_likelihoods
 from ...core.ties import inverse_permutation, run_sample_order
 from .diagnostics import BlockDiagnostics
@@ -50,6 +51,8 @@ class BlockEvidence:
         "state", axes=("L", "3"), units="probability", dtype="float64", default=None
     )
 
+    search_alleles_reversed: bool = record_field("obs", units="1", dtype="bool", default=False)
+
     @property
     def informative(self) -> bool:
         """At least one discovery site is observed in at least one sample."""
@@ -67,6 +70,7 @@ def block_evidence(evidence: ContigEvidence, block: int) -> BlockEvidence:
         likelihoods=slice_likelihoods(evidence.likelihoods, start, stop),
         observed=slice_observed(evidence.observed, start, stop),
         sample_ids=tuple(evidence.sample_ids),
+        search_alleles_reversed=evidence.search_alleles_reversed,
         cohort=None if evidence.cohort_frequencies is None else evidence.cohort_frequencies[start:stop],
     )
 
@@ -164,6 +168,10 @@ def discover_block(
         if evidence.cohort is None:
             raise InvariantError("a block scored with outliers needs its sites' cohort genotype frequencies")
         likelihoods = mix_likelihoods(likelihoods, evidence.cohort, outlier_rate)
+    # Use one source-independent allele frame for all discovery keys, including
+    # ordering and exact identity of different panels. Reverse only the allele axis.
+    if evidence.search_alleles_reversed:
+        likelihoods = likelihoods[..., ::-1]
     kept = evidence.kept
     observed = dense_observed(evidence.observed)
     result = search_block(
@@ -178,7 +186,7 @@ def discover_block(
         map_work=map_work,
         progress=progress,
     )
-    return materialise(
+    product = materialise(
         evidence.block,
         evidence.site_start,
         evidence.positions,
@@ -189,6 +197,15 @@ def discover_block(
         config,
         diagnostics,
     )
+    if evidence.search_alleles_reversed:
+        product = replace(
+            product,
+            latent=complement_calls(product.latent),
+            calls=complement_calls(product.calls),
+            alt_probability=1.0 - product.alt_probability,
+            tied_panels=tuple(complement_calls(panel) for panel in product.tied_panels),
+        )
+    return product
 
 
 __all__ = ["BlockEvidence", "block_evidence", "discover_block", "search_block"]

@@ -28,6 +28,7 @@ from numba.typed import List
 
 from haplotype_reconstruction.core.kernels import kernel
 
+from ...shared.alleles import complement_calls
 from .. import orders as tie_rules
 from ..pairs import emission_pair_index as pair
 from .component_workspace import map_hazards
@@ -457,11 +458,21 @@ def beam_template(
     return chosen, best - incumbent, counts, cert
 
 
+def _leaf_content_keys(leaves, search_alleles_reversed):
+    # Keep row identities for the beam and reflect only allele bytes in its
+    # alphabetical keys. REF/ALT exchange then leaves the beam order unchanged.
+    return tuple(
+        tuple(row.tobytes() for row in (complement_calls(block) if search_alleles_reversed else block))
+        for block in leaves
+    )
+
+
 class WindowBeam:
     """The component's beam proposer (fixed binned inputs, templates and coarse context)."""
 
     def __init__(self, workspace, context, genetic_map, reset_rate, probability_floor):
         self.ws = workspace
+        self.leaf_content_keys = _leaf_content_keys(workspace.leaves, workspace.search_alleles_reversed)
         self.blocks = workspace.blocks
         emissions = workspace.emissions
         self.bin_counts = np.asarray([e.shape[2] for e in emissions], np.int64)
@@ -484,7 +495,8 @@ class WindowBeam:
         self.templates = window_templates(self.blocks, None if self.coarse is None else self.coarse[0])
 
     def nbytes(self):
-        return int(self.logs.nbytes + self.rho.nbytes)
+        keys = sum(len(key) for block in self.leaf_content_keys for key in block)
+        return int(self.logs.nbytes + self.rho.nbytes + keys)
 
     def scratch_bytes(self, founders, threads=1, templates=None, width=None):
         n = self.ws.samples
@@ -568,7 +580,7 @@ class WindowBeam:
                             sorted(
                                 range(len(p)),
                                 key=lambda r: (
-                                    tuple(self.ws.leaves[b][p[r, b - a]].tobytes() for b in range(a, c)),
+                                    tuple(self.leaf_content_keys[b][p[r, b - a]] for b in range(a, c)),
                                     tuple(p[r]),
                                 ),
                                 reverse=reverse,

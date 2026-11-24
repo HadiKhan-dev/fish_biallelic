@@ -108,6 +108,7 @@ VARIANT_KINDS = ("inversion", "deletion", "duplication", "reversed", "moved", "u
 # Generating read presets: name -> preset file (interface/settings/presets).
 READ_PRESETS = {
     "realistic": "realistic_reads.toml",
+    "realistic_long_reads": "realistic_long_reads.toml",
     "short_read_cohort": "short_read_cohort.toml",
     "long_read_cohort": "long_read_cohort.toml",
 }
@@ -537,7 +538,6 @@ def _validate_simulation(config: Settings) -> None:
         "stretch_cover",
         "stretch_miss",
         "miss",
-        "call_min_alt_fraction",
         "systematic_sites",
         "systematic_lo",
         "systematic_hi",
@@ -553,10 +553,9 @@ def _validate_simulation(config: Settings) -> None:
     require(0 <= artefacts.balance_dispersion < 1, "artefact balance_dispersion must be in [0, 1)")
     require(artefacts.miss_sample_cv >= 0, "artefact miss_sample_cv must be nonnegative")
     require(0 <= artefacts.hom_alt_miss_factor <= 1, "artefact hom_alt_miss_factor must be between zero and one")
-    require(
-        not (reads.long_read_mean_bp and artefacts.enabled and artefacts.balance_dispersion),
-        generating.BALANCE_WITH_LONG_READS,
-    )
+    with_reads = bool(reads.long_read_mean_bp or reads.read_length_bp)
+    require(not (with_reads and artefacts.enabled and artefacts.balance_dispersion), generating.BALANCE_WITH_READS)
+    require(not with_reads or reads.heterozygote_alt_probability == 0.5, generating.HETEROZYGOTE_BALANCE_WITH_READS)
     require(
         artefacts.block_band > 0 and artefacts.stretch_sites >= 1,
         "artefact block_band must be positive and stretch_sites at least one",
@@ -585,11 +584,38 @@ def _validate_simulation(config: Settings) -> None:
     require(reads.reference_bias_power > 0, "reference_bias_power must be positive")
     require(0 <= reads.reference_pull <= 1, "reference_pull must be between zero and one")
     require(0 <= reads.foreign_read_share < 1, "foreign_read_share must be in [0, 1)")
+    require(0 <= reads.contamination_share <= 1, "contamination_share must be in [0, 1]")
+    require(0 <= reads.contamination_sample_fraction <= 1, "contamination_sample_fraction must be between zero and one")
+    require(len(reads.contamination_shares) == len(reads.contamination_samples)
+            and (not reads.contamination_donors or len(reads.contamination_donors) == len(reads.contamination_samples)),
+            "contamination_shares (and contamination_donors, when given) need one value per listed sample")
+    require(all(0 < s <= 1 for s in reads.contamination_shares), "contamination_shares must be in (0, 1]")
+    require(not (reads.contamination_samples and reads.contamination_share),
+            "set either contamination_samples (an explicit list) or contamination_share (a law)")
+    require(0 <= reads.duplicate_rate < 0.9, "duplicate_rate must be in [0, 0.9)")
+    require(0 <= reads.library_error_sigma <= 3, "library_error_sigma must be in [0, 3]")
+    require(not reads.duplicate_rate or reads.read_length_bp,
+            "duplicate_rate needs paired-end reads (read_length_bp); long reads and independent sites refuse it")
+    require(0 <= reads.chimera_share < 1 and 0 <= reads.chimera_mismap_share <= 1,
+            "chimera_share must be in [0, 1) and chimera_mismap_share in [0, 1]")
+    require(reads.chimera_min_segment_bp >= 0, "chimera_min_segment_bp must be nonnegative")
+    require(not reads.chimera_share or reads.long_read_mean_bp,
+            "chimera_share applies to long reads (long_read_mean_bp)")
+    require(0 <= reads.exogenous_read_share < 0.5, "exogenous_read_share must be in [0, 0.5)")
+    for name in ("exogenous_sample_fraction", "exogenous_window_fraction", "exogenous_alt_probability"):
+        require(0 <= getattr(reads, name) <= 1, f"[simulation.reads] {name} must be between zero and one")
+    require(reads.exogenous_window_bp >= 0, "exogenous_window_bp must be nonnegative")
+    require(not reads.exogenous_read_share or (reads.exogenous_window_fraction > 0 and reads.exogenous_window_bp > 0),
+            "exogenous_read_share needs positive exogenous_window_fraction and exogenous_window_bp")
     require(0 <= reads.injected_outlier_rate < 0.5, "injected_outlier_rate must be in [0, 0.5)")
     require(reads.injected_outlier_pattern in ("uniform", "heterogeneous", "clustered", "misspecified"),
             "injected_outlier_pattern must be uniform, heterogeneous, clustered or misspecified")
-    require(not reads.reference_bias or reads.reference_bias_window_bp > 0,
-            "positive reference_bias requires positive reference_bias_window_bp")
+    require(not reads.reference_bias or with_reads,
+            "reference_bias needs reads: set read_length_bp or long_read_mean_bp")
+    require(not (reads.long_read_mean_bp and reads.reference_bias) or reads.reference_bias_window_bp > 0,
+            "positive reference_bias with long reads requires positive reference_bias_window_bp")
+    require(not (reads.read_length_bp and reads.reference_bias_window_bp),
+            "reference_bias_window_bp applies to long reads only: a paired-end mate's ALT count is taken over the mate")
     for name in ("substitution_share", "context_sites", "context_convert"):
         require(0 <= getattr(reads, name) <= 1, f"[simulation.reads] {name} must be between zero and one")
     structure = sim.structure

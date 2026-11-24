@@ -1,7 +1,7 @@
 """Publish complete pedigree records as plain stored-field dictionaries and lists.
 
 The record codec owns recursive field/schema/type validation. This pedigree adapter owns only
-whole-product completeness of schema-9 products: composed reports and views, a search row for
+whole-product completeness of schema-10 products: composed reports and views, a search row for
 every sample and a summary for every configured chromosome. A cold reader never repairs reports
 or reruns science.
 """
@@ -22,9 +22,9 @@ __all__ = ["PedigreeAdapter"]
 
 
 class PedigreeAdapter:
-    """Lossless schema-9 fields, decoded to read-only arrays by the shared record codec codec."""
+    """Lossless schema-10 fields, decoded to read-only arrays by the shared record codec codec."""
 
-    schema = 9
+    schema = 10
 
     def encode(self, product: records.Pedigree) -> Mapping[str, Any]:
         require_schema({"schema": product.schema}, self.schema)
@@ -43,7 +43,7 @@ def _complete(product: records.Pedigree) -> None:
     if not product.reports_complete:
         raise InputError("pedigree report inputs are incomplete; finish PE2/PE3 report composition before publication")
     if product.regime == "not_assessable":
-        if any(value is not None for value in (product.panel, product.support, product.family_solve, product.retained)):
+        if any(value is not None for value in (product.panel, product.support, product.birth_order, product.retained)):
             raise InputError("not-assessable pedigree must have absent fit diagnostics")
         if len(product.edges.parents) or np.any(product.calls.state != -1):
             raise InputError("not-assessable pedigree must release nothing")

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from ...contracts.roles import require_schema
+from ...store.protocol import read_items
+from ...store.store import CheckpointStore
 from ..inputs.products import task_inputs, required_product
 from ..context import StageRun
 from ..framework import Task, TaskKey, RecordKey, ResourceRequest
@@ -17,20 +20,28 @@ def run(root: str, contig: str, *, team: int = 1) -> str:
     from ..refit import records as refit_records
 
     reader, store = task_inputs(root)
+    file = store.contig(contig)
+    expected = records.expected(store, reader.manifest, product="release", contig=contig)
+    saved = read_items(file, expected.key, expected.identity, ("schema",))
+    if saved is not None:
+        require_schema(saved.payload, expected.schema)
+        return expected.identity
     assembly = required_product(reader, assembly_records, "assembly", contig)
     painting = required_product(reader, painting_records, "painting", contig)
     refit = required_product(reader, refit_records, "refit", contig)
     evidence = required_product(reader, evidence_records, "evidence", contig)
-    identity = records.expected(store, reader.manifest, product="release", contig=contig).identity
     execute_release(
-        ReleaseInputs(assembly, painting, refit, evidence), store.contig(contig), identity, cores=team
+        ReleaseInputs(assembly, painting, refit, evidence), file, expected.identity, cores=team
     )
-    return identity
+    return expected.identity
 
 
 def task(key, context: StageRun) -> Task:
     """Declare option-independent founder release with its existing dependencies."""
+    from .records import RELEASE
+
+    existing = CheckpointStore(context.root).contig(key.scope).has(RELEASE)
     return Task(key, run, (context.root, key.scope),
                 depends_on=tuple(TaskKey(stage, "contig", key.scope) for stage in ("assembly", "painting", "refit", "evidence")),
-                outputs=(RecordKey(key.scope, "release"),), resources=ResourceRequest(1, context.cores),
+                outputs=(RecordKey(key.scope, RELEASE),), resources=ResourceRequest(1, 1 if existing else context.cores),
                 thread_argument="team")

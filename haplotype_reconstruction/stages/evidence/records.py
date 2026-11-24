@@ -38,6 +38,7 @@ __all__ = [
     "load",
     "load_arrays",
     "load_likelihoods",
+    "load_search_alleles_reversed",
     "load_observed",
     "load_observed_counts",
     "load_dense",
@@ -195,6 +196,7 @@ def write(
                 "founder_excluded",
                 "block_spans",
                 "cohort_frequencies",
+                "search_alleles_reversed",
             )
         }
         payload.update(
@@ -283,6 +285,15 @@ def _decode_gl(payload: Mapping[str, Any], encoding: str) -> np.ndarray | CodedL
     return CodedLikelihoods(**{name: payload["gl_" + name] for name in GL_FIELDS})
 
 
+def load_search_alleles_reversed(file: CheckpointFile, *, expected_identity: str) -> bool:
+    """Read the contig search coding without decoding any arrays."""
+    record = read_items(file, EVIDENCE, expected_identity, ("schema", "search_alleles_reversed"))
+    if record is None:
+        raise KeyError(EVIDENCE)
+    require_schema(record.payload, SCHEMA)
+    return bool(record.payload.get("search_alleles_reversed", False))
+
+
 def load_likelihoods(file: CheckpointFile, *, expected_identity: str) -> np.ndarray | CodedLikelihoods:
     """Read the resident dense/coded source without projecting an entire contig."""
     version, encoding = _layout(file, expected_identity)
@@ -347,7 +358,10 @@ def load_dense(file: CheckpointFile, *, counts: bool = False, expected_identity:
     memory path even for a mixed record. Other consumers retain compact sources.
     """
     version, _ = _layout(file, expected_identity)
-    header = read_items(file, EVIDENCE, expected_identity, ("schema", "contig", "sample_ids", "payload_identity"))
+    header = read_items(
+        file, EVIDENCE, expected_identity,
+        ("schema", "contig", "sample_ids", "payload_identity", "search_alleles_reversed"),
+    )
     if header is None:
         raise KeyError(EVIDENCE)
     names = tuple(name for name in ARRAYS if counts or name != "counts")
@@ -357,6 +371,7 @@ def load_dense(file: CheckpointFile, *, counts: bool = False, expected_identity:
         contig=header.payload["contig"],
         sample_ids=tuple(header.payload["sample_ids"]),
         payload_identity=header.payload["payload_identity"],
+        search_alleles_reversed=header.payload.get("search_alleles_reversed", False),
         counts=arrays.pop("counts", None),
         **arrays,
     )
@@ -604,7 +619,9 @@ class Reader:
             fallback = (
                 (("counts_dense",) if self.counts else ()) + ("observed_dense",) if self.encoding == "paired" else ()
             )
-            return ("schema", "contig", "sample_ids", "payload_identity", *names, *gl, *fallback)
+            return (
+                "schema", "contig", "sample_ids", "payload_identity", "search_alleles_reversed", *names, *gl, *fallback
+            )
         if self.product == "diagnostics":
             return ("schema", "diagnostics")
         return ("schema", "decisions")
@@ -626,6 +643,7 @@ class Reader:
                 contig=payload["contig"],
                 sample_ids=tuple(payload["sample_ids"]),
                 payload_identity=payload["payload_identity"],
+                search_alleles_reversed=payload.get("search_alleles_reversed", False),
                 counts=counts,
                 likelihoods=gl,
                 observed=observed,

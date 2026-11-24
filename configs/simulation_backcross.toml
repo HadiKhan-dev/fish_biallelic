@@ -41,7 +41,7 @@ size = 500.0
 # Optional call-set artefacts, applied after reads:
 # [simulation.artefacts]
 # preset = "reference_blocks"
-# balance_dispersion = 0.0  # required with long reads (the read model sets the allele balance)
+# balance_dispersion = 0.0  # required with reads (the reads set the allele balance)
 
 [simulation.stocks.left]
 population = "ancestral"

@@ -43,6 +43,7 @@ STREAMS = (
     "pedigree.bootstrap",  # pedigree/resampling.py: replicate then contig
     "pedigree.relationship.reference",  # component then triple, on sorted sample identifiers
     "pedigree.family_transmission.starts",  # PD29 perturbed optimiser starts, keyed by the segment data digest
+    "pedigree.order.chain",  # pedigree/order.py: one stream per fit, keyed by order.fit_key
     "simulation.structure",  # Python MT via structure_stream(master), not stream()
     "simulation.master",  # pedigree.py: cohort/depth then contig then child
     "simulation.child",  # pedigree.py: mother's gamete then father's
@@ -53,6 +54,11 @@ STREAMS = (
     "simulation.read_batch",  # reads.py: a sample's read batches after the first (seed, sample index, batch as key)
     "simulation.sample_region",  # reads.py: one stream per sample for its regional depth factors
     "simulation.injected_outliers",  # injection.py: one stream per sample from the contig's task seed (gate G1i)
+    "simulation.exogenous_reads",  # reads.py: a sample's other-species reads on one contig (contig seed, index)
+    "simulation.exogenous_level",  # source.py: a sample's genome-wide exogenous share (generating seed, sample id key)
+    "simulation.contamination_level",  # reads.py: a library's contamination share and donor (generating seed, id key)
+    "simulation.duplicate_level",  # reads.py: a library's PCR duplicate rate (generating seed, sample id key)
+    "simulation.library_error",  # reads.py: a library's error factor (generating seed, sample id key)
     "simulation.observation",  # design.py: subsampling after pedigree creation
     "templates.example",  # templates/example.py: SeedSequence child per contig
 )
@@ -86,12 +92,17 @@ def stream(name: str, *, seed: int | None = None, key: Any = _UNSET, index: int 
         if seed is not None:
             raise ValueError("count bootstrap requires either key or seed, not both")
         seed = bootstrap_seed(key)
-    if name in ("pedigree.bootstrap", "pedigree.relationship.reference", "pedigree.family_transmission.starts") and seed is None:
+    if name in ("pedigree.bootstrap", "pedigree.relationship.reference", "pedigree.family_transmission.starts",
+                "pedigree.order.chain") and seed is None:
         seed = PEDIGREE_BOOTSTRAP_SEED
     if seed is None:
         raise ValueError(f"{name}: a realised seed is required")
     if name == "pedigree.family_transmission.starts":
         return np.random.default_rng([seed, int(key) if key is not _UNSET else 0])
+    if name == "pedigree.order.chain":
+        if key is _UNSET:
+            raise ValueError("pedigree.order.chain requires the fit key")
+        return np.random.default_rng(np.random.SeedSequence([int(seed), 8_000_000, int(key)]))
     if name == "pedigree.relationship.reference":
         component = 0 if key is _UNSET else int(key)
         return np.random.default_rng([seed + int(index), component])
@@ -107,6 +118,29 @@ def stream(name: str, *, seed: int | None = None, key: Any = _UNSET, index: int 
         return np.random.default_rng(np.random.SeedSequence([int(seed), 5_000_000, int(index)]))
     if name == "simulation.injected_outliers":
         return np.random.default_rng(np.random.SeedSequence([int(seed), 6_000_000, int(index)]))
+    if name == "simulation.exogenous_reads":
+        # Keep this stream separate from pedigree.order.chain, which uses 8_000_000.
+        return np.random.default_rng(np.random.SeedSequence([int(seed), 13_000_000, int(index)]))
+    if name == "simulation.exogenous_level":
+        if key is _UNSET:
+            raise ValueError("simulation.exogenous_level requires the sample identifier as key")
+        word = int.from_bytes(hashlib.sha256(str(key).encode()).digest()[:4], "little")
+        return np.random.default_rng(np.random.SeedSequence([int(seed), 9_000_000, word]))
+    if name == "simulation.contamination_level":
+        if key is _UNSET:
+            raise ValueError("simulation.contamination_level requires the sample identifier as key")
+        word = int.from_bytes(hashlib.sha256(str(key).encode()).digest()[:4], "little")
+        return np.random.default_rng(np.random.SeedSequence([int(seed), 10_000_000, word]))
+    if name == "simulation.duplicate_level":
+        if key is _UNSET:
+            raise ValueError("simulation.duplicate_level requires the sample identifier as key")
+        word = int.from_bytes(hashlib.sha256(str(key).encode()).digest()[:4], "little")
+        return np.random.default_rng(np.random.SeedSequence([int(seed), 11_000_000, word]))
+    if name == "simulation.library_error":
+        if key is _UNSET:
+            raise ValueError("simulation.library_error requires the sample identifier as key")
+        word = int.from_bytes(hashlib.sha256(str(key).encode()).digest()[:4], "little")
+        return np.random.default_rng(np.random.SeedSequence([int(seed), 12_000_000, word]))
     if name == "simulation.observation":
         return np.random.default_rng(np.random.SeedSequence([int(seed), 3_000_000]))
     if name in ("simulation.founders", "templates.example"):

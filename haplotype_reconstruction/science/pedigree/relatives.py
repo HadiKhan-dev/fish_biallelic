@@ -1,8 +1,8 @@
 """Score and aggregate relative-proxy contrasts on prepared chromosome inputs.
 
 Second-degree and full-sib forward models share the prepared resident projection and
-public kernels, and carry the child's read state as its M1 and M2 chains do (read_forward). Availability gates only the candidate parent. Component order
-is fixed; report aggregation uses the declared configured-contig sum.
+public kernels, and carry the child's read state as its M1 and M2 chains do (read_forward). Availability gates only
+the candidate parent. Component order is fixed; report aggregation uses the declared configured-contig sum.
 
 Method: docs/methods/pedigree.md#relative-proxy-contrasts-of-released-edges
 """
@@ -71,7 +71,6 @@ def _second_degree(
     site_index,
     site_start,
     site_stop,
-    exponent,
     null_diagonal,
     null_off,
     null_frequency,
@@ -81,17 +80,14 @@ def _second_degree(
     read_initial,
     read_reset, read_width, read_operator,
     read_ratio_table,
-    read_powered,
     class_cache,
     first_child,
-    view,
 ):
     """Second-degree relative proxy: one homologue of the child is IBD with the candidate's transmission chain in
     tracts (stationary 1/2, flipping with the meiotic selector probability per bin edge), null outside, the other
-    homologue null; the child's read class carried as in M1 (read_transfer.carry_bin). Composite score (1/2 tempered +
-    1/2 full), as M1."""
+    homologue null; the child's read class carried as in M1 (read_transfer.carry_bin). One likelihood, as M1."""
     states = state_alt.shape[0]
-    bins = exponent.shape[1]
+    bins = site_start.shape[1]
     classes = read_initial.shape[1]
     prefix = np.empty(states + 1)
     suffix = np.empty(states + 1)
@@ -153,11 +149,10 @@ def _second_degree(
                         null_frequency[child, k + 1], 1
                     )
                     layer[z, c] = work.copy()
-        eta = exponent[child, block] if view == 0 else 1.0
         for z in range(2):
             carry_bin(layer[z], mix, factor, column, child, block, parent if z == 1 else -1, -1, candidate_alt,
-                      state_alt, gl, site_index, site_start, site_stop, read_offset, read_reset, read_width, read_operator,
-                      read_ratio_table, read_powered, view == 0, eta, class_cache, child - first_child, moved)
+                      state_alt, gl, site_index, site_start, site_stop, read_offset, read_reset, read_width,
+                      read_operator, read_ratio_table, class_cache, child - first_child, moved)
         # emissions (log space) per layer
         peak = -np.inf
         logs = np.empty((2, states, states))
@@ -175,7 +170,7 @@ def _second_degree(
                             v = -np.inf
                             break
                         v += math.log(x)
-                    logs[z, a, b] = eta * v
+                    logs[z, a, b] = v
                     if logs[z, a, b] > peak:
                         peak = logs[z, a, b]
         s = 0.0
@@ -214,7 +209,6 @@ def _full_sib(
     site_index,
     site_start,
     site_stop,
-    exponent,
     null_diagonal,
     null_off,
     null_frequency,
@@ -224,17 +218,14 @@ def _full_sib(
     read_initial,
     read_reset, read_width, read_operator,
     read_ratio_table,
-    read_powered,
     class_cache,
     first_child,
-    view,
 ):
     """Full-sib relationship model: each of the child's homologues is IBD with the donor's transmission chain
     in its own tracts (stationary 1/2, flipping with probability 2 theta (1 - theta) per bin edge, two meioses), null
-    outside; the child's read class carried as in M2 (read_transfer.carry_bin). Composite score (1/2 tempered + 1/2
-    full)."""
+    outside; the child's read class carried as in M2 (read_transfer.carry_bin). One likelihood, as M2."""
     states = state_alt.shape[0]
-    bins = exponent.shape[1]
+    bins = site_start.shape[1]
     classes = read_initial.shape[1]
     prefix = np.empty(states + 1)
     suffix = np.empty(states + 1)
@@ -344,12 +335,11 @@ def _full_sib(
                                 g2 = pi[donor, k + 1, b] if t2 == 1 else null_frequency[child, k + 1, b]
                                 new[t1, t2, c, a, b] += q * q * g1 * g2 * tot
             layer = new
-        eta = exponent[child, block] if view == 0 else 1.0
         for y1 in range(2):
             for y2 in range(2):
                 carry_bin(layer[y1, y2], mix, factor, column, child, block, donor if y1 == 1 else -1,
                           donor if y2 == 1 else -1, candidate_alt, state_alt, gl, site_index, site_start,
-                          site_stop, read_offset, read_reset, read_width, read_operator, read_ratio_table, read_powered, view == 0, eta,
+                          site_stop, read_offset, read_reset, read_width, read_operator, read_ratio_table,
                           class_cache, child - first_child, moved)
         peak = -np.inf
         logs = np.empty((2, 2, states, states))
@@ -367,7 +357,7 @@ def _full_sib(
                                 v = -np.inf
                                 break
                             v += math.log(x)
-                        logs[y1, y2, a, b] = eta * v
+                        logs[y1, y2, a, b] = v
                         if logs[y1, y2, a, b] > peak:
                             peak = logs[y1, y2, a, b]
         s = 0.0
@@ -407,7 +397,6 @@ def _proxy_kernel(
     site_index,
     site_start,
     site_stop,
-    exponent,
     null_diagonal,
     null_off,
     null_frequency,
@@ -417,92 +406,79 @@ def _proxy_kernel(
     read_initial,
     read_reset, read_width, read_operator,
     read_ratio_table,
-    read_powered,
     class_cache,
     first_child,
 ):
-    scores = np.empty((len(pairs), 2, 2))
-    # Each proxy has independent tempered and full chains. A batch of 30 pairs yields 120 independent
-    # chains before the fixed two-view average. At 19 threads, famhs/bc8 chr19 went from .76/.74
-    # core use to .83/.81. The marker recursion within each chain is sequential.
-    for unit in prange(4 * len(pairs)):
-        i = unit // 4
-        view = np.int64((unit // 2) % 2)
-        if unit % 2 == 0:
-            scores[i, 0, view] = _second_degree(
-                pairs[i, 0],
-                pairs[i, 1],
-                pi,
-                candidate_alt,
-                stay,
-                alpha,
-                beta,
-                row_arm,
-                column_arm,
-                pivot,
-                excursion,
-                branch,
-                state_alt,
-                gl,
-                coefficient,
-                site_index,
-                site_start,
-                site_stop,
-                exponent,
-                null_diagonal,
-                null_off,
-                null_frequency,
-                mismatch,
-                selector,
-                read_offset,
-                read_initial,
-                read_reset, read_width, read_operator,
-                read_ratio_table,
-                read_powered,
-                class_cache,
-                first_child,
-                view,
-            )
-        else:
-            scores[i, 1, view] = _full_sib(
-                pairs[i, 0],
-                pairs[i, 1],
-                pi,
-                candidate_alt,
-                stay,
-                alpha,
-                beta,
-                row_arm,
-                column_arm,
-                pivot,
-                excursion,
-                branch,
-                state_alt,
-                gl,
-                coefficient,
-                site_index,
-                site_start,
-                site_stop,
-                exponent,
-                null_diagonal,
-                null_off,
-                null_frequency,
-                mismatch,
-                selector,
-                read_offset,
-                read_initial,
-                read_reset, read_width, read_operator,
-                read_ratio_table,
-                read_powered,
-                class_cache,
-                first_child,
-                view,
-            )
     second = np.empty(len(pairs))
     full = np.empty(len(pairs))
-    for i in range(len(pairs)):
-        second[i] = 0.5 * (scores[i, 0, 0] + scores[i, 0, 1])
-        full[i] = 0.5 * (scores[i, 1, 0] + scores[i, 1, 1])
+    # The two proxies of a pair are independent chains, each a parallel unit (a batch of 30 pairs yields 60). The
+    # marker recursion within each chain is sequential.
+    for unit in prange(2 * len(pairs)):
+        i = unit // 2
+        if unit % 2 == 0:
+            second[i] = _second_degree(
+                pairs[i, 0],
+                pairs[i, 1],
+                pi,
+                candidate_alt,
+                stay,
+                alpha,
+                beta,
+                row_arm,
+                column_arm,
+                pivot,
+                excursion,
+                branch,
+                state_alt,
+                gl,
+                coefficient,
+                site_index,
+                site_start,
+                site_stop,
+                null_diagonal,
+                null_off,
+                null_frequency,
+                mismatch,
+                selector,
+                read_offset,
+                read_initial,
+                read_reset, read_width, read_operator,
+                read_ratio_table,
+                class_cache,
+                first_child,
+            )
+        else:
+            full[i] = _full_sib(
+                pairs[i, 0],
+                pairs[i, 1],
+                pi,
+                candidate_alt,
+                stay,
+                alpha,
+                beta,
+                row_arm,
+                column_arm,
+                pivot,
+                excursion,
+                branch,
+                state_alt,
+                gl,
+                coefficient,
+                site_index,
+                site_start,
+                site_stop,
+                null_diagonal,
+                null_off,
+                null_frequency,
+                mismatch,
+                selector,
+                read_offset,
+                read_initial,
+                read_reset, read_width, read_operator,
+                read_ratio_table,
+                class_cache,
+                first_child,
+            )
     return second, full
 
 
@@ -525,24 +501,21 @@ def _m1_pairs(
     site_index,
     site_start,
     site_stop,
-    exponent,
     null_diagonal,
     null_off,
     null_frequency,
     mismatch,
     common_products,
     first_cached_child,
-    common_powered,
     read_offset,
     read_initial,
     read_reset, read_width, read_operator,
     read_ratio_table,
-    read_powered,
     class_cache,
 ):
     out = np.empty(len(pairs))
     for i in prange(len(pairs)):
-        tempered, full = score_path(
+        out[i] = score_path(
             pairs[i, 0],
             pairs[i, 1],
             0,
@@ -563,22 +536,18 @@ def _m1_pairs(
             site_index,
             site_start,
             site_stop,
-            exponent,
             null_diagonal,
             null_off,
             null_frequency,
             mismatch,
             common_products,
             first_cached_child,
-            common_powered,
             read_offset,
             read_initial,
             read_reset, read_width, read_operator,
             read_ratio_table,
-            read_powered,
             class_cache,
         )
-        out[i] = 0.5 * (tempered + full)
     return out
 
 
@@ -609,7 +578,6 @@ def component_contrasts(
         terms.site_index,
         terms.site_start,
         terms.site_stop,
-        terms.exponent,
         terms.null_diagonal,
         terms.null_off,
         terms.null_frequency,
@@ -626,15 +594,14 @@ def component_contrasts(
         if not len(batch):
             continue
         claim_threads()
-        products, powered = terms.common(projection, child_start, child_stop)
+        products = terms.common(projection, child_start, child_stop)
         classes = terms.class_cache(projection, child_start, child_stop)
         claim_threads()
         chosen = np.ascontiguousarray(pairs[batch])
         # a batch holds few pairs of unequal cost: hand the units out one at a time
         with numba.parallel_chunksize(1):
             m1[batch] = _m1_pairs(
-                chosen, *model_arguments(projection), *common, products, child_start, powered,
-                *read_arguments(terms), classes,
+                chosen, *model_arguments(projection), *common, products, child_start, *read_arguments(terms), classes,
             )
             claim_threads()
             # the proxies read the batch's class transfers too (read_transfer.carry_bin)
@@ -642,7 +609,7 @@ def component_contrasts(
                 chosen, *model_arguments(projection), *common, selector, *read_arguments(terms), classes,
                 child_start,
             )
-        del products, powered, classes
+        del products, classes
     second[rows] = m1[rows] - proxy_second[rows]
     full[rows] = m1[rows] - proxy_full[rows]
     return second, full, usable

@@ -249,13 +249,15 @@ def direction_model(
     return (float(posterior.sum(axis=1) @ rho_grid), float(posterior.sum(axis=0) @ eta_grid), pairs, units)
 
 
-def effective_log_odds(log_odds: np.ndarray, log_cosh: np.ndarray, coin_share: float, pair_failure: float) -> np.ndarray:
+def effective_log_odds(
+    log_odds: np.ndarray, log_cosh: np.ndarray, coin_share: float, pair_failure: float
+) -> np.ndarray:
     """A pair's orientation log odds with the coin component: ``log_odds`` L = sum w v and ``log_cosh``
     G = sum w log cosh(v / 2) of a fit (elementwise over pairs).
 
     The two orientations' log likelihoods against a coin are A = L/2 - G and B = -L/2 - G. With the pair law
     P(D | forward) = (1 - e - eta) Pf + (e/2)(Pf + Pr) + eta C (e the pair-level failure, eta the coin share),
-    family.adjust's factor ln 2 + ln((1 - e) sigmoid(L_eff) + e/2) equals log[P(D | forward) / P_ref(D)],
+    order.direction_terms' factor ln 2 + ln((1 - e) sigmoid(L_eff) + e/2) equals log[P(D | forward) / P_ref(D)],
     P_ref the two orientations' mean, exactly when
     L_eff = log[(1 - e - eta) e^A + k] - log[(1 - e - eta) e^B + k], k = eta (e (e^A + e^B)/2 + 1 - e).
     eta = 0 returns L. Coin data drive A and B down linearly in the units, so L_eff -> 0: a symmetric relative's
@@ -381,7 +383,8 @@ def fit(evidence: JunctionEvidence, weights: np.ndarray) -> Orientation:
         if cosh is None:
             cosh = _pair_log_cosh(evidence.pair_log_odds, evidence.compared)
         log_cosh = _weighted_log_odds(
-            cosh, evidence.compared, evidence.pair_child, evidence.pair_parent, evidence.total_bins, multiplicity, samples
+            cosh, evidence.compared, evidence.pair_child, evidence.pair_parent, evidence.total_bins, multiplicity,
+            samples,
         )[evidence.pair_child, evidence.pair_parent]
         log_odds = _with_coin_share(evidence, log_odds, log_cosh)
     return Orientation(

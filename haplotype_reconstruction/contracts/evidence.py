@@ -73,6 +73,11 @@ class ContigEvidence:
     """Per-site cohort genotype frequencies (science.shared.cohort), computed once by the evidence stage: the outlier law
     of every stage's observation model (science.shared.observation). None only on records built outside the stage."""
 
+    search_alleles_reversed: bool = record_field(
+        "obs", units="1", dtype="bool", default=False, kw_only=True
+    )
+    """Whether the contig's first distinct nucleotide pair is in descending order in the source coding."""
+
     def __post_init__(self) -> None:
         object.__setattr__(self, "sample_ids", tuple(map(str, self.sample_ids)))
         object.__setattr__(self, "positions", frozen_array(self.positions, np.int64))
@@ -410,7 +415,8 @@ class SampleQualityDecision:
     applied: the QC could run (else ``reason``; nothing is flagged). flagged bool[N].
     Per sample (NaN where undefined): lrt (T, the likelihood-ratio statistic of H1 against H0 with the artefact
     components), plain_lrt (the same statistic without artefact components; a diagnostic, NaN unless requested),
-    foreign_fraction (a at the maximum), foreign_share (c at the maximum), heterozygote_fit (the own-heterozygote ALT
+    foreign_fraction (a at the maximum with positive foreign share), foreign_share (c at the maximum),
+    heterozygote_fit (the own-heterozygote ALT
     mean at the null maximum), heterozygote_dispersion (its rho), error_fit (the mean error rate of the null's fitted
     error distribution), artefact_share (the share of eligible-cell weight the null assigns to local artefacts) and
     artefact_peak (the null's largest regional artefact share pi_R); counts: observed_cells,

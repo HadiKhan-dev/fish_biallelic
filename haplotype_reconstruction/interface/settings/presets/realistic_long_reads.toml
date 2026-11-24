@@ -1,0 +1,49 @@
+# Realistic long-read profile (4.22): the long_read_cohort read model (52-sample ONT cohort) plus the genome-level
+# realism of the realistic short-read profile (site-specific low-rate errors, missed calls, shared depth loss,
+# structure, QC), set so the pipeline's outlier rates reach TroMau's (painting 0.0055, pilot 0.0048) on a famhs-like
+# 5x design; as with short reads, missed calls make the per-sample rate rise with depth where TroMau's falls. The read model's own causes (per-read error, context sites, local reference bias,
+# reference pull, foreign reads) stay as calibrated on the ONT cohort. Targets and arms: docs/methods/simulation.md
+# "Realistic profile". It sets no depth or read length beyond the cohort's effective 3 kb; designs may override.
+[simulation.reads]
+read_length_bp = 0
+long_read_mean_bp = 3000.0
+long_read_length_sigma = 0.9
+read_quality_mean = 22.0
+read_quality_sd = 4.0
+substitution_share = 0.12
+context_sites = 0.2
+context_factor = 20.0
+context_convert = 0.0
+reference_bias = 0.0005
+reference_bias_power = 2.0
+reference_bias_window_bp = 200
+reference_pull = 0.007
+foreign_read_share = 0.01
+depth_cv = 0.3
+site_depth_cv = 0.05
+site_depth_window_bp = 1000
+site_loss_fraction = 0.30
+site_loss_fine_fraction = 0.15
+site_loss_fine_window_bp = 300
+region_depth_cv = 0.15
+region_depth_window_bp = 12000
+
+# Missed variant calls at 0.12 times the layer's defaults (reported as reference blocks, the only rewritten cells)
+# and 6% of sites at 3-15% ALT per REF read give painting 0.0055 and pilot 0.0048 on the famhs design (TroMau
+# 0.0055 / 0.0048; lab422/sim BUILD.md section 19).
+[simulation.artefacts]
+enabled = true
+hard_sites = 0.0012
+stretch_cover = 0.0036
+miss = 0.00144
+balance_dispersion = 0.0
+systematic_sites = 0.06
+systematic_lo = 0.03
+systematic_hi = 0.15
+
+[simulation.structure]
+enabled = true
+
+[quality]
+site_filter = "on"
+sample_filter = "on"

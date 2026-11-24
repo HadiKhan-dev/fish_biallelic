@@ -35,6 +35,7 @@ from ..assembly.api import (
     site_release_marginals,
     summarize_sites,
 )
+from ..shared.alleles import complement_calls
 from .diagnostics import CensusSink
 from .fit import unique_rows
 from .parameters import BACKGROUND_COUNT_BAND, HALF_CENSUS_WINDOW, ContextRefitParameters, SelectionParameters
@@ -487,6 +488,7 @@ class ContextRefitTask:
     template: np.ndarray = record_field("state", axes=("K", "L_component"), dtype="int8", units="allele")
     block_ids: tuple[int, ...] = record_field("state", axes=("B",), dtype="tuple[int]", units="block")
     carriers: np.ndarray = record_field("state", axes=("K",), dtype="float64", units="count")
+    search_alleles_reversed: bool = record_field("obs", dtype="bool", default=False)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -525,6 +527,9 @@ def finish_component(task: ContextRefitTask, outputs: RefitOutputs, observed: np
         depth = np.any(observed[:, lo:hi], axis=1)
         # Assembled founders per distinct local row (``carriers``: per refitted row, its duplicate inference rows).
         multiplicity = np.bincount(inverse, weights=carriers, minlength=len(local)).astype(np.int64)
+        if task.search_alleles_reversed:
+            local = complement_calls(local)
+            posterior_alt = 1.0 - posterior_alt
         proposals.append(
             ContextProposal(
                 block=block,
@@ -549,6 +554,7 @@ def refit_tasks(
     parameters: SelectionParameters,
     *,
     census_key: str | None = None,
+    search_alleles_reversed: bool = False,
 ) -> tuple[tuple[ContextRefitTask, ...], int]:
     """Describe the completely covered context components in original component order.
 
@@ -573,12 +579,18 @@ def refit_tasks(
             skipped += 1
             continue
         inference = np.asarray(component.inference, np.int8)
+        released = np.asarray(component.released)
+        # Deduplicate, fit and release in the common coding so a REF/ALT swap
+        # preserves both the row order and the oriented site-posterior search.
+        if search_alleles_reversed:
+            inference = complement_calls(inference)
+            released = complement_calls(released)
         # Distinct founder rows in content order; the released template of duplicate inference
         # rows is their consensus (an allele where every duplicate's released call
         # agrees, -1 where they disagree).
         h, inverse = unique_rows(inference, return_inverse=True)
         h = np.ascontiguousarray(h)
-        template = _consensus_rows(np.asarray(component.released), inverse, len(h))
+        template = _consensus_rows(released, inverse, len(h))
         lengths = [panels[int(b)].sites for b in members]
         starts = np.r_[0, np.cumsum(lengths)[:-1]].astype(np.int64)
         stops = np.r_[starts[1:], len(positions)].astype(np.int64)
@@ -604,6 +616,7 @@ def refit_tasks(
                 template=template,
                 block_ids=tuple(panels[int(b)].block for b in members),
                 carriers=np.bincount(inverse, minlength=len(h)).astype(np.float64),
+                search_alleles_reversed=search_alleles_reversed,
             )
         )
     return tuple(tasks), skipped

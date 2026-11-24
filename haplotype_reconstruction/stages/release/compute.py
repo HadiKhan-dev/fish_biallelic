@@ -75,6 +75,7 @@ def compute_release(inputs: ReleaseInputs, *, cores: int = 1) -> FounderRelease:
         prepared_alleles=prepared,
         identity_paths=paths,
         refit_ambiguous_alleles=ambiguous,
+        search_alleles_reversed=getattr(inputs.evidence, "search_alleles_reversed", False),
     )
 
 

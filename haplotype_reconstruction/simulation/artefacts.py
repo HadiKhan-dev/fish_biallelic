@@ -1,9 +1,13 @@
 """Pure call-set transformations of sampled REF/ALT counts, in generating-model order.
 
-Heterozygote balance, shared systematic errors, independent miss causes, then
-reference blocks. No read sampler, global random state or truth store is touched.
-The complete contig site axis is required; any partition/order of the sample
-axis gives identical results when stable sample identifiers are retained.
+Heterozygote balance (the independent-site sampler only), shared systematic errors, independent miss causes, then
+the reports of missed cells. A missed variant cell (a caller effect: the caller reports the sample reference-
+homozygous there) is the only cell whose counts are rewritten: runs of adjacent missed cells of a sample in one
+logarithmic depth band report the run's minimum depth and no ALT read (a reference block). No other cell joins a
+block: a true reference-homozygous cell keeps its own REF and ALT counts, stray ALT reads included (4.22, owner). A
+systematic error turns REF reads into the ALT base at every cell of an error-prone site; it removes no read. No read
+sampler, global random state or truth store is touched. The complete contig site axis is required; any
+partition/order of the sample axis gives identical results when stable sample identifiers are retained.
 """
 
 from __future__ import annotations
@@ -68,20 +72,19 @@ class ArtefactModel:
     miss: float = record_field("obs", dtype="float64", default=p.ARTEFACT_MISS)
     miss_sample_cv: float = record_field("obs", dtype="float64", default=p.ARTEFACT_MISS_SAMPLE_CV)
     hom_alt_miss_factor: float = record_field("obs", dtype="float64", default=p.ARTEFACT_HOM_ALT_MISS_FACTOR)
-    call_min_alt_fraction: float = record_field("obs", dtype="float64", default=p.ARTEFACT_CALL_MIN_ALT_FRACTION)
     block_band: float = record_field("obs", dtype="float64", default=p.ARTEFACT_BLOCK_BAND)
     balance_dispersion: float = record_field("obs", dtype="float64", default=p.ARTEFACT_BALANCE_DISPERSION)
     systematic_sites: float = record_field("obs", dtype="float64", default=p.ARTEFACT_SYSTEMATIC_SITES)
     systematic_lo: float = record_field("obs", dtype="float64", default=p.ARTEFACT_SYSTEMATIC_LO)
     systematic_hi: float = record_field("obs", dtype="float64", default=p.ARTEFACT_SYSTEMATIC_HI)
     regions: tuple[ArtefactRegion, ...] = record_field("obs", dtype="tuple[ArtefactRegion, ...]", default=())
-    schema: int = schema_field(1)
+    schema: int = schema_field(2)
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise SettingsError("artefact enabled must be a boolean")
         for name in (
-            "hard_sites", "hard_miss", "stretch_cover", "stretch_miss", "miss", "call_min_alt_fraction",
+            "hard_sites", "hard_miss", "stretch_cover", "stretch_miss", "miss",
             "systematic_sites", "systematic_lo", "systematic_hi",
         ):
             if not 0 <= getattr(self, name) <= 1:
@@ -132,13 +135,13 @@ class ArtefactSites:
 
 @dataclass(frozen=True)
 class ArtefactResult:
-    """Transformed counts and the three truth masks (all absent when disabled)."""
+    """Transformed counts and the two truth masks (absent when disabled). The missed cells are exactly the cells
+    whose counts were rewritten (reported in reference blocks)."""
 
     counts: NDArray[np.int32] = record_field("obs", axes=("N", "L", "2"), units="reads", dtype="int32")
     missed: NDArray[np.bool_] | None = record_field("obs", axes=("N", "L"), dtype="bool | None")
-    block: NDArray[np.bool_] | None = record_field("obs", axes=("N", "L"), dtype="bool | None")
     systematic_site: NDArray[np.bool_] | None = record_field("obs", axes=("L",), dtype="bool | None")
-    schema: int = schema_field(1)
+    schema: int = schema_field(2)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -223,10 +226,10 @@ def miss_probabilities(hard, stretch, region_factor, model: ArtefactModel, sampl
 
 
 def reference_blocks(counts: NDArray[np.int32], uncalled: NDArray[np.bool_], block_band: float) -> NDArray[np.int32]:
-    """One sample's maximal equal-band uncalled runs report (minimum depth, 0).
+    """One sample's maximal equal-band runs of missed cells report (minimum depth, 0).
 
-    Input counts are copied. Called cells, including zero-depth non-reference
-    cells that were not missed, cut a block and retain their counts.
+    Input counts are copied. Every cell that was not missed cuts a block and
+    retains its counts.
     """
     if not math.isfinite(block_band) or block_band <= 0:
         raise SettingsError("artefact block_band must be finite and positive")
@@ -263,8 +266,13 @@ def apply_artefacts(
     model: ArtefactModel,
     *,
     heterozygote_alt_probability: float,
+    library_factor: NDArray[np.float64] | None = None,
 ) -> ArtefactResult:
     """Apply the four frozen equations on a full contig and any sample subset.
+
+    library_factor (float64[N] aligned with sample_ids, or None): each library's error factor
+    (simulation/reads.py library_error_factors); a library converts REF reads at an error-prone site with the site's
+    rate r x its factor f, min(r f, max(r, LIBRARY_ERROR_RATE_LIMIT)): only the increase is clipped.
 
     Inputs are never written; outputs are frozen. pi is explicitly supplied by
     the generating read model. Off state returns the original count values and
@@ -286,11 +294,10 @@ def apply_artefacts(
     if not 0 < heterozygote_alt_probability < 1:
         raise InputError("artefact heterozygote_alt_probability must be in (0, 1)")
     if not model.enabled:
-        return ArtefactResult(counts.copy(), None, None, None)
+        return ArtefactResult(counts.copy(), None, None)
     shared = draw_site_artefacts(positions, seed, contig, model)
     result = counts.copy()
     missed = np.zeros((samples, sites), dtype=bool)
-    block = np.zeros_like(missed)
     for s, sample in enumerate(sample_ids):
         rng = artefact_stream(p.ARTEFACT_SAMPLE_STREAM, seed, contig, sample)
         depth = counts[s].sum(axis=1, dtype=np.int64)
@@ -306,9 +313,16 @@ def apply_artefacts(
             )
             alt = rng.binomial(depth[cells], probability)
             result[s, cells, 1], result[s, cells, 0] = alt, depth[cells] - alt
-        cells = shared.systematic_site & (dosage[s] == 0) & (depth > 0)
-        alt = rng.binomial(depth[cells], shared.systematic_rate[cells])
-        result[s, cells, 1], result[s, cells, 0] = alt, depth[cells] - alt
+        # A context error reads the ALT base for a REF base with the site's rate, whatever the cell's genotype: REF
+        # reads turn into ALT reads, the cell's depth and its other ALT reads (contamination, paralogues) stay.
+        cells = shared.systematic_site & (result[s, :, 0] > 0)
+        rate = shared.systematic_rate[cells]
+        if library_factor is not None:
+            # Only the increase is clipped: a configured rate above the limit is never lowered.
+            rate = np.minimum(rate * float(library_factor[s]), np.maximum(rate, p.LIBRARY_ERROR_RATE_LIMIT))
+        converted = rng.binomial(result[s, cells, 0], rate).astype(np.int32)
+        result[s, cells, 1] += converted
+        result[s, cells, 0] -= converted
         sample_factor = 1.0
         if model.miss_sample_cv:
             cv = float(model.miss_sample_cv)
@@ -322,7 +336,6 @@ def apply_artefacts(
         # same uniforms decide, with the probability scaled by hom_alt_miss_factor at dosage-2 cells.
         probability = np.where(dosage[s] == 2, probability * model.hom_alt_miss_factor, probability)
         missed[s] = (dosage[s] >= 1) & (rng.random(sites) < probability)
-        called_ref = (depth > 0) & (result[s, :, 1] >= model.call_min_alt_fraction * depth)
-        block[s] = missed[s] | ((dosage[s] == 0) & ~called_ref)
-        result[s] = reference_blocks(result[s], block[s], model.block_band)
-    return ArtefactResult(result, missed, block, shared.systematic_site)
+        # Only missed variant cells are reported in blocks; a reference-homozygous cell is never rewritten.
+        result[s] = reference_blocks(result[s], missed[s], model.block_band)
+    return ArtefactResult(result, missed, shared.systematic_site)

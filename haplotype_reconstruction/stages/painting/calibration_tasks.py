@@ -1,26 +1,21 @@
-"""CPU-budgeted per-contig fits and two durable calibration reductions.
+"""CPU-budgeted per-contig fits and durable calibration reductions."""
 
-A contig's calibration is a set of independent fits: one per candidate outlier rate (robustness), then one per fold
-and candidate divisor (divisor). Each fit is its own one-CPU task (outlier_fit, divisor_fit) and a gather publishes
-the contig's record (fits_publish). Run as one team per contig, the fits ran in sequence and the team idled through
-every one-thread section of every fit: measured on the divisor step of one contig of 40 samples and 330,000 sites,
-71 s of one-thread work and 830 CPU-seconds of kernel work, about half of 19 threads busy.
-"""
-
+from contextlib import ExitStack
 from functools import partial
 from math import fsum
+from time import perf_counter
 
 import numpy as np
-from time import perf_counter
+
 from ...contracts.contigs import AnalysisContigs
 from ...contracts.panels import materialise
-from ...core.errors import InvariantError
+from ...core.errors import InvariantError, SettingsError
 from ...engine.records import record_diagnostic
 from ...science.painting import calibration as science
 from ...science.painting import read_calibration
 from ...store.protocol import claim, publish, resume
 from ..framework import Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey
-from ..inputs.products import task_inputs, required_product
+from ..inputs.products import required_product, task_inputs
 from . import calibration_records as records
 
 PRODUCTS = dict(
@@ -28,18 +23,21 @@ PRODUCTS = dict(
     calibration_refine="refine",
     calibration_outlier="outlier",
     calibration_divisor="divisor",
+    calibration_divisor_fit="divisor_fit",
     calibration="calibration",
 )
 # A contig's per-bin fields of its rate fits (the outlier profile's material units): kept in the contig records only.
 BIN_FIELDS = ("material_coordinates", "bin_rows")
+# The zero_stress read-state units used 80.6% of an eight-thread team.
+READ_DIVISOR_CORES = 8
 
 
 def _fit(root, contig, resolved, maps, cores, function, *, read_state=None, **options):
-    """One calibration fit of a contig on its final assembly and evidence windows: (value, seconds). ``cores`` is the
-    run's CPU count: it sets the sample batch as in every other painting task (the scores do not depend on it), not
-    the fit's CPUs (one). ``read_state``: the run's read-sharing detection (run_detection's dict) when the emission
-    builder carries the painting's read state (stages.painting.read_state; no confidence strength: the read-aware
-    confidence fits build at each candidate), else None."""
+    """Return a fit's value and elapsed seconds on the final assembly and evidence windows.
+
+    ``cores`` sets the requested sample batch. The scheduler controls the kernel team. When read-state
+    detection is present, the builder computes its matrices at each candidate's confidence strength.
+    """
     from ..assembly import records as assembly_records
     from ..evidence import records as evidence_records
     from ..relatedness.working_map import working_maps
@@ -126,29 +124,162 @@ def contig_morgans(store, manifest, maps, contig):
     return float(genetic_map.interval_morgans(float(np.min(positions)), float(np.max(positions))))
 
 
-def calibration_material(store, manifest, maps, config):
+def calibration_material(store, manifest, maps, config, included):
     """((contig, Morgans), ...): the analysed contigs the read-aware confidence fits run on, in configured order
     (read_calibration.material_prefix at PaintingParameters.calibration_morgans; contigs past the material are never
     read). Every contig's divisor task and the run reduction derive it alike from the bound evidence and map."""
-    analysed = AnalysisContigs.from_manifest(manifest).included
     return read_calibration.material_prefix(
-        ((c, contig_morgans(store, manifest, maps, c)) for c in analysed), config.calibration_morgans
+        ((c, contig_morgans(store, manifest, maps, c)) for c in included), config.calibration_morgans
     )
 
 
-def read_divisor_record(root, contig, resolved, maps, ties, epsilon, detection, *, cores=1):
-    """The read-aware confidence fits of a contig (read_calibration.confidence_unit: every fold and candidate in this
-    task, one read-state builder whose cached label-independent parts serve them all): the contig's divisor payload,
-    rows (divisor, fold, score, hidden observed cells, None: no path score) and sample_rows (divisor, fold, per-sample
-    scores)."""
-    rows, seconds = _fit(
-        root, contig, resolved, maps, cores, read_calibration.confidence_unit, read_state=detection, epsilon=epsilon,
-        reverse=ties.reverse,
-    )
+def divisor_plan(root, resolved, maps):
+    """The active divisor grid and contigs, in configured order, from the outlier reduction."""
+    from .read_state import READ_STATE_ON
+
+    reader, store = task_inputs(root)
+    manifest = reader.manifest
+    config = resolved.parameters.painting
+    request = records.expected(store, manifest, product="outlier")
+    saved = resume(store.run, request.key, request.identity)
+    if saved is None:
+        raise SettingsError("calibration prerequisite missing: outlier")
+    outlier = saved.payload
+    read = config.read_classes > 1 and outlier.get("read_state", READ_STATE_ON) == READ_STATE_ON
+    included = resolved.analysis.included
+    if read:
+        material = dict(calibration_material(store, manifest, maps, config, included))
+        grid = tuple(sorted(set(config.confidence_grid)))
+    else:
+        material = dict.fromkeys(included)
+        grid = tuple(sorted(set(config.divisor_grid)))
+        if len(grid) == 1:
+            grid = ()
+    return outlier, read, material, grid
+
+
+def divisor_fit_plan(plan, resolved, *, default_by_fold):
+    """The scatter units and useful CPU widths after the outlier barrier."""
+    _, read, material, grid = plan
     return dict(
-        schema=1, contig=contig, rows=tuple((c, f, fsum(s), cells, None) for c, f, s, cells in rows),
-        sample_rows=tuple((c, f, s) for c, f, s, _ in rows), seconds=seconds, skipped=False,
+        by_fold=read and default_by_fold,
+        read_state=read,
+        fits=[
+            dict(contig=contig, fold=fold, divisor=divisor, cores=READ_DIVISOR_CORES if read else 1)
+            for contig in material
+            for fold in range(resolved.parameters.painting.calibration_folds)
+            for divisor in grid
+        ],
     )
+
+
+def publish_divisor_fits(root, contig, resolved, maps, ties, epsilon, detection, fold, grid, *, team=1):
+    """Publish one receipt per candidate, with one read-state builder shared within this fit task."""
+    reader, store = task_inputs(root)
+    file = store.contig(contig)
+    requests = {
+        value: records.expected(store, reader.manifest, product="divisor_fit", contig=contig, fold=fold, divisor=value)
+        for value in grid
+    }
+    with ExitStack() as locks:
+        pending = tuple(value for value, request in requests.items()
+                        if locks.enter_context(claim(file, request.key, request.identity, blocking=False)))
+        if pending:
+            if detection is not None:
+                scores, seconds = _fit(
+                    root, contig, resolved, maps, team, read_calibration.confidence_unit,
+                    read_state=detection, epsilon=epsilon, reverse=ties.reverse, grid=pending, folds=(fold,),
+                )
+                fits = [(value, dict(samples=samples, cells=cells)) for value, _, samples, cells in scores]
+            elif len(pending) == 1:
+                value = pending[0]
+                (_, _, density, cells, path), seconds = divisor_fit(
+                    root, contig, resolved, maps, ties, epsilon, fold, value,
+                )
+                fits = [(value, dict(density=density, cells=cells, path=path))]
+            else:
+                scores, seconds = _fit(
+                    root, contig, resolved, maps, team, science.divisor_scores,
+                    epsilon=epsilon, reverse=ties.reverse, grid=pending, folds=(fold,),
+                )
+                fits = [(value, dict(density=density, cells=cells, path=path))
+                        for value, _, density, cells, path in scores]
+            for value, payload in fits:
+                request = requests[value]
+                publish(file, request.key, request.identity, dict(schema=1, **payload, seconds=seconds / len(fits)))
+    return {RecordKey(contig, request.key): request.identity for request in requests.values()}
+
+
+def gather_divisor(root, contig, grid, folds, read, morgans):
+    """Read the checked fold/candidate receipts and publish the existing per-contig divisor payload."""
+    reader, store = task_inputs(root)
+    manifest = reader.manifest
+    file = store.contig(contig)
+    request = records.expected(store, manifest, product="divisor", contig=contig)
+    with claim(file, request.key, request.identity, blocking=False) as needed:
+        if needed:
+            began = perf_counter()
+            rows, sample_rows, times = [], [], []
+            for value in grid:
+                for fold in folds:
+                    fit = records.expected(
+                        store, manifest, product="divisor_fit", contig=contig, fold=fold, divisor=value,
+                    )
+                    saved = resume(file, fit.key, fit.identity)
+                    if saved is None:
+                        raise SettingsError(f"{contig}: divisor fit missing for --fold {fold} --divisor {value}")
+                    payload = saved.payload
+                    if read:
+                        samples = payload["samples"]
+                        sample_rows.append((value, fold, samples))
+                        rows.append((value, fold, fsum(samples), payload["cells"], None))
+                    else:
+                        rows.append((value, fold, payload["density"], payload["cells"], payload["path"]))
+                    times.append(payload["seconds"])
+            payload = dict(schema=1, contig=contig, rows=tuple(rows), skipped=not grid,
+                           seconds=fsum(times) if grid else perf_counter() - began)
+            if read:
+                payload["sample_rows"] = tuple(sample_rows)
+                if morgans is not None:
+                    payload["morgans"] = morgans
+            publish(file, request.key, request.identity, payload)
+    return request.identity
+
+
+def _divisor_task(key, root, resolved, maps, ties, outlier, read, fold, grid, cores):
+    width = min(cores, READ_DIVISOR_CORES) if read else 1
+    return Task(
+        key, publish_divisor_fits,
+        (root, key.scope, resolved, maps, ties, outlier["robustness_epsilon"],
+         outlier["read_detection"] if read else None, fold, grid),
+        outputs=tuple(RecordKey(key.scope, records.fit_key(fold, value)) for value in grid),
+        resources=ResourceRequest(width, width),
+        thread_argument="team",
+    )
+
+
+def run_divisor(root, contig, resolved, maps, ties, *, cores=1, gather_only=False, by_fold=False):
+    reader, store = task_inputs(root)
+    request = records.expected(store, reader.manifest, product="divisor", contig=contig)
+    if resume(store.contig(contig), request.key, request.identity) is not None:
+        return request.identity
+    outlier, read, material, grid = divisor_plan(root, resolved, maps)
+    folds = range(resolved.parameters.painting.calibration_folds)
+    grid = grid if contig in material else ()
+    gather_args = (root, contig, grid, folds, read, material.get(contig))
+    if gather_only or not grid:
+        return gather_divisor(*gather_args)
+    # The outlier barrier determines the route and material before the engine admits these independent fits.
+    tasks = tuple(
+        _divisor_task(
+            TaskKey("calibration_divisor_fit", "contig", contig, records.fit_round(fold, value)),
+            root, resolved, maps, ties, outlier, read, fold, grid if value is None else (value,), cores,
+        )
+        for fold in folds
+        for value in ((None,) if read and by_fold else grid)
+    )
+    gather = Task(TaskKey("calibration_divisor", "gather", contig), gather_divisor, gather_args)
+    return Expansion(tasks, gather)
 
 
 def read_calibration_payload(config, contigs, material):
@@ -208,32 +339,28 @@ def fits_publish(root, product, contig, fits):
     with claim(file, request.key, request.identity, blocking=False) as needed:
         if needed:
             seconds = fsum(seconds for _, seconds in fits)
-            if product in ("robustness", "refine"):
-                # (rate, likelihood sum) rows, and each rate's per-sample sums apart (A11, ADVICE2 14.1 item 9)
-                rows = tuple(sorted((row[0], row[1]) for row, _ in fits))
-                sample_rows = tuple(sorted((row[0], tuple(row[2])) for row, _ in fits))
-                # each rate's regime at its returned fit (ADVICE2 11.2): (rate, label changes, anchored faithful-state
-                # bins, anchored error-state bins)
-                regime_rows = tuple(sorted((row[0], *row[3]) for row, _ in fits))
-                # the informative components' bin coordinates (the same at every rate) and each rate's per-bin
-                # likelihood terms: the outlier profile's material units (ADVICE2 11.2)
-                coordinates = tuple(x for x, _ in fits[0][0][4]) if fits else ()
-                for row, _ in fits:
-                    if len(row[4]) != len(coordinates) or not all(
-                        np.array_equal(x, y) for (x, _), y in zip(row[4], coordinates, strict=True)
-                    ):
-                        raise InvariantError(f"{contig}: the calibration fits' component bins differ between rates")
-                bin_rows = tuple(sorted(((row[0], tuple(t for _, t in row[4])) for row, _ in fits), key=lambda r: r[0]))
-                payload = dict(schema=1, contig=contig, rows=rows, sample_rows=sample_rows, regime_rows=regime_rows,
-                               material_coordinates=coordinates, bin_rows=bin_rows, seconds=seconds, skipped=False)
-                if product == "robustness":
-                    payload["read_libraries"] = _read_sharing(store, reader.manifest, contig)
-                    payload["read_sharing"] = (
-                        None if payload["read_libraries"] is None else
-                        any(row["status"] == "fitted" for row in payload["read_libraries"]["libraries"]))
-            else:
-                rows = tuple(sorted(tuple(row) for row, _ in fits))
-                payload = dict(schema=1, contig=contig, rows=rows, seconds=seconds, skipped=False)
+            # (rate, likelihood sum) rows, and each rate's per-sample sums apart (A11, ADVICE2 14.1 item 9)
+            rows = tuple(sorted((row[0], row[1]) for row, _ in fits))
+            sample_rows = tuple(sorted((row[0], tuple(row[2])) for row, _ in fits))
+            # each rate's regime at its returned fit (ADVICE2 11.2): (rate, label changes, anchored faithful-state
+            # bins, anchored error-state bins)
+            regime_rows = tuple(sorted((row[0], *row[3]) for row, _ in fits))
+            # the informative components' bin coordinates (the same at every rate) and each rate's per-bin
+            # likelihood terms: the outlier profile's material units (ADVICE2 11.2)
+            coordinates = tuple(x for x, _ in fits[0][0][4]) if fits else ()
+            for row, _ in fits:
+                if len(row[4]) != len(coordinates) or not all(
+                    np.array_equal(x, y) for (x, _), y in zip(row[4], coordinates, strict=True)
+                ):
+                    raise InvariantError(f"{contig}: the calibration fits' component bins differ between rates")
+            bin_rows = tuple(sorted(((row[0], tuple(t for _, t in row[4])) for row, _ in fits), key=lambda r: r[0]))
+            payload = dict(schema=1, contig=contig, rows=rows, sample_rows=sample_rows, regime_rows=regime_rows,
+                           material_coordinates=coordinates, bin_rows=bin_rows, seconds=seconds, skipped=False)
+            if product == "robustness":
+                payload["read_libraries"] = _read_sharing(store, reader.manifest, contig)
+                payload["read_sharing"] = (
+                    None if payload["read_libraries"] is None else
+                    any(row["status"] == "fitted" for row in payload["read_libraries"]["libraries"]))
             publish(file, request.key, request.identity, payload)
     return request.identity
 
@@ -287,60 +414,17 @@ def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
     request = records.expected(store, manifest, product=product, contig=contig)
     file = store.run if contig is None else store.contig(contig)
     config = resolved.parameters.painting
-    grid = sorted(set(config.robustness_grid if product in ("robustness", "refine") else config.divisor_grid))
-    if product == "divisor" and _read_route(store, manifest, config):
-        # the read-aware confidence fits: every fold and candidate in this task, sharing one read-state builder, on the
-        # contigs of the calibration material (PaintingParameters.calibration_morgans); any other contig fits nothing
-        with claim(file, request.key, request.identity, blocking=False) as needed:
-            if needed:
-                began = perf_counter()
-                material = dict(calibration_material(store, manifest, maps, config))
-                if contig in material:
-                    outlier = records.expected(store, manifest, product="outlier")
-                    saved = resume(store.run, outlier.key, outlier.identity)
-                    if saved is None:
-                        raise RuntimeError("calibration prerequisite missing: outlier/None")
-                    payload = read_divisor_record(
-                        root, contig, resolved, maps, ties, saved.payload["robustness_epsilon"],
-                        saved.payload["read_detection"], cores=cores,
-                    )
-                    payload = dict(payload, morgans=material[contig])
-                else:
-                    payload = dict(schema=1, contig=contig, rows=(), sample_rows=(), seconds=perf_counter() - began,
-                                   skipped=True)
-                publish(file, request.key, request.identity, payload)
-        return request.identity
-    if product in ("robustness", "refine", "divisor") and len(grid) > 1:
-        # several candidate values: the contig's fits are independent one-CPU tasks (a single value fits nothing)
+    grid = sorted(set(config.robustness_grid))
+    if product in ("robustness", "refine") and len(grid) > 1:
         if resume(file, request.key, request.identity) is not None:
             return request.identity
-        options = dict(cores=cores)
-        if product == "robustness":
-            return _expansion(
-                root, product, contig, [(outlier_fit, (root, contig, resolved, maps, value), options) for value in grid]
-            )
+        # Refinement fits the geometric midpoints around the pooled grid maximum.
         if product == "refine":
-            # the geometric midpoints around the pooled grid maximum of every analysed contig's grid fits
             values = _pooled_rows(store, manifest, "robustness", grid)
-            return _expansion(
-                root, product, contig,
-                [(outlier_fit, (root, contig, resolved, maps, value), options)
-                 for value in science.midpoints(grid, [values[e] for e in grid])],
-            )
-        outlier = records.expected(store, manifest, product="outlier")
-        saved = resume(store.run, outlier.key, outlier.identity)
-        if saved is None:
-            raise RuntimeError("calibration prerequisite missing: outlier/None")
-        epsilon = saved.payload["robustness_epsilon"]
+            grid = science.midpoints(grid, [values[e] for e in grid])
         return _expansion(
-            root,
-            product,
-            contig,
-            [
-                (divisor_fit, (root, contig, resolved, maps, ties, epsilon, fold, value), options)
-                for value in grid
-                for fold in range(config.calibration_folds)
-            ],
+            root, product, contig,
+            [(outlier_fit, (root, contig, resolved, maps, value), dict(cores=cores)) for value in grid],
         )
     with claim(file, request.key, request.identity, blocking=False) as needed:
         if needed:
@@ -354,7 +438,7 @@ def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
                     raise RuntimeError(f"calibration prerequisite missing: {which}/{c}")
                 return saved.payload
 
-            if product in ("robustness", "refine", "divisor"):
+            if product in ("robustness", "refine"):
                 # a single-value grid fixes the quantity: nothing is fitted
                 payload = dict(schema=1, contig=contig, rows=(), seconds=perf_counter() - began, skipped=True)
                 if product == "robustness":
@@ -463,7 +547,7 @@ def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
                 read_confidence = None
                 if outlier.get("read_state", "on") == "on" and config.read_classes > 1:
                     # the material's contigs only; the others published empty records (outside the map budget)
-                    material = calibration_material(store, manifest, maps, config)
+                    material = calibration_material(store, manifest, maps, config, analysed)
                     names = {c for c, _ in material}
                     divisor, path, pooled, read_confidence = read_calibration_payload(
                         config, [v for v in contigs if v["contig"] in names], material
@@ -516,48 +600,45 @@ def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
     return request.identity
 
 
-def _read_route(store, manifest, config):
-    """Whether the run calibrates with the read state: read_classes > 1 and the outlier record's read_state 'on'
-    (some library of the run shares reads; stages.painting.read_state.read_state_route)."""
-    if config.read_classes == 1:
-        return False
-    from .read_state import READ_STATE_ON
-
-    outlier = records.expected(store, manifest, product="outlier")
-    saved = resume(store.run, outlier.key, outlier.identity)
-    if saved is None:
-        raise RuntimeError("calibration prerequisite missing: outlier/None")
-    return saved.payload.get("read_state", READ_STATE_ON) == READ_STATE_ON
-
-
 def fit_count(product, config):
-    """The number of independent fits of one contig's ``product`` record (0: a single-value grid fits nothing; the
-    refinement fits the two midpoints around the pooled grid maximum, one at a boundary maximum)."""
-    grid = set(config.robustness_grid if product in ("robustness", "refine") else config.divisor_grid)
-    if product == "divisor" and config.read_classes > 1:
-        # the read-aware confidence fits run in the contig's own task with its team (read_divisor_record); a contig
-        # outside the calibration material fits nothing, which is known only once the evidence exists
-        return len(set(config.confidence_grid)) * config.calibration_folds
-    if product not in ("robustness", "refine", "divisor") or len(grid) == 1:
+    """Number of independent rate fits (zero when the grid fixes the rate)."""
+    if product not in ("robustness", "refine") or len(set(config.robustness_grid)) == 1:
         return 0
-    if product == "refine":
-        return 2
-    return len(grid) * (config.calibration_folds if product == "divisor" else 1)
+    return 2 if product == "refine" else len(set(config.robustness_grid))
 
 
-def task(key, context):
+def task(key, context, *, gather_only=False, by_fold=False):
     product = PRODUCTS[key.stage]
     contig = None if key.scope == "run" else key.scope
-    # A contig's task claims the CPUs of its fits and holds the claim until its gather: its fits run inside it. A
-    # claim wider than its fits keeps CPUs from the other contigs (the outlier-rate step has 6 fits a contig: with
-    # the run's whole CPU count as the maximum, 4 contigs claimed 19 CPUs each on 76, ran 24 fits, and 52 CPUs idled).
-    fits = fit_count(product, context.resolved.parameters.painting)
+    config = context.resolved.parameters.painting
+    if product == "divisor_fit":
+        outlier, read, material, grid = divisor_plan(context.root, context.resolved, context.maps)
+        fold_text, _, value = key.round.partition("-")
+        fold = int(fold_text)
+        if not 0 <= fold < config.calibration_folds:
+            raise SettingsError(f"--fold must be between 0 and {config.calibration_folds - 1}")
+        if contig not in material or not grid:
+            raise SettingsError(f"{contig}: no divisor fits on the recorded calibration route")
+        if value:
+            divisor = float(value)
+            if divisor not in grid:
+                raise SettingsError(f"--divisor {divisor} is outside the active grid {grid}")
+            grid = (divisor,)
+        return _divisor_task(
+            key, context.root, context.resolved, context.maps, context.ties, outlier, read, fold, grid, context.cores,
+        )
+    outputs = (RecordKey(key.scope, records.KEYS[product]),)
+    if product == "divisor":
+        return Task(
+            key, run_divisor, (context.root, contig, context.resolved, context.maps, context.ties),
+            kwargs=dict(cores=context.cores, gather_only=gather_only, by_fold=by_fold), outputs=outputs,
+        )
     return Task(
         key,
         run,
         (context.root, product, contig, context.resolved, context.maps, context.ties),
         kwargs=dict(cores=context.cores),
-        outputs=(RecordKey(key.scope, records.KEYS[product]),),
-        resources=ResourceRequest(1, max(1, min(context.cores, fits))),
+        outputs=outputs,
+        resources=ResourceRequest(1, max(1, min(context.cores, fit_count(product, config)))),
         thread_argument="team",
     )

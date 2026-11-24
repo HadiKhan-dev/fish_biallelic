@@ -188,9 +188,8 @@ def project_truth(truth: ContigTruth, positions, sample_ids) -> ContigTruth:
         offsets=np.asarray(offsets, np.int64),
         positions=np.asarray(events, np.float64),
     )
-    for key in ("missed", "block"):
-        value = getattr(truth, key)
-        payload[key] = None if value is None else value[rows][:, columns]
+    if truth.missed is not None:
+        payload["missed"] = truth.missed[rows][:, columns]
     if truth.systematic_site is not None:
         payload["systematic_site"] = truth.systematic_site[columns]
     return truth_from_record(payload)

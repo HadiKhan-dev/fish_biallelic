@@ -40,10 +40,11 @@ KEY = "pedigree/prepared"
 
 
 class PreparedAdapter:
-    """Lossless schema-6 prepared record (4.21: the source laws and the children's read state) with a small layout
-    header (selectors, their fallback-rate lengths, bins, markers) and the contig's configured material."""
+    """Lossless schema-7 prepared record (4.21: the source laws and the children's read state; 4.22: no information
+    exponent) with a small layout header (selectors, their fallback-rate lengths, bins, markers) and the contig's
+    configured material."""
 
-    schema = 6
+    schema = 7
 
     def encode(self, value: PreparedChromosome) -> Mapping[str, Any]:
         return {"schema": self.schema, **to_payload(value), "layout": [
@@ -198,11 +199,20 @@ def prepare_stored(
     require_schema(header.payload, painted.schema)
     painting_parameters = from_payload(PaintingParameters, header.payload["parameters"])
     if painting_parameters.read_classes == 1:
-        painted = painting_records.result_reader(store, manifest, product="refit_reference", contig=contig, panels=False)
+        painted = painting_records.result_reader(
+            store, manifest, product="refit_reference", contig=contig, panels=False
+        )
     painting = _read_request(file, painted)
     evidence = _read_request(file, observed)
     if painting.sample_ids != tuple(manifest["sample_ids"]) or evidence.sample_ids != painting.sample_ids:
         raise InputError("pedigree preparation sample axes differ")
+    # 4.22 QC A: flagged libraries read on contamination-corrected likelihoods. The prepared identity already binds the
+    # run's contamination decision through the painting it reads (the repaint's identity includes it).
+    from ..painting import contamination as contamination_stage
+
+    evidence = contamination_stage.corrected_evidence(
+        store, manifest, contig, evidence, evidence_identity=observed.identity
+    )
     product = run(
         painting,
         evidence,
@@ -214,6 +224,20 @@ def prepare_stored(
         read_builder=read_state_builder(painting, evidence, file, observed.identity),
     )
     return PreparedReference(contig, identity, product.omitted_reason)
+
+
+def prepared_reference(store, contig, parameters, policy, causes) -> PreparedReference:
+    """Check the publication needed by a scatter gather."""
+    painting, evidence, working_map = causes
+    identity = derivation(parameters.preparation, dict(painting=painting, evidence=evidence, genetic_map=working_map),
+                          reverse=parameters.reverse_conventions, numerical_policy=policy)
+    saved = read_items(store.contig(contig), KEY, identity, ("schema", "contig", "omitted_reason"))
+    if saved is None:
+        raise InputError(f"{contig}: publish pedigree --stage prepare before the gather")
+    require_schema(saved.payload, PreparedAdapter.schema)
+    if saved.payload["contig"] != contig:
+        raise InputError("prepared contig differs from its configured axis")
+    return PreparedReference(contig, identity, saved.payload["omitted_reason"])
 
 
 def _required_prepared(store: CheckpointStore, reference: PreparedReference) -> PreparedChromosome:
@@ -353,7 +377,7 @@ def _after_bounds(
     from ...science.painting.parameters import PaintingParameters
     from ..painting.records import reference_key
 
-    painting_key = reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))
+    reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))  # validates the payload
     tasks = tuple(
         Task(
             TaskKey("pedigree", "scores", reference.contig),
@@ -459,7 +483,7 @@ def _after_prepared(
     from ...science.painting.parameters import PaintingParameters
     from ..painting.records import reference_key
 
-    painting_key = reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))
+    reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))  # validates the payload
     tasks = tuple(
         Task(
             TaskKey("pedigree", "pair_bounds", r.contig),
@@ -494,7 +518,10 @@ def _after_prepared(
     return Expansion(tasks, gather)
 
 
-def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] | None, maximum_cores: int) -> Expansion:
+def pipeline_start(
+    root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] | None, maximum_cores: int, *,
+    threads: int = 1, gather_only: bool = False,
+) -> Expansion | dict[RecordKey, str]:
     """Expand checked painting inputs through scores and the terminal pedigree decision/pedigree action.
 
     Each contig task returns only a completion descriptor. Bounds are streamed per
@@ -504,12 +531,14 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     """
     from ...science.pedigree.run import precheck
 
-    store = CheckpointStore(root)
+    store = CheckpointStore(root, nthreads=threads)
     store.check_layout()
     manifest = store.manifest("run") if manifest is None else manifest
     if manifest is None:
         raise InputError("pedigree requires the bound run manifest")
-    from .records import run_parameters
+    from . import map_scale
+    from .decision import product_receipt
+    from .records import PRODUCT, published_identity, run_parameters
 
     parameters = run_parameters(manifest)
     numerical_policy = NumericalPolicy(**manifest["numerical_policy"])
@@ -518,6 +547,24 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     maps = working_maps(store, manifest, maps)  # the material, units and exclusion weights read this map (rl20)
     if any(json_digest(maps.identity(c)) != map_identity(store, manifest, c) for c in contigs):
         raise InputError("pedigree maps differ from the run's working maps")
+    causes = None
+    if gather_only or (store.run.has(PRODUCT) and store.run.has(map_scale.KEY)):
+        causes = map_scale.contig_causes(store, manifest)
+        identity = published_identity(store, manifest, causes=causes)
+        if identity is not None:
+            if parameters.map_scale.mode == "ignore":
+                # Even the ignored estimate is part of the reported stage's results.
+                scale = map_scale.expected(store, manifest, parameters, numerical_policy, contig_inputs=causes[0])
+                map_scale.load(store, scale)
+            return product_receipt(identity)
+    if gather_only:
+        contig_inputs, _ = causes
+        references = tuple(threaded_each(
+            lambda c: prepared_reference(store, c, parameters, numerical_policy, contig_inputs[c]), contigs
+        ))
+    else:
+        references = ()
+
     from ...science.painting.parameters import PaintingParameters
     from ..painting.records import reference_key
 
@@ -538,17 +585,15 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
             outputs=(RecordKey(c, KEY),),
             thread_argument="threads",
         )
-        for c in contigs
+        for c in contigs if not gather_only
     )
-    from . import map_scale
-
     # The genome-wide map-scale estimate (record pedigree/map_scale) runs beside the contigs' preparations; the
     # screen barrier reads it to choose the material regime (regimes.material_choice).
     scale = Task(
         TaskKey("pedigree", "map_scale"),
         map_scale.run_stored,
         args=(root, manifest, maps, parameters, numerical_policy),
-        kwargs=dict(maximum_cores=maximum_cores),
+        kwargs=dict(maximum_cores=maximum_cores, gather_only=gather_only),
         resources=ResourceRequest(max_cores=maximum_cores),
         inputs=tuple(RecordKey(c, painting_key) for c in contigs),
         outputs=(RecordKey("run", map_scale.KEY),),
@@ -557,7 +602,7 @@ def pipeline_start(root: str, maps: GeneticMapSet, manifest: Mapping[str, Any] |
     gather = Task(
         TaskKey("pedigree", "screen.barrier"),
         _after_prepared,
-        args=(tuple(ResultRef(t.key) for t in tasks), root, manifest, parameters, numerical_policy, maximum_cores),
+        args=(references or tuple(ResultRef(t.key) for t in tasks), root, manifest, parameters, numerical_policy, maximum_cores),
         kwargs=dict(scale_identity=ResultRef(scale.key)),
         depends_on=tuple(t.key for t in tasks) + (scale.key,),
         resources=ResourceRequest(max_cores=maximum_cores),

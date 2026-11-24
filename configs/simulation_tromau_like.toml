@@ -1,0 +1,63 @@
+# A TroMau-like hybrid cross with known truth: three founders from the reference genome's own population and one male
+# from a lineage that split from it, as in the TroMau cross (three A. calliptera females and one Tropheops male, all
+# mapped to the A. calliptera reference). F1 = each female x the male (21, 12 sequenced); F2 = 10 half-sib F1 pairs x 10
+# (116 sequenced; the 50 F2 of the last five pairs have unsequenced parents, so they have no sequenced parent, like the
+# real cross's unsupported samples). Short paired-end reads under the realistic preset, with the mate mapping loss
+# reshaped for a diverged lineage (see docs/methods/simulation.md, "A TroMau-like cross"). 8 x 16 Mb at 5 cM/Mb is
+# 6.4 working Morgans: the pedigree runs in its low-material regime (12 Morgans for the standard Tier B thresholds).
+version = 4
+
+[input]
+kind = "simulation"
+contigs = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]
+
+[genetic_map]
+rate_cm_per_mb = 5.0
+
+[simulation]
+seed = 4422
+depth = 11.0
+generating_rate_cm_per_mb = 5.0
+pedigree = "configs/tromau_like.tsv"
+
+[simulation.reads]
+preset = "realistic"
+# A mate is lost with probability 1 - exp(-0.003 k^5), k = ALT alleles under it: 0.3 % at one, 9 % at two, 52 % at
+# three, 95 % at four. Reads from the diverged lineage lose mapping where its differences cluster, which site QC then
+# removes, as in TroMau; the preset's gentler 0.02 k^2 spreads the loss over every site.
+reference_bias = 0.003
+reference_bias_power = 5.0
+
+[simulation.genome]
+contigs = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]
+length_bp = 16000000
+
+[simulation.sites]
+count = 120000
+profile = "cascade"
+
+[simulation.source]
+kind = "coalescent"
+reference_population = "astcal"
+
+[simulation.source.populations.astcal]
+size = 10000.0
+
+# The founder lineage split from the reference population 30,000 generations ago (1.5 x 2N): its haplotypes carry
+# ALT alleles at 53% of sites against 19% for a reference-population haplotype.
+[simulation.source.populations.tromau]
+size = 10000.0
+parent = "astcal"
+split_generations = 30000.0
+
+[simulation.stocks.astcal]
+population = "astcal"
+founders = 3
+size = 3
+generations = 0
+
+[simulation.stocks.tromau]
+population = "tromau"
+founders = 2
+size = 2
+generations = 0

@@ -203,7 +203,7 @@ def diagnostics(decision: Decision, config: PedigreeParameters) -> tuple[Diagnos
                 identifiable=bool(local_row >= 0 and graph_row == local_row),
                 dag_displaced=bool(local_row >= 0 and graph_row >= 0 and graph_row != local_row),
                 graph_conflict=bool(evidence.graph_conflict[child]),
-                graph_tie_conflict=bool(full.tie_conflict[child]),
+                order_restricted=bool(full.order_restricted[child]),
                 graph_direction_resolved_alternative=bool(full.direction_resolved[child]),
                 local_parent_role_probability=(
                     np.nan if local_row < 0 else parent_role_probability(local_row, rows, decision.orientation)
@@ -393,8 +393,7 @@ def explanations(
                     terms.structural_state[row],
                     bool(np.isfinite(terms.structural_identity[row])),
                     terms.direction[row],
-                    terms.reciprocal_family[row],
-                    terms.ancestry_paths[row],
+                    terms.birth_order[row],
                     state_scores[row],
                     identity_scores[row],
                     np.log(full.priors[child, state]),
@@ -494,7 +493,7 @@ def build(
             r.inference_status,
             r.dag_displaced,
             r.graph_conflict,
-            r.graph_tie_conflict,
+            r.order_restricted,
             r.graph_direction_resolved_alternative,
             r.selected_parent_role_probability,
             r.tier_a_state_call,

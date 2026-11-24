@@ -1,12 +1,14 @@
-"""One weighted fit: exposure gate, family-adjusted scores, marginal state, identity, acyclic graph.
+"""One weighted fit: exposure gate, birth-order posterior, marginal state, identity, joint (acyclic) read.
 
 A fit gives every material unit (1-Morgan units of the working map, DESIGN_417) a multiplicity (all ones
 for the full data, bootstrap counts or a left-out unit in resampling). The genome-wide likelihood of a
 configuration is the weighted unit sum, mixed once with the child's M0 likelihood. A non-M0 configuration is
 testable only when its edges (and pair) are exposed in enough bins, enough of the painted genome and enough
 distinct units (each unit counts one); an untestable configuration contributes the child's M0 likelihood
-to its state's mean but cannot be named. The marginal state is chosen first (log mean identity
-evidence plus a fixed prior), then the identity within it; the graph step then enforces a DAG.
+to its state's mean but cannot be named. The birth-order layer (order.adjust) turns the scores into the sampled
+configuration posterior. The marginal state is chosen first (log mean identity evidence plus a fixed prior), then the
+identity within it; where these local choices form a cycle, the joint read gives the children on cycles their choice
+among the configurations consistent with the fit's consensus birth order (select).
 
 Method: docs/methods/pedigree.md#marginal-state-then-identity.
 """
@@ -23,16 +25,16 @@ from ...contracts.pedigree import (
     DecisionInputs,
     ExposureEvidence,
     GenomeScores,
-    LocalGraphChoices,
     OmissionTotals,
     Selection,
     edge_index,
 )
-from ...core.errors import InputError
+from ...core import ties as tie_rules
+from ...core.errors import InputError, InvariantError
 from ...core.kernels import kernel
 from ...core.numerics import ordered_sum
 from . import alternatives as alternatives_module
-from . import family, graph
+from . import graph, order
 from .alternatives import Alternatives, softmax_finite
 from .decision_parameters import ExposureParameters
 from .kernels.decision import OVERLOADS
@@ -133,8 +135,8 @@ def fit_scores(
     config: PedigreeParameters,
     trace: dict | None = None,
     *, omitted=None,
-) -> tuple[np.ndarray, np.ndarray]:
-    """(state scores, identity scores) [A] of one weighted fit, family terms included.
+) -> order.OrderFit:
+    """The birth-order layer of one weighted fit (order.OrderFit: state and identity scores [A], consensus order).
 
     The unit sum multiplies every row, including zero weights; IEEE nonfinite
     propagation differs from the panel-admission fold that omits zero-weight rows.
@@ -166,7 +168,10 @@ def fit_scores(
             structural_identity=identity_scores.copy(),
             testable=gate,
         )
-    return family.adjust(
+    # the fit's own random stream: its unit multiplicities (empty for a leave-one-unit-out fit) and its left-out unit,
+    # under the run's bootstrap seed, drawn over the samples in sorted-identifier order
+    key = order.fit_key(weights, omitted)
+    return order.adjust(
         state_scores,
         identity_scores,
         alternatives.rows,
@@ -174,24 +179,21 @@ def fit_scores(
         alternatives.full_counts,
         orientation,
         config.direction,
+        config.order,
+        key,
         trace,
+        seed=config.resampling.bootstrap_seed,
+        sample_order=inputs.sample_order,
     )
 
 
 # ------------------------------------------------------------------------------- selection
 
 
-def select(
-    state_scores: np.ndarray,
-    identity_scores: np.ndarray,
-    alternatives: Alternatives,
-    priors: tuple[float, float, float],
-    orientation: Orientation,
-    config: PedigreeParameters,
-    *,
-    counter=None,
-) -> Selection:
-    """Marginal state, conditional identity and acyclic graph selection of one fit."""
+def _state_choices(state_scores: np.ndarray, identity_scores: np.ndarray, alternatives: Alternatives,
+                   priors: tuple[float, float, float]):
+    """(state log evidence, state scores with the log prior, state support [N, 3], decision scores [A]) of one set of
+    configuration scores."""
     n_samples = alternatives.n_samples
     states = alternatives.states
     state_evidence = alternatives_module.state_log_evidence(state_scores, alternatives)
@@ -199,7 +201,6 @@ def select(
     marginal = state_evidence + np.log(prior)
     support = np.zeros((n_samples, 3), dtype=np.float64)
     decision = np.full(len(identity_scores), -np.inf, dtype=np.float64)
-    state: int | None  # a state index here; below, each child's unique marginal winner (None if tied)
     for child, child_rows in enumerate(alternatives.child_rows):
         for state in range(3):
             rows = child_rows[states[child_rows] == state]
@@ -208,64 +209,119 @@ def select(
                 continue
             decision[finite] = marginal[child, state] + identity_scores[finite] - float(np.max(identity_scores[finite]))
         support[child] = softmax_finite(marginal[child])
+    return state_evidence, marginal, prior, support, decision
 
+
+def _child_choice(child, child_rows, states, marginal, identity_scores, decision, counter, prefix=""):
+    """One child's marginal state then identity: (state or None, row or None, state margin, identity margin, score
+    scale, unresolved reason)."""
+    state, state_margin = unique_finite_winner(np.arange(3, dtype=np.int64), marginal[child],
+                                               key=f"{prefix}state/c{child}", counter=counter)
+    if state is None:
+        return None, None, state_margin, np.nan, 1.0, "no_unique_marginal_parent_state"
+    candidates = child_rows[states[child_rows] == state]
+    row, identity_margin = unique_finite_winner(candidates, decision, key=f"{prefix}identity/c{child}", counter=counter)
+    if row is None:
+        return state, None, state_margin, identity_margin, 1.0, "parent_state_resolved_identity_unresolved"
+    scale = max(magnitude(marginal[child]), magnitude(identity_scores[candidates]), magnitude(decision[candidates]))
+    return state, row, state_margin, identity_margin, scale, None
+
+
+def order_consistent(
+    rows: np.ndarray, constrained: np.ndarray, rank: np.ndarray, *, reverse: bool = False
+) -> np.ndarray:
+    """bool [A]: configurations allowed by the consensus birth order: every named parent born before the child, the
+    samples ordered by ``rank`` (order.OrderFit.rank; equal ranks in the run's index convention). Rows that name
+    nobody in the order factor (``constrained`` False: M0 and exposure-untestable rows) are always allowed."""
+    n_samples = len(rank)
+    index = np.arange(n_samples)
+    ordered = np.lexsort((-index if reverse else index, np.asarray(rank, dtype=np.float64)))
+    position = np.empty(n_samples, dtype=np.int64)
+    position[ordered] = np.arange(n_samples)
+    allowed = np.ones(len(rows), dtype=np.bool_)
+    child = rows[:, 0]
+    for slot in (1, 2):
+        named = rows[:, slot] >= 0
+        allowed[named] &= position[rows[named, slot]] < position[child[named]]
+    return allowed | ~constrained
+
+
+def select(
+    fit: order.OrderFit,
+    alternatives: Alternatives,
+    priors: tuple[float, float, float],
+    orientation: Orientation,
+    config: PedigreeParameters,
+    *,
+    counter=None,
+) -> Selection:
+    """Marginal state, conditional identity and the joint read of one fit.
+
+    The local choice of each child is its marginal state, then its identity, from the birth-order posterior. Where the
+    local choices form a DAG they are the joint read. Otherwise the children on a cycle take their choice among the
+    configurations the fit's consensus birth order allows (order_consistent: the same marginal state then identity on
+    those configurations), repeated until no cycle remains: every cycle holds a child not yet restricted (restricted
+    children's parents precede them in one total order), so each round restricts at least one more child."""
+    n_samples = alternatives.n_samples
+    states = alternatives.states
+    state_scores, identity_scores = fit.state_scores, fit.identity_scores
+    state_evidence, marginal, prior, support, decision = _state_choices(
+        state_scores, identity_scores, alternatives, priors
+    )
     local_state = np.full(n_samples, UNRESOLVED, dtype=np.int8)
     local_row = np.full(n_samples, -1, dtype=np.int64)
     state_margin = np.full(n_samples, np.nan, dtype=np.float64)
     identity_margin = np.full(n_samples, np.nan, dtype=np.float64)
-    # Per child, the largest |score| its two margins were computed from: their rounding scale,
-    # which sets the graph step's weakest-link tie tolerance.
-    score_scale = np.ones(n_samples, dtype=np.float64)
     reasons: list[str | None] = [None] * n_samples
     local_rows: dict[int, int] = {}
-    state_indices = np.arange(3, dtype=np.int64)
     for child, rows in enumerate(alternatives.child_rows):
-        state, margin = unique_finite_winner(state_indices, marginal[child], key=f"state/c{child}", counter=counter)
-        state_margin[child] = margin
-        if state is None:
-            reasons[child] = "no_unique_marginal_parent_state"
-            continue
-        local_state[child] = state
-        candidates = rows[states[rows] == state]
-        row, margin = unique_finite_winner(candidates, decision, key=f"identity/c{child}", counter=counter)
-        identity_margin[child] = margin
-        if row is None:
-            reasons[child] = "parent_state_resolved_identity_unresolved"
-            continue
-        local_row[child] = row
-        local_rows[child] = row
-        score_scale[child] = max(
-            magnitude(marginal[child]), magnitude(identity_scores[candidates]), magnitude(decision[candidates])
+        state, row, state_margin[child], identity_margin[child], _, reasons[child] = _child_choice(
+            child, rows, states, marginal, identity_scores, decision, counter
         )
+        if state is not None:
+            local_state[child] = state
+        if row is not None:
+            local_row[child] = row
+            local_rows[child] = row
 
     rows = alternatives.rows
-    tie_conflict = np.zeros(n_samples, dtype=np.bool_)
-    if graph.is_acyclic(local_rows, rows, n_samples):
-        chosen = graph.select_local(
-            rows, local_rows, state_margin, identity_margin, orientation, reverse=config.reverse_conventions
-        )
-    else:
-        conflicts = graph.tie_conflict_children(rows, local_rows, state_margin, identity_margin, score_scale, n_samples)
-        tie_conflict[list(conflicts)] = True
-        chosen = graph.select_acyclic(
-            alternatives,
-            decision,
-            LocalGraphChoices(
-                {child: row for child, row in local_rows.items() if child not in conflicts},
-                state_margin,
-                identity_margin,
-            ),
-            config.selection.graph_local_search_passes,
-            orientation,
-            reverse=config.reverse_conventions,
-        )
+    graph_rows = dict(local_rows)
+    graph_state_margin, graph_identity_margin = state_margin.copy(), identity_margin.copy()
+    restricted = np.zeros(n_samples, dtype=np.bool_)
+    if not graph.is_acyclic(graph_rows, rows, n_samples):
+        allowed = order_consistent(rows, np.isfinite(identity_scores) & ((rows[:, 1] >= 0) | (rows[:, 2] >= 0)),
+                                   fit.rank, reverse=config.reverse_conventions)
+        ordered_state = np.where(allowed, state_scores, -np.inf)
+        ordered_identity = np.where(allowed, identity_scores, -np.inf)
+        _, ordered_marginal, _, _, ordered_decision = _state_choices(ordered_state, ordered_identity, alternatives,
+                                                                   priors)
+        while True:
+            members = graph.cycle_members(graph_rows, rows, n_samples)
+            if not members:
+                break
+            unrestricted = [child for child in members if not restricted[child]]
+            if not unrestricted:
+                raise InvariantError("a cycle among children restricted to one birth order")
+            for child in sorted(unrestricted, key=lambda c: tie_rules.conv_key(c, reverse=config.reverse_conventions)):
+                restricted[child] = True
+                _, row, graph_state_margin[child], graph_identity_margin[child], _, _ = _child_choice(
+                    child, alternatives.child_rows[child], states, ordered_marginal, ordered_identity,
+                    ordered_decision, counter, prefix="ordered_",
+                )
+                graph_rows.pop(child, None)
+                if row is not None:
+                    graph_rows[child] = int(row)
+    chosen = graph.select_local(
+        rows, graph_rows, graph_state_margin, graph_identity_margin, orientation, reverse=config.reverse_conventions
+    )
     graph_row = np.full(n_samples, -1, dtype=np.int64)
     role_probability = np.full(n_samples, np.nan, dtype=np.float64)
     direction_resolved = np.zeros(n_samples, dtype=np.bool_)
     for child, row in chosen.rows.items():
         graph_row[child] = row
         role_probability[child] = chosen.role_probability[child]
-    direction_resolved[list(chosen.direction_resolved)] = True
+        # the joint read displaced the local choice by a configuration naming a parent
+        direction_resolved[child] = bool(restricted[child] and row != local_row[child] and int(states[row]) != M0)
     return Selection(
         state_evidence,
         marginal,
@@ -275,30 +331,27 @@ def select(
         local_state,
         local_row,
         graph_row,
-        tie_conflict,
+        restricted,
         direction_resolved,
         role_probability,
         state_margin,
         identity_margin,
         tuple(reasons),
-        graph_passes_used=chosen.graph_passes_used,
-        graph_pass_budget_exhausted=chosen.graph_pass_budget_exhausted,
     )
 
 
 def fit(
-    weights: np.ndarray, inputs: DecisionInputs, config: PedigreeParameters, trace: dict | None = None, *, counter=None, omitted=None
-) -> tuple[Selection, Orientation, tuple[np.ndarray, np.ndarray]]:
-    """One weighted fit with the configured priors: (selection, orientation, (state, identity))."""
+    weights: np.ndarray, inputs: DecisionInputs, config: PedigreeParameters, trace: dict | None = None, *, counter=None,
+    omitted=None,
+) -> tuple[Selection, Orientation, order.OrderFit]:
+    """One weighted fit with the configured priors: (selection, orientation, birth-order layer)."""
     if omitted is None:
         orientation = fit_orientation(inputs.junctions, weights)
     else:
         from .orientation import fit_omitting
         orientation = fit_omitting(inputs.junctions, inputs.omission_totals, omitted)
     scores = fit_scores(weights, inputs, orientation, config, trace, omitted=omitted)
-    selection = select(
-        *scores, inputs.alternatives, config.selection.state_priors, orientation, config, counter=counter
-    )
+    selection = select(scores, inputs.alternatives, config.selection.state_priors, orientation, config, counter=counter)
     return selection, orientation, scores
 
 

@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ...core.errors import SettingsError
-
 
 @dataclass(frozen=True)
 class PreparationParameters:
-    """Marker subsampling and information tempering of the prepared painting components."""
+    """Marker subsampling of the prepared painting components."""
 
     # At most this many evenly spaced selected markers per painting bin enter the transmission model.
     markers_per_bin: int = field(
@@ -18,38 +16,6 @@ class PreparationParameters:
             "provenance": "PS01; select at most 10 evenly spaced markers per painting bin for transmission scoring.",
         },
     )
-    # Chromosome-wide groups of at least this many selected markers share one information exponent.
-    markers_per_information_block: int = field(
-        default=100,
-        metadata={
-            "provenance": "PS01; group at least 100 selected markers per information block for tempering.",
-        },
-    )
-    # The 4.20 tempered view raised a bin's emission to min(this, n) / n for n informative markers in its group
-    # (information_temperature = "fixed", kept as gate G6-B1's 4.20 arm).
-    effective_markers_per_information_block: float = field(
-        default=3.0,
-        metadata={
-            "provenance": "PS01; cap each information block at 3 effective markers through its emission exponent.",
-        },
-    )
-    information_temperature: str = field(
-        default="confidence",
-        metadata={
-            "provenance": (
-                "4.21 B1 (ADVICE2 11.3, 14.1 item 7): the tempered view's exponent x = 1 / (1 + (n - 1) r_T) for n "
-                "informative markers in the group, r_T = (d - 1) / (reference_snps_per_bin - 1) with d the painting's "
-                "CONFIDENCE divisor (confidence), or its path divisor (path); fixed is 4.20's min(3, n) / n. r_T is a "
-                "TRANSFERRED working temperature: estimated by this run under the painting's model, not the "
-                "pedigree's (at d = 128 the implied correlation exceeds 1); no calibrated pedigree evidence is "
-                "claimed. For a fixed path the net coefficient on the log emissions is (1 + x) / 2 >= 1/2."
-            ),
-        },
-    )
-
-    def __post_init__(self) -> None:
-        if self.information_temperature not in ("confidence", "path", "fixed"):
-            raise SettingsError("pedigree information_temperature must be confidence, path or fixed")
 
 
 @dataclass(frozen=True)
@@ -135,13 +101,16 @@ class PanelParameters:
             ),
         },
     )
-    # Per-chromosome softmax temperature = (ceil(markers / markers_per_information_block)) ** power.
+    # The retention band and the chromosome softmax temperature T = units ** information_tempering_power
+    # (m1.temperature), units the chromosome's selected markers with an empty bin as one (the genome's for the genome
+    # band): the band keeps every candidate within 60 T nats of the child's best M1, a compute budget with the pair cap.
     information_tempering_power: float = field(
         default=0.5,
         metadata={
             "provenance": (
-                "PS07; dimensionless exponent 0.5 on information-block count sets chromosome softmax "
-                "temperature."
+                "PS07; dimensionless exponent 0.5 on the selected-marker count sets the retention band's and the "
+                "chromosome softmax temperature (4.21 B2 at r_T = 0; 4.22 R4: a compute budget of the latent-order "
+                "decision, wide band and no cap giving the same decisions on every measured root)."
             ),
         },
     )

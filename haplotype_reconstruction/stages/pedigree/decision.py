@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator, Mapping
+from copy import copy
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -40,10 +41,12 @@ from ...engine.records import record_diagnostic
 from ...engine.workers import ResidentRef, release_resident, release_shared_value, resident_value, retain
 from ...science.pedigree import material_veto, not_assessable, panel, regimes, resampling, stacking
 from ...science.pedigree import run as science
+from ...science.pedigree.decision import FullSelection
 from ...science.pedigree.exclusion_parameters import ExclusionParameters
 from ...science.pedigree.parameters import PedigreeParameters
 from ...science.pedigree.resampling import FitResult
 from ...store.container import CheckpointFile
+from ...store.namespace import StoreLocation
 from ...store.protocol import NumericalPolicy, claim
 from ...store.store import CheckpointStore
 from ..evidence import records as evidence_records
@@ -65,12 +68,13 @@ from .records import (
     PREPARED,
     PRODUCT,
     REQUEST,
+    BoundInputs,
     PedigreeDependencies,
     RequestAdapter,
     bound_inputs,
     expected,
     request_dependencies,
-    result_reader,
+    published_identity,
 )
 
 __all__ = [
@@ -114,10 +118,12 @@ class StoredPrepared:
 
 @dataclass(frozen=True)
 class StoredEvidence:
-    """Checked evidence descriptor; no genotype buffer crosses the decision task."""
+    """Checked evidence descriptor; no genotype buffer crosses the decision task. ``correction``: (root, manifest)
+    for the run's contamination decision (4.22 QC A), applied where the evidence is read; None reads it as stored."""
 
     file: CheckpointFile
     identity: str
+    correction: tuple[str | StoreLocation, Mapping[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -294,43 +300,47 @@ def run(
     if classification is not None and classification.name == "not_assessable":
         return finish_not_assessable(inputs.genome.sample_ids, inputs.contigs,
             tuple(_summary(p) for p in inputs.prepared), classification, parameters,
-            replace(inputs.identities, panel="", relatedness_families="", floored_scores=(), regime=classification.name),
+            replace(inputs.identities, panel="", relatedness_families="", floored_scores=(),
+                    regime=classification.name),
             file=file, numerical_policy=numerical_policy, receipt=receipt, material=inputs.material,
             map_scale=inputs.map_scale)
     if classification.name != inputs.genome.regime:
         raise InputError("unit scores' regime differs from their material")
     inputs = replace(inputs, identities=replace(inputs.identities, regime=classification.name))
-    # The first fit uses the assembled genome state. Its graph choices and prior updates depend on
-    # the preceding fit state. Independent support fits start below once this fit supplies their inputs.
-    state = science.start_full_fit(inputs.genome, parameters)
-    if isinstance(state, Pedigree):
+    # The fit inputs (the direction model's neutral fit included) come first; the decision's full-data fit and the
+    # resampled fits each read only those inputs, so they run side by side below.
+    start = science.start_inputs(inputs.genome, parameters)
+    if isinstance(start, Pedigree):
         raise InputError("score block axis differs from its prepared layout")
     options: dict[str, Any] = dict(
         file=file, contig_files=contig_files, numerical_policy=numerical_policy, receipt=receipt,
         veto_only=veto_only, veto=veto,
     )
-    planned = resampling.plan(state.inputs, parameters, workers)
+    planned = resampling.plan(start.inputs, parameters, workers)
     if planned.worker_count == 1:
+        state = science.full_fit_state(start, science.full_selection(start.inputs, parameters))
         results = (resampling.evaluate_task(state.inputs, task) for task in planned.tasks)
         decided = science.complete_decision(state, resampling.combine(state.inputs, planned, results), parameters)
         return _requested(inputs, parameters, decided, workers=workers, **options)
-    shared, subtasks = execution.fit_subtasks(state.inputs, planned, "pedigree", copy_threads=workers)
-    retained = retain((inputs, parameters, state, planned, shared), "fit")
+    shared, subtasks = execution.fit_subtasks(start.inputs, planned, "pedigree", copy_threads=workers)
+    full = execution.full_fit_subtask(shared, parameters, "pedigree")
+    retained = retain((inputs, parameters, start, planned, shared), "fit")
     gather = Task(
         TaskKey("pedigree", "resampled"),
         _resampled_retained,
-        args=(retained, tuple(ResultRef(t.key) for t in subtasks)),
+        args=(retained, ResultRef(full.key), tuple(ResultRef(t.key) for t in subtasks)),
         kwargs=options,
-        depends_on=tuple(t.key for t in subtasks),
+        depends_on=(full.key, *(t.key for t in subtasks)),
         affinity=_AFFINITY,
         resources=ResourceRequest(max_cores=workers),
         thread_argument="workers",
     )
-    return Expansion(subtasks, gather)
+    return Expansion((full, *subtasks), gather)
 
 
 def _resampled_retained(
     reference: ResidentRef,
+    chosen: FullSelection,
     fitted: tuple[tuple[FitResult, ...], ...],
     *,
     workers: int = 1,
@@ -341,11 +351,13 @@ def _resampled_retained(
     veto_only: bool = False,
     veto: material_veto.VetoSet | None = None,
 ) -> Expansion:
-    """Reduce the fit subtasks' results in the plan's order on the affinity worker, then request exclusion."""
+    """Join the full-data fit to its inputs, reduce the resampling subtasks' results in the plan's order on the
+    affinity worker, then request exclusion."""
     # The ordered gather depends on the submitted fit results. It took 0.14 s on famhs and 0.25 s on TroMau.
-    inputs, parameters, state, planned, shared = resident_value(reference)
+    inputs, parameters, start, planned, shared = resident_value(reference)
     try:
         release_shared_value(shared)
+        state = science.full_fit_state(start, chosen)
         decided = science.complete_decision(
             state,
             resampling.combine(state.inputs, planned, (result for batch in fitted for result in batch)),
@@ -403,6 +415,7 @@ def _requested(
             file=None if contig_files is None else contig_files[c],
             identity=None if contig_files is None else dict(identities.exclusion)[c],
             sample_rates=inputs.identities.sample_rates,
+            rate_at_top=inputs.identities.exclusion_rate_at_top,
             sharing=inputs.identities.exclusion_sharing,
         )
         for c, log_weight in science.exclusion_contigs(request)
@@ -559,6 +572,7 @@ def _release_final(
         parameters,
         relationship_evidence=relationship_evidence,
         transmission_evidence=transmission_evidence,
+        unresolved_rate_samples=sum(inputs.identities.exclusion_rate_at_top),
     )
     if veto_only:
         return material_veto.veto_set(released, inputs.genome.regime)
@@ -709,6 +723,7 @@ def _exclusion_task(
     file: CheckpointFile | None,
     identity: str | None,
     sample_rates: tuple[float, ...] = (),
+    rate_at_top: tuple[bool, ...] = (),
     sharing: tuple[bool, ...] = (),
 ) -> Task:
     if not isinstance(evidence, StoredEvidence):
@@ -723,13 +738,15 @@ def _exclusion_task(
             file=file,
             identity=identity,
             sample_rates=sample_rates,
+            rate_at_top=rate_at_top,
             sharing=sharing,
         )
     return Task(
         TaskKey("pedigree", "exclusion", contig),
         exclusion.run_stored,
         args=(contig, evidence.file, evidence.identity, dyads, parameters, log_weight, sample_count),
-        kwargs=dict(file=file, identity=identity, sample_rates=tuple(sample_rates), sharing=sharing),
+        kwargs=dict(file=file, identity=identity, sample_rates=tuple(sample_rates), rate_at_top=tuple(rate_at_top),
+                    sharing=sharing, correction=evidence.correction),
         inputs=(RecordKey(contig, "evidence"),),
         outputs=(RecordKey(contig, exclusion.KEY),),
         resources=ResourceRequest(max_cores=cores),
@@ -835,7 +852,8 @@ def _relative_stored(
     # .807 in 17.61 s, versus .757 in 16.17 s on the dynamic grant. Repeated warm std timings on the
     # final records gave 8.41 s median dynamic and 8.53 s with a 24-thread cap. Keep the faster schedule.
     wall, cpu = time.perf_counter(), time.process_time()
-    file = CheckpointFile(reference.file.path, kind=reference.file.kind, name=reference.file.name, nthreads=TASK_THREADS)
+    file = copy(reference.file)
+    file.nthreads = TASK_THREADS
     prepared = load_product(file, PREPARED, reference.identity, prepare.PreparedAdapter())
     if prepared is None:
         raise InvariantError("relative report requires complete prepared inputs")
@@ -869,8 +887,9 @@ def _relative_task(
 
 
 def run_stored(
-    root: str, manifest: Mapping[str, Any] | None = None, *, workers: int = 1, veto_only: bool = False,
+    root: str | StoreLocation, manifest: Mapping[str, Any] | None = None, *, workers: int = 1, veto_only: bool = False,
     veto: material_veto.VetoSet | None = None,
+    bound: BoundInputs | None = None,
 ) -> dict[RecordKey, str] | Expansion | material_veto.VetoSet:
     """Read one chromosome at a time; retain only scores and immutable descriptors.
 
@@ -887,13 +906,11 @@ def run_stored(
     if manifest is None:
         raise InputError("pedigree requires the bound run manifest")
     precheck(len(manifest["sample_ids"]), basis="configured")
-    if not veto_only:
-        reader = result_reader(store, manifest, product="pedigree")
-        if reader is not None:
-            cached = load_product(store.run, PRODUCT, reader.identity, PedigreeAdapter())
-            if cached is not None:
-                return product_receipt(reader.identity)
-    bound = bound_inputs(store, manifest)
+    if not veto_only and veto is None:
+        identity = published_identity(store, manifest)
+        if identity is not None:
+            return product_receipt(identity)
+    bound = bound_inputs(store, manifest) if bound is None else bound
     parameters = bound.parameters
     if veto is not None and not bound.dependencies.veto:
         veto = replace(veto, role="reference")  # the working regime's release, only counted
@@ -902,7 +919,7 @@ def run_stored(
             TaskKey("pedigree", "decision.veto"),
             _veto_call,
             args=(run_stored, root, manifest),
-            kwargs=dict(veto_only=True),
+            kwargs=dict(veto_only=True, bound=bound),
             affinity=_AFFINITY,
             resources=ResourceRequest(max_cores=workers),
             thread_argument="workers",
@@ -911,7 +928,7 @@ def run_stored(
             TaskKey("pedigree", "decision.vetoed"),
             run_stored,
             args=(root, manifest),
-            kwargs=dict(veto=ResultRef(first.key)),
+            kwargs=dict(veto=ResultRef(first.key), bound=bound),
             depends_on=(first.key,),
             resources=ResourceRequest(max_cores=workers),
             thread_argument="workers",
@@ -976,7 +993,8 @@ def run_stored(
         StoredPrepared(store.contig(c), identity, summary)
         for (c, identity), summary in zip(bound.dependencies.prepared, bound.summary, strict=True)
     )
-    evidence = {c: StoredEvidence(store.contig(c), identity) for c, identity in bound.dependencies.evidence}
+    evidence = {c: StoredEvidence(store.contig(c), identity, (root, manifest))
+                for c, identity in bound.dependencies.evidence}
     inputs = DecisionStageInputs(
         genome,
         bound.contigs,

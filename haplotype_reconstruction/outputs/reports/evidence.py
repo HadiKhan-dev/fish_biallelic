@@ -15,6 +15,14 @@ def _cell(value, digits):
     return "NA" if value is None or not np.isfinite(value) else f"{value:.{digits}f}"
 
 
+def _censored(samples, i: int) -> str:
+    """1 when the fitted foreign fraction sits at the model ceiling a_hi, so the library's fraction is at least it."""
+    value, ceiling = samples.foreign_fraction[i], samples.fraction_ceiling
+    if ceiling is None or not np.isfinite(value):
+        return "NA"
+    return str(int(value >= ceiling * (1.0 - 1e-9)))
+
+
 def sample_table(report: EvidenceDecisions, sample_ids) -> tuple[list[str], list[list[str]]] | None:
     """Rows of OUTPUT/quality/samples.csv (the sample quality exclusion per sample), or None when
     the QC did not run on this contig."""
@@ -32,6 +40,8 @@ def sample_table(report: EvidenceDecisions, sample_ids) -> tuple[list[str], list
             str(int(samples.near_private_cells[i])),
             _cell(samples.lrt[i], 2),
             _cell(samples.foreign_fraction[i], 4),
+            _censored(samples, i),
+            _cell(samples.minimum_fraction, 4),
             _cell(samples.foreign_share[i], 5),
             _cell(samples.artefact_share[i], 5),
             _cell(samples.artefact_peak[i], 4),
@@ -80,6 +90,8 @@ SAMPLE_COLUMNS = (
     "near_private_cells",
     "lrt",
     "foreign_fraction",
+    "foreign_fraction_at_ceiling",
+    "detection_floor",
     "foreign_share",
     "artefact_share",
     "artefact_peak",
@@ -98,6 +110,8 @@ SAMPLE_COLUMNS = (
     near_private_cells: near private cells (count).
     lrt: lrt (nats).
     foreign_fraction: foreign fraction (1).
+    foreign_fraction_at_ceiling: 1 when the fraction is at the model ceiling, so the true fraction is at least it (1).
+    detection_floor: smallest foreign-allele amplitude tested: max(minimum fraction / 2, 2 x clean error) (1).
     foreign_share: foreign share (1).
     artefact_share: artefact share (1).
     artefact_peak: artefact peak (1).

@@ -309,13 +309,16 @@ def read_decoder_for(raw):
 
 
 def decode_batch(raw, batch_eligible, batch_observed, informative, states, bins, model, capable,
-                 local_keys, public_ids, config, *, reverse, confidence=None, errors=False):
+                 local_keys, public_ids, config, *, reverse, confidence=None, errors=False, label=None):
     """Compute one batch's candidate paths, release masses and direct support.
 
     ``raw`` and ``model``: emissions and copying model at the path strength (they decode). ``confidence``: None when
     the run's two strengths are equal, else (confidence model, emissions at the confidence strength): the release
     masses are then the confidence chain's posteriors of the decoded labels. With ``errors`` the label-error statistic
-    (u, v) of the decoded labels comes from the same pass (fidelity.release_posteriors) and is returned last."""
+    (u, v) of the decoded labels is returned last: from ``label`` = (label-error model, emissions at the label-error
+    strength, parameters.LABEL_ERROR_CORRELATION) when that strength differs from the release chain's (a second
+    forward-backward pass; the release masses stay the release chain's), else from the release pass itself
+    (fidelity.release_posteriors)."""
     # Combine switch intervals from both traceback conventions, canonical track order and faithful-copy
     # release masses of the chain's Viterbi labels.
     if hasattr(raw, "read"):                  # read state carried (painting.read_decode)
@@ -337,9 +340,14 @@ def decode_batch(raw, batch_eligible, batch_observed, informative, states, bins,
     )
     chain_raw, chain_model = (raw, model) if confidence is None else (confidence[1], confidence[0])
     released = (read_decoder_for(chain_raw)).release_posteriors(
-        chain_raw, chain_model, capable, batch_paths, other_paths, public_ids, local_keys, errors=errors
+        chain_raw, chain_model, capable, batch_paths, other_paths, public_ids, local_keys,
+        errors=errors and label is None,
     )
     batch_qf, batch_qaf = released[:2]
+    if errors and label is not None:
+        released = (batch_qf, batch_qaf) + tuple((read_decoder_for(label[1])).release_posteriors(
+            label[1], label[0], capable, batch_paths, other_paths, public_ids, local_keys, errors=True
+        )[2:])
     del raw
     batch_support = hmm.direct_support(
         batch_paths, states.named_alleles, informative, bins.starts, bins.stops, states.n_classes

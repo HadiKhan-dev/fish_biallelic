@@ -7,7 +7,7 @@
     export RUN DEST     re-export a run's founder and sample VCFs (and founder-track TSVs)
     example DEST        a small coalescent simulation configuration
     observations CONFIG export simulated observations and a bound truth sidecar
-    init / evidence / relatedness / reconstruct / pedigree / phase / report: cuts of the same graph
+    init / evidence / relatedness / reconstruct / calibrate / pedigree / phase / report: cuts of the same graph
 
 Settings come from the configuration (see docs/configuration.md); scientific switches are changed with
 `--set section.key=value`. The parser imports no numerical code.
@@ -92,8 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
         ("evidence", "Record one contig's evidence."),
         ("relatedness", "Gather relatedness from every contig's evidence."),
         ("reconstruct", "Assemble one contig; also paint it (and record its refit histogram) after run calibration."),
-        ("calibrate", "Calibrate painting across all final assemblies."),
-        ("pedigree", "Refit every contig under the run's class priors, then gather the genome-wide pedigree."),
+        ("calibrate", "Calibrate painting across all final assemblies or run one calibration round."),
+        ("pedigree", "Run the pedigree or publish a checkpoint step of the scattered workflow."),
         ("phase", "Phase, map and export one contig."),
         ("report", "Publish tables from available records."),
     ):
@@ -101,6 +101,30 @@ def build_parser() -> argparse.ArgumentParser:
         _add_run_options(command)
         if name in ("evidence", "reconstruct", "phase"):
             command.add_argument("--contig", required=True, help="Configured contig for this scatter step.")
+        if name == "pedigree":
+            command.add_argument("--contig", help="Analysed contig for prepare, map-inputs or map-frames.")
+            command.add_argument(
+                "--stage", dest="pedigree_stage",
+                choices=("contamination", "refit-priors", "prepare", "map-inputs", "map-pairs", "map-frames", "gather"),
+                help="Publish one checkpoint step. With --contig alone, run prepare.",
+            )
+        if name == "calibrate":
+            command.add_argument("--contig", help="Analysed contig for a calibration fit round.")
+            command.add_argument(
+                "--stage",
+                dest="calibration_stage",
+                choices=("robustness", "refine", "outlier", "divisor"),
+                help="Calibration round (default with --contig: robustness). "
+                "Requires --contig except for the run-wide outlier reduction and divisor inventory (--list-fits).",
+            )
+
+            command.add_argument("--fold", type=int, help="Zero-based held-out fold for a divisor fit.")
+            command.add_argument("--divisor", type=float, help="Candidate to fit. Omit to fit the whole fold.")
+            command.add_argument(
+                "--list-fits", action="store_true",
+                help="Print the active divisor fits as JSON after the outlier reduction. "
+                "Use --stage divisor without --contig.",
+            )
 
     status = commands.add_parser("status", help="Run records and checkpoint progress (no payload decoding).")
     status.add_argument("run_directory", type=Path, metavar="RUN")
@@ -238,6 +262,11 @@ def _command_workflow(args: argparse.Namespace) -> int:
         command=args.command,
         contig=getattr(args, "contig", None),
         contigs=selected,
+        calibration_stage=getattr(args, "calibration_stage", None),
+        pedigree_stage=getattr(args, "pedigree_stage", None),
+        calibration_fold=getattr(args, "fold", None),
+        calibration_divisor=getattr(args, "divisor", None),
+        list_divisor_fits=getattr(args, "list_fits", False),
         tie_reverse=args.tie_reverse,
         tie_keep=tuple(args.tie_keep),
         tie_census=args.tie_census,

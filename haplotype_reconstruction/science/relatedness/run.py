@@ -148,7 +148,7 @@ def contig_terms(
 ) -> ContigTerms:
     """Return C[N,M,9], logpi[M,3], logpost[N,M,3] and the family sites' working-map coordinates; mutate nothing.
 
-    The ALT allele frequency of a site is that of its cohort genotype frequencies q (stored with the evidence),
+    The model's allele-1 frequency is that of its cohort genotype frequencies q in the contig's search coding,
     p = q1 / 2 + q2: the EM's pseudo-counts keep it inside (0, 1), so no clip is needed. A latent parent's genotype
     prior stays Hardy-Weinberg at p (a genetic prior, distinct from the observation model's outlier law q, which has no
     Hardy-Weinberg assumption). The family sites' likelihoods
@@ -164,6 +164,12 @@ def contig_terms(
     cohort = evidence.cohort_frequencies
     if cohort is None:
         raise InputError("relatedness needs the evidence's cohort genotype frequencies")
+    # Use the contig's canonical nucleotide coding before ranking child terms
+    # and drawing any two-source frequency starts. The REF/ALT swap changes
+    # the input channel order and this reflection together.
+    reflect = getattr(evidence, "search_alleles_reversed", False)
+    if reflect:
+        cohort = cohort[:, ::-1]
     p = 0.5 * cohort[:, 1] + cohort[:, 2]
     keep = (np.minimum(p, 1 - p) >= family_parameters.minor_allele_frequency) & (
         observed.mean(axis=0) >= family_parameters.minimum_observed
@@ -173,7 +179,10 @@ def contig_terms(
     # unresolved range arrives as 0 and the stride stays alone (ADVICE2 14.1 item 4).
     sites = spaced_sites(np.flatnonzero(keep)[:: family_parameters.family_site_step], positions,
                          int(evidence.read_sharing_range))
-    site_likelihoods = mix_likelihoods(gather_likelihoods(gl, sites), cohort[sites], outlier_rate)
+    site_likelihoods = gather_likelihoods(gl, sites)
+    if reflect:
+        site_likelihoods = site_likelihoods[..., ::-1]
+    site_likelihoods = mix_likelihoods(site_likelihoods, cohort[sites], outlier_rate)
     site_observed = np.asarray(observed[:, sites], dtype=np.bool_)
     child, prior, post = family_terms(site_likelihoods, site_observed, p[sites], family_parameters)
     site_positions = np.asarray(positions[sites], dtype=np.float64)

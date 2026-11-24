@@ -121,8 +121,8 @@ def _build_read_matrices(
     library = int(libraries[0])
     if np.all(libraries == library):
         # This is the one-library branch of _matrices without its identity row gather and output copy.
-        return builder._library_part(*args, builder.survivals[library])
-    return builder._matrices(*args)
+        return builder._library_part(*args, builder.survivals[library])[:3]
+    return builder._matrices(*args)[:3]
 
 
 def execute_contig(
@@ -328,7 +328,9 @@ def _load_phase_inputs(loaders):
 def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMapSet, scratch: str | None) -> str:
     """Bind the canonical typed upstream products to family phase's complete-contig publisher."""
     from ...contracts.phase import PhaseInputIdentities
+    from ...contracts.roles import require_schema
     from ...core.digest import json_digest
+    from ...store.protocol import is_complete, read_items
     from ..painting import records as painting_records
     from ..pedigree import records as pedigree_records
     from ..phase import records
@@ -337,16 +339,38 @@ def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMa
     from ..relatedness.working_map import working_maps
 
     reader, store = task_inputs(root)
+    expected = records.expected(store, reader.manifest, product="phase", contig=contig)
+    file = store.contig(contig)
+    # Resume before decoding any input: a current saved record needs none of them. Decoding first cost ~2 min per
+    # TroMau contig on the final run of a scattered workflow (4.22 release validation). Same branch as publish_contig.
+    saved = read_items(file, records.KEY, expected.identity, ("schema",))
+    if saved is not None:
+        from ...engine.records import record_diagnostic
+        from ...store.protocol import mark_complete
+
+        require_schema(saved.payload, records.PhasedSamplesAdapter.schema)
+        if not is_complete(file, {records.BINDING_KEY: expected.identity}):
+            records.bind(file, expected)
+        if not file.has("complete/" + records.KEY):
+            mark_complete(file, records.KEY, {records.KEY: expected.identity})
+        records.PhaseMemo(file, expected).remove()
+        record_diagnostic(f"{contig}: family phase reused 0 intermediate units; final record resumed")
+        return expected.identity
     evidence, painting, refit, pedigree = _load_phase_inputs((
         partial(required_dense_evidence, reader, contig),
         partial(required_product, reader, painting_records, "painting", contig),
         partial(required_product, reader, refit_records, "refit", contig),
         partial(required_product, reader, pedigree_records, "pedigree", None),
     ))
-    expected = records.expected(store, reader.manifest, product="phase", contig=contig)
+    # 4.22 QC A: flagged libraries phased on contamination-corrected likelihoods. The decision is a function of every
+    # contig's painting and evidence, which the phase identity binds through the refit's run priors, and the
+    # correction's code is in the phase task's code closure
+    from ..painting import contamination as contamination_stage
+
+    evidence = contamination_stage.corrected_evidence(store, reader.manifest, contig, evidence)
     identities = PhaseInputIdentities(**expected.inputs)
     publish_contig(
-        store.contig(contig),
+        file,
         evidence,
         painting,
         refit,
@@ -365,10 +389,14 @@ def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMa
 
 def task(key: TaskKey, context: StageRun) -> Task:
     """Declare the production complete-contig phase publisher."""
+    from ...store.store import CheckpointStore
+    from .records import KEY
+
+    existing = CheckpointStore(context.root).contig(key.scope).has(KEY)
     return Task(
         key,
         run,
         (context.root, key.scope, context.resolved, context.maps, context.scratch),
-        outputs=(RecordKey(key.scope, "phase"),),
-        resources=ResourceRequest(1, context.cores),
+        outputs=(RecordKey(key.scope, KEY),),
+        resources=ResourceRequest(1, 1 if existing else context.cores),
     )

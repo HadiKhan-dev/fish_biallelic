@@ -22,6 +22,7 @@ from numba import prange
 from ...core.errors import InputError
 from ...core.kernels import kernel
 from ...core.ties import policy
+from ..shared.alleles import complement_calls
 from .kernels.decision import OVERLOADS
 from .numerical_parameters import JUNCTION_UNREACHABLE_COUNT, JUNCTION_UNREACHABLE_STATE
 
@@ -300,6 +301,7 @@ def schedules(
     *,
     reverse: bool,
     label_error: np.ndarray | None = None,
+    search_alleles_reversed: bool = False,
 ) -> ComponentSchedule:
     """Build a component's schedule, local classes, known-label mask, T and count summaries once.
 
@@ -327,7 +329,9 @@ def schedules(
             homologue_error=np.zeros((n_samples, n_bins, 2)),
             pair_error=np.zeros((n_samples, n_bins)),
         )
-    order = np.asarray(sorted(range(len(named)), key=lambda row: named[row].tobytes()), dtype=np.int64)
+    # Fix the trajectory order under REF/ALT exchange so equally short traces place junctions in the same bins.
+    keyed = complement_calls(named) if search_alleles_reversed else named
+    order = np.asarray(sorted(range(len(named)), key=lambda row: keyed[row].tobytes()), dtype=np.int64)
     inverse = np.empty(len(order), dtype=np.int64)
     inverse[order] = np.arange(len(order))
     relabelled = labels.copy()

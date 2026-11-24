@@ -1,4 +1,4 @@
-"""Full-marker exclusion windows and exact pattern encodings for certified scans.
+"""Full-marker exclusion windows and the per-site exclusion ratio under the observation model (4.22 A11).
 Method: docs/methods/pedigree.md#full-marker-mendelian-exclusion-of-m0-and-m1-counts
 """
 
@@ -8,16 +8,13 @@ import math
 from collections.abc import Sequence
 
 import numpy as np
-from numba import prange
 
 from ...contracts.pedigree import ExclusionEvidence
 from ...core.errors import InputError
 from ...core.kernels import kernel
 from .kernels.exclusion import OVERLOADS
 from .numerical_parameters import EXCLUSION_TINY
-from .workspace_parameters import EXCLUSION_DYAD_BATCH, EXCLUSION_PATTERN_LIMIT
-
-MAX_PATTERNS = EXCLUSION_PATTERN_LIMIT
+from .workspace_parameters import EXCLUSION_DYAD_BATCH
 
 DYAD_BATCH = EXCLUSION_DYAD_BATCH
 
@@ -40,49 +37,31 @@ def physical_windows(positions: np.ndarray, widths: tuple[int, ...]) -> np.ndarr
 
 
 @kernel(overloads=OVERLOADS["exclusion._ratio"], cache=True, inline="always", nogil=True)
-def _ratio(x0, x1, x2, y0, y1, y2, delta):
-    """A / D of one jointly observed site (see the module docstring)."""
-    compatible = max(x0 * max(y0, y1), x1 * max(y0, y1, y2), x2 * max(y1, y2))
-    unrestricted = max(x0, x1, x2) * max(y0, y1, y2)
-    bound = max(compatible, (1 - delta) * compatible + delta * unrestricted)
-    return (x0 * y2 + x2 * y0) / 2 / max(bound, EXCLUSION_TINY)
+def _ratio(x0, x1, x2, y0, y1, y2, q0, q1, q2, ex, ey):
+    """A' / D' of one site observed in both samples, under the observation model (science.shared.observation).
+
+    Each cell's genotype likelihoods L(g) are mixed against the site's cohort genotype frequencies q at the sample's
+    own outlier rate e: L'(g) = (1 - e) L(g) + e B, B = q . L (with probability e the cell's genotype is redrawn from
+    q). D' = max over Mendelian-compatible genotype pairs (g, h) (no opposite homozygotes) of x'(g) y'(h) bounds the
+    likelihood of the pair's cells under every parent-offspring law whose cells are redrawn independently at their
+    rates; A' = (x'(0) y'(2) + x'(2) y'(0)) / 2 is the likelihood of opposite homozygotes observed through the same
+    redraws, a density of the cells. Hence A' / D' has expectation at most 1 under that null at every site. No
+    replacement term and no floor: the allowance is the two samples' own rates."""
+    bx = q0 * x0 + q1 * x1 + q2 * x2
+    by = q0 * y0 + q1 * y1 + q2 * y2
+    a0 = (1.0 - ex) * x0 + ex * bx
+    a1 = (1.0 - ex) * x1 + ex * bx
+    a2 = (1.0 - ex) * x2 + ex * bx
+    b0 = (1.0 - ey) * y0 + ey * by
+    b1 = (1.0 - ey) * y1 + ey * by
+    b2 = (1.0 - ey) * y2 + ey * by
+    compatible = max(a0 * max(b0, b1), a1 * max(b0, b1, b2), a2 * max(b1, b2))
+    return (a0 * b2 + a2 * b0) / 2 / max(compatible, EXCLUSION_TINY)
 
 
 @kernel(overloads=OVERLOADS["exclusion._log_bet"], cache=True, inline="always", nogil=True)
 def _log_bet(ratio, bet):
     return np.log(max(1 - bet + bet * ratio, EXCLUSION_TINY))
-
-
-@kernel(overloads=OVERLOADS["exclusion._encode_patterns"], cache=True, parallel=True, nogil=True)
-def _encode_patterns(gl, observed, cap):
-    """Exact per-sample codes of distinct GL triples (-1 unobserved); count -1 = over the cap."""
-    samples, sites, _ = gl.shape
-    codes = np.empty((samples, sites), np.int16)
-    catalog = np.empty((samples, cap, 3), gl.dtype)
-    counts = np.zeros(samples, np.int64)
-    for sample in prange(samples):
-        # Establish the dictionary's key/value types without quantising floats.
-        table = {(0.0, 0.0, 0.0): -1}
-        del table[(0.0, 0.0, 0.0)]
-        count = 0
-        for site in range(sites):
-            if not observed[sample, site]:
-                codes[sample, site] = -1
-                continue
-            x0, x1, x2 = gl[sample, site]
-            key = (float(x0), float(x1), float(x2))
-            code = table.get(key, -1)
-            if code < 0:
-                if count == cap:
-                    count = -1
-                    break
-                code = count
-                table[key] = code
-                catalog[sample, code] = gl[sample, site]
-                count += 1
-            codes[sample, site] = code
-        counts[sample] = count
-    return codes, catalog, counts
 
 
 def contig_log_weights(configured_morgans: Sequence[float]) -> tuple[float, ...]:

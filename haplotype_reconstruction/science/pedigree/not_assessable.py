@@ -1,6 +1,8 @@
 """Completed unresolved pedigree without a fitted decision (DESIGN_4154 A3)."""
 from __future__ import annotations
+
 import numpy as np
+
 from ...contracts import pedigree as records
 from .eligibility import ParentEligibility
 
@@ -18,12 +20,13 @@ def product(sample_ids, contigs, summary, reach, parameters):
     empty = records.ExclusionEvidenceView(np.empty(0, np.int64), np.empty(0, np.int64),
                                           np.empty(0), np.empty(0, np.int64))
     views = records.PedigreeViews(
-        rows, partial, (), (), rows, (), (), (), (), (), (), empty, (), (), tuple(summary), None, None, regime="not_assessable")
+        rows, partial, (), (), rows, (), (), (), (), (), (), empty, (), (), tuple(summary), None, None,
+        regime="not_assessable")
     return records.Pedigree(
         sample_ids, tuple(contigs), tuple(s.contig for s in summary if s.omitted_reason is None),
         {s.contig: s.omitted_reason for s in summary if s.omitted_reason is not None},
         calls, edges, tier_a, calls, reach, ParentEligibility.unrestricted(sample_ids).summary(),
-        None, None, None, views=views, family_solve=None, guard_summary=None,
-        exclusion=records.ExclusionSummary("full-marker-mendelian-directed-v1", parameters.exclusion.alpha,
-            parameters.exclusion.genotype_replacement_probability, True, 0, len(contigs), "not_assessed", 0),
+        None, None, None, views=views, birth_order=None, guard_summary=None,
+        exclusion=records.ExclusionSummary("full-marker-mendelian-directed-observation-v1", parameters.exclusion.alpha,
+            0, True, 0, len(contigs), "not_assessed", 0),
         retained=None, reports_complete=True, regime="not_assessable")

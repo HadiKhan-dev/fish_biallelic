@@ -113,6 +113,8 @@ See [RS01](./refinement.md#rs01) for the model, decision order, parameters and l
 ## polish
 
 See [RS14](./refinement.md#rs14) for the model, decision order, parameters and limits.
+The polish orders candidate window paths by prepared-row bytes in the contig’s canonical allele coding. Row-specific unknown codes retain their identities.
+
 The polish search retains last-problem beam answers and forward-oriented scalar gains within
 one fixed-K fit; see [RS15](./refinement.md#rs15), [RS16](./refinement.md#rs16) and
 [RS17](./refinement.md#rs17) for the keys and the label-dependent selections excluded from reuse.

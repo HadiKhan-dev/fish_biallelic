@@ -89,18 +89,6 @@ OVERLOADS = {
             types.int64,
         ),
     ),
-    "forward._powered_products": (
-        (
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
-            types.int64,
-        ),
-        (
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
-            types.int64,
-        ),
-    ),
     "forward.advance": (
         (
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
@@ -325,14 +313,6 @@ OVERLOADS = {
             types.literal(1),
         ),
     ),
-    "forward.named_column_powers": (
-        (
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
-            types.int64,
-        ),
-    ),
-    "forward.normalized_power": ((types.float64, types.float64, types.float64),),
     "forward.observed_sites": (
         (
             types.Array(types.boolean, 2, "C", readonly=True, aligned=True),

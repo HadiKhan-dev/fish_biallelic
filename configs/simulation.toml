@@ -39,6 +39,7 @@ size = 500.0
 # Optional call-set artefacts, applied after reads:
 # [simulation.artefacts]
 # preset = "reference_blocks"
+# balance_dispersion = 0.0  # required with reads (read_length_bp or long_read_mean_bp > 0)
 
 [simulation.stocks.left]
 population = "ancestral"

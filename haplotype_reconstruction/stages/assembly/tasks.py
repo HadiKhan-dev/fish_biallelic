@@ -79,7 +79,10 @@ def run(
         release_resident_namespace(_CHAIN_INPUTS)  # the final assembly is the chain inputs' last consumer
     child_key = TaskKey("assembly", "compute", contig, round_name)
     session = AssemblySession(
-        AssemblyInputs(tuple(selected), view, working_maps(store, reader.manifest, maps).for_contig(contig)),
+        AssemblyInputs(
+            tuple(selected), view, working_maps(store, reader.manifest, maps).for_contig(contig),
+            search_alleles_reversed=evidence.search_alleles_reversed,
+        ),
         resolved.parameters.assembly,
         Role.FINAL if context is None else Role.CONTEXT,
         None if context is None else int(context[1:]),

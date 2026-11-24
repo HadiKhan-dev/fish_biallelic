@@ -19,13 +19,15 @@ Source: [`SAMPLE_COLUMNS`](../../haplotype_reconstruction/outputs/reports/eviden
 | 7 | `near_private_cells` | near private cells (count). |
 | 8 | `lrt` | lrt (nats). |
 | 9 | `foreign_fraction` | foreign fraction (1). |
-| 10 | `foreign_share` | foreign share (1). |
-| 11 | `artefact_share` | artefact share (1). |
-| 12 | `artefact_peak` | artefact peak (1). |
-| 13 | `heterozygote_fit` | heterozygote fit (1). |
-| 14 | `heterozygote_dispersion` | heterozygote dispersion (1). |
-| 15 | `error_fit` | error fit (1). |
-| 16 | `flagged` | flagged (1). |
+| 10 | `foreign_fraction_at_ceiling` | 1 when the fraction is at the model ceiling, so the true fraction is at least it (1). |
+| 11 | `detection_floor` | smallest foreign-allele amplitude tested: max(minimum fraction / 2, 2 x clean error) (1). |
+| 12 | `foreign_share` | foreign share (1). |
+| 13 | `artefact_share` | artefact share (1). |
+| 14 | `artefact_peak` | artefact peak (1). |
+| 15 | `heterozygote_fit` | heterozygote fit (1). |
+| 16 | `heterozygote_dispersion` | heterozygote dispersion (1). |
+| 17 | `error_fit` | error fit (1). |
+| 18 | `flagged` | flagged (1). |
 
 ## quality/segments.csv
 
@@ -221,6 +223,7 @@ Source: [`SAMPLE_SWITCH_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 5 | `painted_switches` | painted switches (1). |
 | 6 | `cohort_median_switches` | cohort median switches (1). |
 | 7 | `switches_over_cohort_median` | painted switches divided by the cohort median; NaN if median is not positive (1). |
+| 8 | `contamination_tier` | the library's contamination tier: clean, corrected or interpret_with_care (quality/ |
 
 ## painting/calibration_robustness.csv
 
@@ -297,6 +300,7 @@ Source: [`TIER_B_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/outputs/
 | 6 | `inference_status` | inference status (1). |
 | 7 | `release_evidence` | release evidence (1). |
 | 8 | `relationship_basis` | family when every released parent passes the family score threshold; pair_only otherwise (text). |
+| 9 | `contamination_tier` | worst contamination tier among the sample and its called parents: clean, corrected or |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -319,6 +323,7 @@ Source: [`TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/
 | 11 | `observed_parent_count_maximum` | observed parent count maximum (1). |
 | 12 | `release_evidence` | release evidence (1). |
 | 13 | `relationship_basis` | family when every released parent passes the family score threshold; pair_only otherwise (text). |
+| 14 | `contamination_tier` | worst contamination tier among the sample and its called parents: clean, corrected or |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -335,6 +340,7 @@ Source: [`TIER_A_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/outputs/
 | 5 | `observed_parent_count` | released sequenced-parent count; unresolved values remain NaN (1). |
 | 6 | `inference_status` | inference status (1). |
 | 7 | `relationship_basis` | family when every released parent passes the family score threshold; pair_only otherwise (text). |
+| 8 | `contamination_tier` | worst contamination tier among the sample and its called parents: clean, corrected or |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -356,6 +362,7 @@ Source: [`TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/
 | 10 | `observed_parent_count_minimum` | observed parent count minimum (1). |
 | 11 | `observed_parent_count_maximum` | observed parent count maximum (1). |
 | 12 | `relationship_basis` | family when every released parent passes the family score threshold; pair_only otherwise (text). |
+| 13 | `contamination_tier` | worst contamination tier among the sample and its called parents: clean, corrected or |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -371,6 +378,7 @@ Source: [`COMPLETE_RELATIONSHIPS_COLUMNS`](../../haplotype_reconstruction/output
 | 4 | `parent_state` | released M0/M1/M2 state label (text). |
 | 5 | `observed_parent_count` | released sequenced-parent count; unresolved values remain NaN (1). |
 | 6 | `inference_status` | inference status (1). |
+| 7 | `contamination_tier` | worst contamination tier among the sample and its called parents: clean, corrected or |
 
 `parent_slot_basis` is inserted immediately after `parent2` when the typed view carries slot assignment: `unordered`, `single` or `none`. The slots do not imply sex.
 
@@ -413,7 +421,7 @@ Source: [`PARENT_STATE_CALLS_COLUMNS`](../../haplotype_reconstruction/outputs/re
 | 6 | `inference_status` | inference status (1). |
 | 7 | `dag_displaced` | dag displaced (1). |
 | 8 | `graph_conflict` | graph conflict (1). |
-| 9 | `graph_tie_conflict` | graph tie conflict (1). |
+| 9 | `order_restricted` | the joint read restricted this child to the consensus birth order (1). |
 | 10 | `graph_direction_resolved_alternative` | graph direction resolved alternative (1). |
 | 11 | `selected_parent_role_probability` | selected parent role probability (1). |
 | 12 | `tier_a_state_call` | tier a state call (1). |
@@ -458,16 +466,16 @@ Source: [`DIAGNOSTICS_COLUMNS`](../../haplotype_reconstruction/outputs/reports/p
 | 29 | `identifiable` | identifiable (1). |
 | 30 | `dag_displaced` | dag displaced (1). |
 | 31 | `graph_conflict` | graph conflict (1). |
-| 32 | `graph_tie_conflict` | graph tie conflict (1). |
+| 32 | `order_restricted` | the joint read restricted this child to the consensus birth order (1). |
 | 33 | `graph_direction_resolved_alternative` | graph direction resolved alternative (1). |
 | 34 | `local_parent_role_probability` | local parent role probability (1). |
 | 35 | `selected_parent_role_probability` | selected parent role probability (1). |
 | 36 | `raw_ancestry_junction_count` | raw ancestry junction count (1). |
 | 37 | `callable_ancestry_haplotype_bin_count` | callable ancestry haplotype bin count (1). |
-| 38 | `painted_junctions_per_morgan` | minimum painted founder switches per homologue per Morgan of callable painting on the configured working map; missing for zero callable map length; reported only, never used in a decision (1/Morgan). |
+| 38 | `painted_junctions_per_morgan` | minimum painted founder switches per homologue per Morgan of callable painting on the |
 | 39 | `adjusted_ancestry_junction_burden` | adjusted ancestry junction burden (1). |
 | 40 | `ancestry_painting_callability_fraction` | ancestry painting callability fraction (1). |
-| 41 | `informative_unit_count` | material units (1-Morgan units of the working map) on which the child's own evidence picks a unique parent count (1). |
+| 41 | `informative_unit_count` | material units (1-Morgan units of the working map) on which the child's own evidence picks a |
 | 42 | `informative_morgans` | working Morgans of those units; reported only (Morgans). |
 | 43 | `local_state_bootstrap_fraction` | local state bootstrap fraction (1). |
 | 44 | `local_configuration_bootstrap_fraction` | local configuration bootstrap fraction (1). |
@@ -574,14 +582,13 @@ Source: [`ALTERNATIVE_EXPLANATIONS_COLUMNS`](../../haplotype_reconstruction/outp
 | 9 | `structural_state_log_evidence` | structural state log evidence (nats). |
 | 10 | `structural_identity_eligible` | structural identity eligible (1). |
 | 11 | `direction_log_contribution` | direction log contribution (nats). |
-| 12 | `reciprocal_family_log_contribution` | reciprocal family log contribution (nats). |
-| 13 | `ancestry_path_log_contribution` | ancestry path log contribution (nats). |
-| 14 | `adjusted_state_log_evidence` | adjusted state log evidence (nats). |
-| 15 | `adjusted_identity_log_evidence` | adjusted identity log evidence (nats). |
-| 16 | `parent_state_log_prior` | parent state log prior (nats). |
-| 17 | `log_eligible_identity_multiplicity` | log eligible identity multiplicity (nats). |
-| 18 | `marginal_state_log_evidence` | marginal state log evidence (nats). |
-| 19 | `graph_decision_utility` | graph decision utility (nats). |
+| 12 | `birth_order_log_contribution` | log P_hat + log multiplicity - input weight; includes normalizer, multiplicity (nats). |
+| 13 | `adjusted_state_log_evidence` | adjusted state log evidence (nats). |
+| 14 | `adjusted_identity_log_evidence` | adjusted identity log evidence (nats). |
+| 15 | `parent_state_log_prior` | parent state log prior (nats). |
+| 16 | `log_eligible_identity_multiplicity` | log eligible identity multiplicity (nats). |
+| 17 | `marginal_state_log_evidence` | marginal state log evidence (nats). |
+| 18 | `graph_decision_utility` | graph decision utility (nats). |
 
 ## pedigree/search_diagnostics.csv
 
@@ -657,7 +664,7 @@ Source: [`CHROMOSOME_SUMMARY_COLUMNS`](../../haplotype_reconstruction/outputs/re
 | 3 | `scored_component_count` | scored component count (1). |
 | 4 | `informative_markers` | informative markers (1). |
 | 5 | `omitted_reason` | omitted reason (1). |
-| 6 | `configured_morgans` | configured working-map Morgans of [0, the contig's last evidence position]: its fixed weight in the Mendelian exclusion e-value (Morgans). |
+| 6 | `configured_morgans` | configured working-map Morgans of [0, the contig's last evidence position]: its fixed weight in |
 
 ## pedigree/relative_contrasts.csv
 
@@ -758,6 +765,35 @@ Source: [`BLOCK_SUMMARY_COLUMNS`](../../haplotype_reconstruction/outputs/reports
 | 7 | `working_morgans` | configured map length assigned to the block, including its entering boundary (Morgans). |
 | 8 | `bins` | scored painting bins in the block (1). |
 | 9 | `informative_markers` | selected markers in the block (1). |
+
+## quality/flagged_libraries.csv
+
+Source: [`FLAGGED_COLUMNS`](../../haplotype_reconstruction/outputs/reports/quality.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `sample` | sample identifier (text). |
+| 2 | `contigs_flagged` | contigs on which the sample QC flagged the library (count). |
+| 3 | `contigs_assessed` | contigs on which the sample QC ran for the library (count). |
+| 4 | `max_foreign_fraction` | largest fitted foreign fraction over the flagged contigs (1). |
+| 5 | `at_ceiling` | 1 when that fraction sits at the model ceiling, so the library's contamination is at least it (1). |
+
+## quality/contamination.csv
+
+Source: [`CONTAMINATION_COLUMNS`](../../haplotype_reconstruction/outputs/reports/quality.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `sample` | sample identifier (text). |
+| 2 | `alpha` | estimated read fraction of foreign DNA under the cohort-frequency law (1). |
+| 3 | `own_error` | the library's own read error fitted with alpha (1). |
+| 4 | `alpha_lower_bound` | 1 when no donor is named and own_error sits at its grid top: foreign reads were absorbed as |
+| 5 | `z` | robust z of alpha over the cohort (1). |
+| 6 | `corrected` | 1 when the library's likelihoods are corrected from the repaint on (alpha and z both above their lines). |
+| 7 | `donor` | the sequenced library named as the source of the foreign reads, empty when none (text). |
+| 8 | `correction_alpha` | the foreign read fraction the correction uses: the donor law's when a donor is named (1). |
+| 9 | `donor_residual` | the best candidate donor's same-homozygote residual; a donor is named at or below its line (1). |
+| 10 | `tier` | clean, corrected, or interpret_with_care (corrected above the care line, or alpha a lower bound) (text). |
 
 ## recombination/coverage.csv
 

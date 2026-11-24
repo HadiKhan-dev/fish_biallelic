@@ -119,6 +119,9 @@ Cost and scope: An additional site-mixture fit on unflagged samples when the rul
 <a id="ec11"></a>
 ## ec11 Site-filter applicability, rule combination, rule bits and record
 
+Fit the allele-oriented quality rules and their sample-QC inputs in the contig's canonical REF/ALT coding.
+Report fitted ALT quantities in the input coding.
+
 If filtering is disabled or calibration is inapplicable, retain all sites and record why. Otherwise execute r1, r2, r3, r4, initial r5, sample QC, then the r5 recount. OR only applied rules to form the kept mask; preserve every rule bit and distinguish singly removed sites.
 
 Implementation: [science/evidence/run.py](../../haplotype_reconstruction/science/evidence/run.py), [stages/evidence/tasks.py](../../haplotype_reconstruction/stages/evidence/tasks.py).
@@ -131,11 +134,15 @@ Cost and scope: O(N M_in); O(M). These terms describe the unit’s work/storage 
 ## ec12 Sample QC: carriers, eligible cells, composite fragment weights and regions
 
 Construct carrier thresholds from the clean error law, identify eligible/minor cells and assign them to regions.
+Use the contig's canonical REF/ALT coding for tied read totals and for the orientation of the fit bins. Report
+ALT balance in the input coding.
 Weight each cell by 1 / (1 + Σ phi(distance)) over the other eligible cells of the same sample. The working curve
 uses the bins inside the fitted read-sharing range and any supported weights from the first omitted octave. An
-unresolved fit uses every measured bin. Neighbours across processing tiles are included. The sparse tail is
-computed with moving endpoints in each sample's sorted cells, so wider tail bins increase the tile overlap but
-do not require a loop over each additional pair.
+unresolved fit uses every measured bin. Neighbours across processing tiles are included. The curve is constant on
+each bin, so a cell's sum is the bin weights times the counts of its sample's cells in each bin. These counts come from
+moving endpoints in each sample's sorted cells: the cost per cell grows with the number of weighted bins, not with the
+cells inside the reach. Complete cells are weighed once they outnumber the cells they are weighed against, so a long
+or unresolved range does not repeat the sort for every tile (4.22; a pair loop made long ranges quadratic).
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 
@@ -146,7 +153,10 @@ Cost and scope: O(N M_pass). These terms describe the unit’s work/storage dime
 <a id="ec13"></a>
 ## ec13 Sample QC: per-library null/alternative mixture fits with regional artefact shares
 
-Fit a per-library null mixture, then warm-start alternatives in ascending foreign-fraction order. Retain the strictly best alternative’s weights and polish the null from them. Regional artefact shares remain part of the mixture. The warm-start path and pivot rule are model decisions, not interchangeable optimiser conveniences.
+Fit a per-library null mixture, then warm-start alternatives in ascending foreign-fraction order.
+Use the larger of half `minimum_foreign_fraction` and twice the clean error rate as the detection floor.
+Bound the grid by half the lowest clean heterozygote mean across both allele orientations, multiplied by
+`heterozygote_floor_ratio`. Retain the strictly best alternative’s weights and polish the null from them. Regional artefact shares remain part of the mixture. The warm-start path and pivot rule are model decisions, not interchangeable optimiser conveniences.
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 
@@ -157,7 +167,7 @@ Cost and scope: O(G I (B Q^2 + (J Q)^3 + R_B S_b)). These terms describe the uni
 <a id="ec14"></a>
 ## ec14 Sample QC: statistic, working threshold, applicability guards and flags
 
-Check minimum sample/cell and fraction-separation applicability first. Profile finite alternatives against the null, take the fixed first maximum, and form the nonnegative likelihood-ratio statistic. Flag a library inclusively at the working threshold. Record inapplicability; flagged libraries affect r5 and founder construction, not their own later phasing.
+Check minimum sample/cell and fraction-separation applicability first. Profile finite alternatives against the null, take the fixed first maximum, and form the nonnegative likelihood-ratio statistic. Flag a library inclusively at the working threshold. Record inapplicability; flagged libraries affect r5 and founder construction, not their own later phasing. Leave the reported foreign amplitude empty when its fitted mixture share is zero.
 
 Implementation: [science/evidence/quality/sample_quality.py](../../haplotype_reconstruction/science/evidence/quality/sample_quality.py).
 

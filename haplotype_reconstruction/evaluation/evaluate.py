@@ -71,6 +71,11 @@ INTERPRETATION = (
     "at most 3 windows apart; coverage requires one row containing it at both ends and in every labelled "
     "window between. The released identity columns are unchanged."
 )
+# Appended to the interpretation only when site QC removed sites, so reports of runs without QC read as before.
+SITE_QC_INTERPRETATION = (
+    " Site QC removed sites (site_qc_removed_sites, per chromosome and summed in totals): every allele, genotype "
+    "and phase count and share is over the kept sites only."
+)
 SEGMENT_INTERPRETATION = (
     "set_aligned_errors are sites on a set's minority orientation, switch_errors orientation changes "
     "between consecutive scored sites of a set, long_switches orientation changes between consecutive "
@@ -298,10 +303,14 @@ def collect(report: dict, results) -> tuple[list, list]:
         key: sum(row.get(key, 0) for row in report["chromosomes"])
         for key in ("total_alleles", "called_alleles", *PHASE_COLUMNS)
     }
+    removed = sum(row.get("site_qc_removed_sites", 0) for row in report["chromosomes"])
+    if removed:
+        # Site QC ran on the simulation: the totals' denominators are the kept sites only (SITE_QC_INTERPRETATION).
+        report["totals"]["site_qc_removed_sites"] = removed
     _phase_shares(report["totals"])
     report["totals"]["phase_set_n50_bp"] = totals.get("all", {}).get("phase_set_n50_bp", 0)
     report["totals"]["released_phase_set_n50_bp"] = totals.get("all", {}).get("released_phase_set_n50_bp", 0)
-    report["interpretation"] = INTERPRETATION
+    report["interpretation"] = INTERPRETATION + (SITE_QC_INTERPRETATION if removed else "")
     report["segment_and_long_range_interpretation"] = SEGMENT_INTERPRETATION
     return component_rows, matching_rows
 
@@ -347,9 +356,19 @@ def phase_scores(
     calls = np.asarray(product["calls"])
     true_alleles = np.asarray(truth.alleles, dtype=np.int8)
     positions = np.asarray(truth.positions)
+    final_positions = np.asarray(product["positions"])
+    removed_sites = 0
+    if len(final_positions) < len(positions):
+        # Site QC ran on the simulation ([quality] site_filter on): phase is released on the kept sites only, so the
+        # truth is scored on that subset and the removed sites are counted, never scored as uncalled.
+        kept = np.minimum(np.searchsorted(positions, final_positions), len(positions) - 1)
+        if not np.array_equal(positions[kept], final_positions):
+            raise InputError(f"{contig}: final positions are not a subset of the truth positions")
+        removed_sites = len(positions) - len(final_positions)
+        true_alleles, positions = true_alleles[:, kept], positions[kept]
     if true_alleles.shape != calls.shape:
         raise InputError(f"{contig}: incompatible true/final allele axes")
-    if not np.array_equal(np.asarray(product["positions"]), positions):
+    if not np.array_equal(final_positions, positions):
         raise InputError(f"{contig}: final positions differ from truth")
     absent_cells = None
     if truth.structure is not None:
@@ -380,6 +399,8 @@ def phase_scores(
     )
     total_alleles, called_alleles = int(calls.size), int(np.count_nonzero(calls >= 0))
     columns: MetricRow = dict(total_alleles=total_alleles, called_alleles=called_alleles)
+    if removed_sites:
+        columns["site_qc_removed_sites"] = removed_sites
     if absent_cells is not None:
         columns["structurally_absent_cells"] = absent_cells
     columns["called_fraction"] = called_alleles / total_alleles if calls.size else None

@@ -188,6 +188,7 @@ def stage_builder(
     parameters: PaintingParameters,
     *,
     unit_batches: bool = False,
+    label_correlation: float | None = None,
 ) -> Callable:
     """The emission builder of one contig's painting: ``base`` unchanged when ``parameters.read_classes`` is 1 (no read
     state), else the read-state builder with 2 minor + 3 = read_classes classes over ``base``'s emissions. Its inputs
@@ -198,7 +199,10 @@ def stage_builder(
     samples deep at every site bypass the read state (ReadEmissionBuilder: the emission without read state exactly).
     ``unit_batches``: a batch whose every sample bypasses is carried with one class (ReadEmissionBuilder; the
     painting's and the calibration's consumers read the class count from the batch; a consumer that assumes
-    read_classes classes keeps the default)."""
+    read_classes classes keeps the default). ``label_correlation``: the label-error strength
+    (parameters.LABEL_ERROR_CORRELATION) when a decode of this builder reads the label-error statistic (the
+    reference paintings), else None. The read matrices take the bin-level tempering correction
+    (science.painting.read_factor)."""
     if parameters.read_classes == 1:
         return base
     settings = parameters.read_state
@@ -231,4 +235,4 @@ def stage_builder(
     # Table chunks use the ordered map. Site kernels use the ambient team.
     return ReadEmissionBuilder(base, counts, positions, survival, error_rate, covering, cohort, minor, settings,
                                confidence_correlation, library, survivals, map_work=threaded_each,
-                               unit_batches=unit_batches)
+                               unit_batches=unit_batches, label_correlation=label_correlation)

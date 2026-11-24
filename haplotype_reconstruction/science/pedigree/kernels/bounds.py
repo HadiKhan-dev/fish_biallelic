@@ -25,8 +25,8 @@ OVERLOADS = {
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int8, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 5, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
         ),
         (
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
@@ -47,8 +47,8 @@ OVERLOADS = {
             types.Array(types.int64, 2, "C", readonly=True, aligned=True),
             types.Array(types.int8, 2, "C", readonly=True, aligned=True),
             types.Array(types.float64, 2, "C", readonly=True, aligned=True),
-            types.Array(types.float64, 5, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 3, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
         ),
     ),
     "certificates.dense_bridges": (
@@ -85,11 +85,9 @@ OVERLOADS = {
             types.float64,
         ),
     ),
-    "certificates.power_common": (
+    "certificates.scale_common": (
         (
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
         ),
     ),
     "certificates.vector_bridge": (
@@ -105,7 +103,7 @@ OVERLOADS = {
             types.float64,
         ),
     ),
-    "pair_bound._absorb_view": (
+    "pair_bound._absorb": (
         (
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
@@ -118,7 +116,6 @@ OVERLOADS = {
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.int64,
             types.int64,
-            types.float64,
             types.float64,
             types.float64,
             types.float64,
@@ -136,7 +133,6 @@ OVERLOADS = {
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.int64,
             types.int64,
-            types.float64,
             types.float64,
             types.float64,
             types.float64,
@@ -295,15 +291,12 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.int8, 3, "C", readonly=False, aligned=True),
             types.Array(types.int8, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=True, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
         ),
         (
@@ -315,15 +308,12 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.int8, 3, "C", readonly=False, aligned=True),
             types.Array(types.int8, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=True, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
         ),
         (
@@ -335,15 +325,12 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 3, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.boolean, 1, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
         ),
     ),
@@ -392,11 +379,8 @@ OVERLOADS = {
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.int8, 3, "C", readonly=False, aligned=True),
             types.Array(types.int8, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
@@ -424,8 +408,6 @@ OVERLOADS = {
     "pair_bound.scaled_emissions": (
         (
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
-            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
         ),
     ),
 }
@@ -446,11 +428,9 @@ _T2_OBSERVED = {
             types.Array(types.int8, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 7, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 6, "C", readonly=False, aligned=True),
             types.int64,
             types.int64,
-            types.int64,
-            types.float64,
             types.float64,
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
@@ -483,9 +463,7 @@ _T2_OBSERVED = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.float32, 3, "C", readonly=False, aligned=True),
             types.Array(types.float32, 3, "C", readonly=False, aligned=True),
             types.Array(types.float32, 3, "C", readonly=False, aligned=True),
         ),
@@ -496,16 +474,13 @@ _T2_OBSERVED = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.int8, 3, "C", readonly=False, aligned=True),
             types.Array(types.int8, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 7, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 6, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
         ),
@@ -516,6 +491,6 @@ for _name, _signatures in _T2_OBSERVED.items():
 
 
 OVERLOADS["read_bounds.class_bound_matrices"] = tuple(
-    sig[:14] + (_reset,) + sig[14:] for sig in OVERLOADS["read_bounds.class_bound_matrices"])
+    sig[:13] + (_reset,) + sig[13:] for sig in OVERLOADS["read_bounds.class_bound_matrices"])
 OVERLOADS["read_bounds.pair_bounds_classes"] = tuple(
-    sig[:15] + (_width,) + sig[15:] for sig in OVERLOADS["read_bounds.pair_bounds_classes"])
+    sig[:12] + (_width,) + sig[12:] for sig in OVERLOADS["read_bounds.pair_bounds_classes"])

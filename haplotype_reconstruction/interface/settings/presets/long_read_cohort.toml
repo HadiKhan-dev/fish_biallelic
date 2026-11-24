@@ -4,8 +4,8 @@
 # depth correlation by distance, heterozygote balance by local ALT density, allele bias shared between trios,
 # background error rates and within-sample error co-occurrence. long_read_mean_bp is the effective length of the reads
 # that reach the allele depths (split and filtered alignments included), not the library's read length. For missed
-# variants and reference blocks add the reference_blocks artefact preset with balance_dispersion = 0: this read model
-# already gives heterozygotes their spread.
+# variants (reported as reference blocks) add the reference_blocks artefact preset with balance_dispersion = 0: this
+# read model already gives heterozygotes their spread.
 [simulation.reads]
 read_length_bp = 0
 long_read_mean_bp = 3000.0

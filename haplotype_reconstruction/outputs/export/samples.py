@@ -64,6 +64,7 @@ def write_sample_phase(
     phase_breaks=None,
     frame_undetermined: np.ndarray | None = None,
     threads: int = 1,
+    extra_header: str = "",
 ) -> None:
     """Write one chromosome's phased calls int8 [N, L, 2] (-1 / 0 / 1) at ``positions`` (the kept rows of
     ``sites``) with the rows of ``sites`` to ``path`` (format "bcf" or "vcf").
@@ -72,7 +73,8 @@ def write_sample_phase(
     written in each column (the run's canonical sample order mapped back to the input order), applied
     chunk by chunk (no reordered copy of the calls). ``phase_breaks`` (per call row, int64 marker boundaries) and
     ``frame_undetermined`` (int8 [N, L], bit DISPLAYED_UNDETERMINED) are family phase's released phase ambiguity
-    (None = none)."""
+    (None = none). ``extra_header``: further meta-information lines (contamination_header) placed before the column
+    line."""
     positions = np.asarray(positions)
     calls = np.asarray(calls)
     components = np.asarray(components)
@@ -99,6 +101,7 @@ def write_sample_phase(
     )
     if synthetic:
         header += '##synthetic_alleles="A/C encode abstract simulated 0/1; not reference-genome bases"\n'
+    header += extra_header
     header += "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + "\t".join(names) + "\n"
     # Phase sets per call row: start indices (component starts, plus the site after each phase break); PS = the
     # position of the set's first site. Missing alleles remain dots; phase sets never cross components.
@@ -155,3 +158,21 @@ def write_sample_phase(
             writer.write_chunk(out[:written], line_ends)
     finally:
         writer.close()
+
+
+def contamination_header(decision) -> str:
+    """One meta-information line per corrected library (4.22 QC A: the owner's tier policy marks the library and its
+    downstream calls): ##contamination=<ID=sample,Tier=...,Alpha=...,Donor=...,AlphaLowerBound=0|1>; empty when the
+    run corrected no library. Alpha is the read fraction the correction uses (quality/contamination.csv)."""
+    from ..reports.quality import CONTAMINATION_COLUMNS, contamination_rows
+
+    lines = []
+    for row in contamination_rows(decision):
+        values = dict(zip(CONTAMINATION_COLUMNS, row, strict=True))
+        if values["corrected"] != "1":
+            continue
+        lines.append(
+            f"##contamination=<ID={values['sample']},Tier={values['tier']},Alpha={values['correction_alpha']},"
+            f"Donor={values['donor'] or '.'},AlphaLowerBound={values['alpha_lower_bound']}>\n"
+        )
+    return "".join(lines)

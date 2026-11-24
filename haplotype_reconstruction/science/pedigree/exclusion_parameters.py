@@ -7,20 +7,15 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ExclusionParameters:
-    """Full-marker Mendelian exclusion releasing M0/M1 counts without new edges."""
+    """Full-marker Mendelian exclusion releasing M0/M1 counts without new edges.
+
+    4.22 A11: the per-site ratio is scored under the observation model at each sample's own outlier rate from the
+    painting calibration (science.pedigree.exclusion._ratio); there is no genotype-replacement constant."""
 
     alpha: float = field(
         default=0.01,
         metadata={
             "provenance": "PD22; dimensionless exclusion level 0.01 sets the dyad log-e threshold log(2N/alpha).",
-        },
-    )
-    genotype_replacement_probability: float = field(
-        default=0.01,
-        metadata={
-            "provenance": (
-                "PD22; probability 0.01 of uniform genotype replacement in the Mendelian compatibility ratio."
-            ),
         },
     )
     bet_sizes: tuple[float, ...] = field(

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import fields
 from pathlib import Path
 
@@ -99,7 +99,7 @@ COLUMNS = {
         "InferenceStatus",
         "DAGDisplaced",
         "GraphConflict",
-        "GraphTieConflict",
+        "OrderRestricted",
         "GraphDirectionResolvedAlternative",
         "SelectedParentRoleProbability",
         "TierAStateCall",
@@ -139,7 +139,7 @@ COLUMNS = {
         "Identifiable",
         "DAGDisplaced",
         "GraphConflict",
-        "GraphTieConflict",
+        "OrderRestricted",
         "GraphDirectionResolvedAlternative",
         "LocalParentRoleProbability",
         "SelectedParentRoleProbability",
@@ -245,8 +245,7 @@ COLUMNS = {
         "StructuralStateLogEvidence",
         "StructuralIdentityEligible",
         "DirectionLogContribution",
-        "ReciprocalFamilyLogContribution",
-        "AncestryPathLogContribution",
+        "BirthOrderLogContribution",
         "AdjustedStateLogEvidence",
         "AdjustedIdentityLogEvidence",
         "ParentStateLogPrior",
@@ -284,7 +283,8 @@ COLUMNS = {
     "evidence_summary": ["Contig", "InformativeMarkers", "MeanMinimumAncestryJunctions", "MeanCallableHaplotypeBins"],
     "chromosome_summary": ["Contig", "ComponentCount", "ScoredComponentCount", "InformativeMarkers", "OmittedReason",
                            "ConfiguredMorgans"],
-    "block_summary": ["Contig", "Block", "Component", "FirstBin", "LastBin", "NominalIndex", "WorkingMorgans", "Bins", "InformativeMarkers"],
+    "block_summary": ["Contig", "Block", "Component", "FirstBin", "LastBin", "NominalIndex", "WorkingMorgans", "Bins",
+                      "InformativeMarkers"],
     "relative_contrasts": [
         "Sample",
         "CandidateParent",
@@ -537,7 +537,7 @@ def render(
 EXCLUSION_SUMMARY_FIELDS = (
     "model",
     "alpha",
-    "genotype_replacement_probability",
+    "unresolved_rate_samples",
     "conditional_on_supported_edge_directions",
     "candidate_dyads",
     "contigs",
@@ -583,17 +583,39 @@ def _painted_junction_summary(rates: np.ndarray) -> dict[str, float | str]:
     )
 
 
+_TIER_ORDER = {"clean": 0, "corrected": 1, "interpret_with_care": 2}
+_RELATIONSHIP_TABLES = ("tier_b_relationships", "tier_b_partial_relationships", "tier_a_relationships",
+                        "tier_a_partial_relationships", "complete_relationships")
+
+
+def _contamination_tiers(frame, tiers: Mapping[str, str]):
+    """Each row's worst contamination tier among the sample and its called parents (4.22 QC A)."""
+    def worst(row):
+        names = [row.get(c) for c in ("Sample", "Parent1", "Parent2")]
+        found = [tiers.get(str(n), "clean") for n in names if isinstance(n, str) and n]
+        return max(found or ["clean"], key=_TIER_ORDER.__getitem__)
+
+    return [worst(row) for row in frame.to_dict("records")]
+
+
 def write_pedigree(
-    output: str | Path, product: records.Pedigree, input_ids: Sequence[str] | None = None, *, map_work=None
+    output: str | Path, product: records.Pedigree, input_ids: Sequence[str] | None = None, *, map_work=None,
+    contamination: Mapping[str, str] | None = None,
 ) -> list[Path]:
     """Write every table of ``product.views``, the run summary; returns the paths written.
     ``input_ids``: the run's input sample order (the store manifest's, evidence.sample_order.store_input_order);
-    per-sample tables list their rows in it (the records keep the canonical order)."""
+    per-sample tables list their rows in it (the records keep the canonical order). ``contamination``: each sample's
+    contamination tier (quality/contamination.csv); the relationship tables mark every call by the worst tier among
+    the sample and its called parents (4.22 QC A)."""
     from .tables import frame_in_input_order
 
     rates = (np.full(len(product.sample_ids), np.nan) if product.retained is None
              else _painted_junction_rates(product.retained.decision.scores))
     frames = render(product.views, product.sample_ids, painted_junctions_per_morgan=rates)
+    if contamination is not None:
+        for name in _RELATIONSHIP_TABLES:
+            if frames.get(name) is not None:
+                frames[name]["ContaminationTier"] = _contamination_tiers(frames[name], contamination)
     exclusion = record_mapping(product.exclusion)
     certifiable = product.views.exclusion_evidence.certifiable
     if certifiable is not None and not np.all(certifiable):
@@ -615,7 +637,7 @@ def write_pedigree(
                 informative_contigs=list(product.informative_contigs),
                 omitted=dict(product.omitted),
                 reach=record_mapping(product.reach),
-                family_solve=record_mapping(product.family_solve),
+                birth_order=record_mapping(product.birth_order),
                 exclusion={name: exclusion[name] for name in EXCLUSION_SUMMARY_FIELDS if name in exclusion},
                 eligibility=record_mapping(product.eligibility),
                 sibling_guard=record_mapping(product.guard_summary),
@@ -640,6 +662,7 @@ TIER_B_RELATIONSHIPS_COLUMNS = (
     "InferenceStatus",
     "ReleaseEvidence",
     "RelationshipBasis",
+    "ContaminationTier",
 )
 """Columns in published order.
 
@@ -651,6 +674,8 @@ TIER_B_RELATIONSHIPS_COLUMNS = (
     InferenceStatus: inference status (1).
     ReleaseEvidence: release evidence (1).
     RelationshipBasis: family when every released parent passes the family score threshold; pair_only otherwise (text).
+    ContaminationTier: worst contamination tier among the sample and its called parents: clean, corrected or
+        interpret_with_care (quality/contamination.csv; 4.22) (text).
 """
 
 TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS = (
@@ -667,6 +692,7 @@ TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS = (
     "ObservedParentCountMaximum",
     "ReleaseEvidence",
     "RelationshipBasis",
+    "ContaminationTier",
 )
 """Columns in published order.
 
@@ -683,6 +709,8 @@ TIER_B_PARTIAL_RELATIONSHIPS_COLUMNS = (
     ObservedParentCountMaximum: observed parent count maximum (1).
     ReleaseEvidence: release evidence (1).
     RelationshipBasis: family when every released parent passes the family score threshold; pair_only otherwise (text).
+    ContaminationTier: worst contamination tier among the sample and its called parents: clean, corrected or
+        interpret_with_care (quality/contamination.csv; 4.22) (text).
 """
 
 TIER_A_RELATIONSHIPS_COLUMNS = (
@@ -693,6 +721,7 @@ TIER_A_RELATIONSHIPS_COLUMNS = (
     "ObservedParentCount",
     "InferenceStatus",
     "RelationshipBasis",
+    "ContaminationTier",
 )
 """Columns in published order.
 
@@ -703,6 +732,8 @@ TIER_A_RELATIONSHIPS_COLUMNS = (
     ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
     InferenceStatus: inference status (1).
     RelationshipBasis: family when every released parent passes the family score threshold; pair_only otherwise (text).
+    ContaminationTier: worst contamination tier among the sample and its called parents: clean, corrected or
+        interpret_with_care (quality/contamination.csv; 4.22) (text).
 """
 
 TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS = (
@@ -718,6 +749,7 @@ TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS = (
     "ObservedParentCountMinimum",
     "ObservedParentCountMaximum",
     "RelationshipBasis",
+    "ContaminationTier",
 )
 """Columns in published order.
 
@@ -733,6 +765,8 @@ TIER_A_PARTIAL_RELATIONSHIPS_COLUMNS = (
     ObservedParentCountMinimum: observed parent count minimum (1).
     ObservedParentCountMaximum: observed parent count maximum (1).
     RelationshipBasis: family when every released parent passes the family score threshold; pair_only otherwise (text).
+    ContaminationTier: worst contamination tier among the sample and its called parents: clean, corrected or
+        interpret_with_care (quality/contamination.csv; 4.22) (text).
 """
 
 COMPLETE_RELATIONSHIPS_COLUMNS = (
@@ -742,6 +776,7 @@ COMPLETE_RELATIONSHIPS_COLUMNS = (
     "ParentState",
     "ObservedParentCount",
     "InferenceStatus",
+    "ContaminationTier",
 )
 """Columns in published order.
 
@@ -751,6 +786,8 @@ COMPLETE_RELATIONSHIPS_COLUMNS = (
     ParentState: released M0/M1/M2 state label (text).
     ObservedParentCount: released sequenced-parent count; unresolved values remain NaN (1).
     InferenceStatus: inference status (1).
+    ContaminationTier: worst contamination tier among the sample and its called parents: clean, corrected or
+        interpret_with_care (quality/contamination.csv; 4.22) (text).
 """
 
 TIER_B_CANDIDATE_SETS_COLUMNS = (
@@ -800,7 +837,7 @@ PARENT_STATE_CALLS_COLUMNS = (
     "InferenceStatus",
     "DAGDisplaced",
     "GraphConflict",
-    "GraphTieConflict",
+    "OrderRestricted",
     "GraphDirectionResolvedAlternative",
     "SelectedParentRoleProbability",
     "TierAStateCall",
@@ -818,7 +855,7 @@ PARENT_STATE_CALLS_COLUMNS = (
     InferenceStatus: inference status (1).
     DAGDisplaced: dag displaced (1).
     GraphConflict: graph conflict (1).
-    GraphTieConflict: graph tie conflict (1).
+    OrderRestricted: the joint read restricted this child to the consensus birth order (1).
     GraphDirectionResolvedAlternative: graph direction resolved alternative (1).
     SelectedParentRoleProbability: selected parent role probability (1).
     TierAStateCall: tier a state call (1).
@@ -859,7 +896,7 @@ DIAGNOSTICS_COLUMNS = (
     "Identifiable",
     "DAGDisplaced",
     "GraphConflict",
-    "GraphTieConflict",
+    "OrderRestricted",
     "GraphDirectionResolvedAlternative",
     "LocalParentRoleProbability",
     "SelectedParentRoleProbability",
@@ -954,16 +991,19 @@ DIAGNOSTICS_COLUMNS = (
     Identifiable: identifiable (1).
     DAGDisplaced: dag displaced (1).
     GraphConflict: graph conflict (1).
-    GraphTieConflict: graph tie conflict (1).
+    OrderRestricted: the joint read restricted this child to the consensus birth order (1).
     GraphDirectionResolvedAlternative: graph direction resolved alternative (1).
     LocalParentRoleProbability: local parent role probability (1).
     SelectedParentRoleProbability: selected parent role probability (1).
     RawAncestryJunctionCount: raw ancestry junction count (1).
     CallableAncestryHaplotypeBinCount: callable ancestry haplotype bin count (1).
-    PaintedJunctionsPerMorgan: minimum painted founder switches per homologue per Morgan of callable painting on the configured working map; missing for zero callable map length; reported only, never used in a decision (1/Morgan).
+    PaintedJunctionsPerMorgan: minimum painted founder switches per homologue per Morgan of callable painting on the
+        configured working map; missing for zero callable map length; reported only, never used in a decision
+        (1/Morgan).
     AdjustedAncestryJunctionBurden: adjusted ancestry junction burden (1).
     AncestryPaintingCallabilityFraction: ancestry painting callability fraction (1).
-    InformativeUnitCount: material units (1-Morgan units of the working map) on which the child's own evidence picks a unique parent count (1).
+    InformativeUnitCount: material units (1-Morgan units of the working map) on which the child's own evidence picks a
+        unique parent count (1).
     InformativeMorgans: working Morgans of those units; reported only (Morgans).
     LocalStateBootstrapFraction: local state bootstrap fraction (1).
     LocalConfigurationBootstrapFraction: local configuration bootstrap fraction (1).
@@ -1095,8 +1135,7 @@ ALTERNATIVE_EXPLANATIONS_COLUMNS = (
     "StructuralStateLogEvidence",
     "StructuralIdentityEligible",
     "DirectionLogContribution",
-    "ReciprocalFamilyLogContribution",
-    "AncestryPathLogContribution",
+    "BirthOrderLogContribution",
     "AdjustedStateLogEvidence",
     "AdjustedIdentityLogEvidence",
     "ParentStateLogPrior",
@@ -1117,8 +1156,7 @@ ALTERNATIVE_EXPLANATIONS_COLUMNS = (
     StructuralStateLogEvidence: structural state log evidence (nats).
     StructuralIdentityEligible: structural identity eligible (1).
     DirectionLogContribution: direction log contribution (nats).
-    ReciprocalFamilyLogContribution: reciprocal family log contribution (nats).
-    AncestryPathLogContribution: ancestry path log contribution (nats).
+    BirthOrderLogContribution: log P_hat + log multiplicity - input weight; includes normalizer, multiplicity (nats).
     AdjustedStateLogEvidence: adjusted state log evidence (nats).
     AdjustedIdentityLogEvidence: adjusted identity log evidence (nats).
     ParentStateLogPrior: parent state log prior (nats).
@@ -1212,7 +1250,8 @@ CHROMOSOME_SUMMARY_COLUMNS = (
     ScoredComponentCount: scored component count (1).
     InformativeMarkers: informative markers (1).
     OmittedReason: omitted reason (1).
-    ConfiguredMorgans: configured working-map Morgans of [0, the contig's last evidence position]: its fixed weight in the Mendelian exclusion e-value (Morgans).
+    ConfiguredMorgans: configured working-map Morgans of [0, the contig's last evidence position]: its fixed weight in
+        the Mendelian exclusion e-value (Morgans).
 """
 
 RELATIVE_CONTRASTS_COLUMNS = (
@@ -1397,7 +1436,10 @@ def separate_collections(frames, views, names, input_ids=None):
     return items
 
 
-BLOCK_SUMMARY_COLUMNS = ("Contig", "Block", "Component", "FirstBin", "LastBin", "NominalIndex", "WorkingMorgans", "Bins", "InformativeMarkers")
+BLOCK_SUMMARY_COLUMNS = (
+    "Contig", "Block", "Component", "FirstBin", "LastBin", "NominalIndex", "WorkingMorgans", "Bins",
+    "InformativeMarkers",
+)
 """Low-material block table, in decision order.
 
     Contig: original informative chromosome identifier (text).

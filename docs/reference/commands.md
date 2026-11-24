@@ -143,7 +143,7 @@ Assemble one contig; also paint it (and record its refit histogram) after run ca
 
 ## calibrate
 
-Calibrate painting across all final assemblies.
+Calibrate painting across all final assemblies or run one calibration round.
 
 | Argument | Arity | Default | Choices | Help |
 |---|---|---|---|---|
@@ -167,10 +167,15 @@ Calibrate painting across all final assemblies.
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
 | `--set` | 1 | `[]` | — | Override one setting (repeatable), e.g. quality.read_calibration=false. |
+| `--contig` | 1 | `—` | — | Analysed contig for a calibration fit round. |
+| `--stage` | 1 | `—` | robustness, refine, outlier, divisor | Calibration round (default with --contig: robustness). Requires --contig except for the run-wide outlier reduction and divisor inventory (--list-fits). |
+| `--fold` | 1 | `—` | — | Zero-based held-out fold for a divisor fit. |
+| `--divisor` | 1 | `—` | — | Candidate to fit. Omit to fit the whole fold. |
+| `--list-fits` | 0 | `False` | — | Print the active divisor fits as JSON after the outlier reduction. Use --stage divisor without --contig. |
 
 ## pedigree
 
-Refit every contig under the run's class priors, then gather the genome-wide pedigree.
+Run the pedigree or publish a checkpoint step of the scattered workflow.
 
 | Argument | Arity | Default | Choices | Help |
 |---|---|---|---|---|
@@ -194,6 +199,8 @@ Refit every contig under the run's class priors, then gather the genome-wide ped
 | `--tie-keep` | + | `()` | — | Keep these tie conventions (developer). |
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
 | `--set` | 1 | `[]` | — | Override one setting (repeatable), e.g. quality.read_calibration=false. |
+| `--contig` | 1 | `—` | — | Analysed contig for prepare, map-inputs or map-frames. |
+| `--stage` | 1 | `—` | contamination, refit-priors, prepare, map-inputs, map-pairs, map-frames, gather | Publish one checkpoint step. With --contig alone, run prepare. |
 
 ## phase
 

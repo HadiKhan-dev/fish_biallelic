@@ -101,7 +101,7 @@ class Geometry:
             children, p.state_alt, t.gl, t.coefficient, t.site_index, t.site_start, t.site_stop, t.mismatch
         )
         claim_threads()
-        powered, scales = kernel.power_common(common, children, t.exponent)
+        scaled, scales = kernel.scale_common(common)
         answers = []
         for partition in self.partitions:
             upper = np.zeros((len(children), len(p.available)))
@@ -126,7 +126,7 @@ class Geometry:
                     p.pivot,
                     p.branch,
                     p.excursion,
-                    powered,
+                    scaled,
                     scales,
                 )
                 active = np.flatnonzero(b.which >= 0)

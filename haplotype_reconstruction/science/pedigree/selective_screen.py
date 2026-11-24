@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ...contracts.pedigree import ParentEligibility, PreparedChromosome
-from . import forward, read_score, resident
+from . import read_score, resident
 from .parameters import PedigreeParameters
 from .selective_bounds import Geometry
 
@@ -30,8 +30,6 @@ class Component:
     zero: np.ndarray
     cache_range: tuple[int, int] | None = None
     products: np.ndarray | None = None
-    powered: np.ndarray | None = None
-    columns: tuple[np.ndarray, np.ndarray] | None = None
     classes: np.ndarray | None = None
     classes_range: tuple[int, int] | None = None
     scored: tuple[tuple[int, int], np.ndarray, np.ndarray] | None = None
@@ -43,7 +41,7 @@ class Component:
         the children's), ``eligible`` bool [len(children), N] the pairs the screen may query (default: all; the others
         are +inf). With the read state the bound is the exact M1 of every eligible pair (EXACT_CERTIFICATE), which the
         batch's queries then read."""
-        self.cache_range = self.products = self.powered = self.columns = self.classes = self.scored = None
+        self.cache_range = self.products = self.classes = self.scored = None
         p, t = self.resident.projection, self.resident.terms
         if t.n_classes > 1:
             first, stop = span if span is not None else (
@@ -70,19 +68,12 @@ class Component:
                 return values[rows, pairs[:, 1]]
         if self.cache_range != (first, stop):
             self.claim()
-            self.products, self.powered = t.common_null_second(p, first, stop)
-            self.columns = (
-                forward.named_column_powers(self.products, t.exponent, first)
-                if self.products is not None and self.powered is not None
-                else None
-            )
+            self.products = t.common_null_second(p, first, stop)
             if self.classes is None or self.classes_range != (first, stop):
                 self.classes = t.class_cache(p, first, stop)
                 self.classes_range = (first, stop)
             self.cache_range = (first, stop)
-        return read_score.component_m1(
-            p, t, pairs, self.zero, first, self.products, self.powered, self.claim, self.columns, self.classes
-        )
+        return read_score.component_m1(p, t, pairs, self.zero, first, self.products, self.claim, self.classes)
 
 
 def prepare(

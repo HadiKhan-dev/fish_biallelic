@@ -174,7 +174,6 @@ class ContigTruth:
     flips: TruthFlips = record_field("obs", units="1", dtype="TruthFlips")
     dropped_positions: np.ndarray = record_field("obs", axes=("D",), units="bp", dtype="int64")
     missed: np.ndarray | None = record_field("obs", axes=("N", "L"), units="1", dtype="bool | None", default=None)
-    block: np.ndarray | None = record_field("obs", axes=("N", "L"), units="1", dtype="bool | None", default=None)
     systematic_site: np.ndarray | None = record_field("obs", axes=("L",), units="1", dtype="bool | None", default=None)
     spurious: np.ndarray | None = record_field("obs", axes=("L",), units="1", dtype="bool | None", default=None)
     structure: StructureTruth | None = record_field("obs", units="1", dtype="StructureTruth | None", default=None)
@@ -185,6 +184,19 @@ class ContigTruth:
         "obs", axes=("N", "L", "2"), units="1", dtype="int8 | None", default=None
     )
     injected_mask: np.ndarray | None = record_field("obs", axes=("N", "L"), units="1", dtype="bool | None", default=None)
+    # Library artefacts (4.22): each library's realised contamination share and donor identifier ("" when clean), and
+    # its PCR duplicate rate; None when the mode is off (the released record has no key).
+    contamination_share: np.ndarray | None = record_field(
+        "obs", axes=("N",), units="1", dtype="float64 | None", default=None
+    )
+    contamination_donor: tuple | None = record_field("obs", axes=("N",), units="1", dtype="tuple | None", default=None)
+    duplicate_rate: np.ndarray | None = record_field(
+        "obs", axes=("N",), units="1", dtype="float64 | None", default=None
+    )
+    # Each library's error factor (library_error_sigma); None when off.
+    library_error_factor: np.ndarray | None = record_field(
+        "obs", axes=("N",), units="1", dtype="float64 | None", default=None
+    )
     schema: int = schema_field(SCHEMA)
 
     def __post_init__(self) -> None:
@@ -310,6 +322,9 @@ def truth_record(truth: ContigTruth) -> dict:
     if truth.injected_mask is None:
         result.pop("injected_alleles")
         result.pop("injected_mask")
+    for name in ("contamination_share", "contamination_donor", "duplicate_rate", "library_error_factor"):
+        if result.get(name) is None:
+            result.pop(name)
     return result
 
 
@@ -328,4 +343,6 @@ def truth_from_record(payload: dict) -> ContigTruth:
         values[name] = cls(**values[name])
     if values.get("structure") is not None:
         values["structure"] = StructureTruth(**values["structure"])
+    if values.get("contamination_donor") is not None:
+        values["contamination_donor"] = tuple(map(str, values["contamination_donor"]))
     return ContigTruth(**values)

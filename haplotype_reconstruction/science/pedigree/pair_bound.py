@@ -4,7 +4,7 @@ The M2 panel (``panel.bounded_panel``) holds every pair of a child's retained pa
 child's pairs when they exceed the per-child cap (the largest full-data bounds are kept, the child is flagged, and
 the cap can discard competitive pairs). The exact M2 forward (``forward.component_m2``) runs on the resulting panel.
 
-The bound relaxes the M2 forward of one component (``forward.score_path`` mode 2; both views) by STATE AGGREGATION.
+The bound relaxes the M2 forward of one component (``read_forward.score_path`` mode 2) by STATE AGGREGATION.
 Each parent's states at each bin are grouped: every state with transmitted-state mass pi >= ``high_mass`` is its own
 group, BACKGROUND is its own group, and the remaining named states form one low group. The aggregated forward uses
 (i) the exact initial mass of each group, (ii) the largest exact row mass of the parent's bridge-with-excursion
@@ -15,20 +15,19 @@ The two slots keep their own chains, and the emission couples them bin by bin: a
 sum of its parents' separate fits.
 
 Emission bounds, valid for every candidate pair: named founder states transmit their panel allele (or BACKGROUND's
-frequency where uncalled) in every candidate (``read_source_kernels._background_alt`` never conditions them), so their joint
-emissions are exact child-level values. BACKGROUND is the only candidate-specific state: its ALT probability lies in
-the component's range over every allele a slot can transmit as BACKGROUND (the available candidates' read-conditioned
+frequency where uncalled) in every candidate (``read_source_kernels._background_alt`` never conditions them), so their
+joint emissions are exact child-level values. BACKGROUND is the only candidate-specific state: its ALT probability lies
+in the component's range over every allele a slot can transmit as BACKGROUND (the available candidates' read-conditioned
 values and, when the component has an evidence-free candidate, the null chain's unconditional frequency), and the
-per-site likelihood is bilinear in the two transmitted ALT probabilities (it peaks at a corner of that box); in
-addition a pair whose parent q is in BACKGROUND is capped by q's own partner bound (q's actual BACKGROUND alleles
-against the best partner state in that range). An unavailable candidate (no source evidence; production scores the
-pair as the other parent's M1, or M0, with the child's null chain in its slot) is one group with the largest
-null-kernel row sum as its transition. The tempered view raises the same bounds to the bin's information exponent
-(monotone). Each bin's normaliser enters through its own logarithm, and a bin whose aggregated mass would underflow
-is redone in the log domain, so a valid bound never becomes infinite or NaN through rounding.
+per-site likelihood is bilinear in the two transmitted ALT probabilities (it peaks at a corner of that box); in addition
+a pair whose parent q is in BACKGROUND is capped by q's own partner bound (q's actual BACKGROUND alleles against the
+best partner state in that range). An unavailable candidate (no source evidence; production scores the pair as the other
+parent's M1, or M0, with the child's null chain in its slot) is one group with the largest null-kernel row sum as its
+transition. Each bin's normaliser enters through its own logarithm, and a bin whose aggregated mass would underflow is
+redone in the log domain, so a valid bound never becomes infinite or NaN through rounding.
 
-Cost per pair and bin: a few joint groups (two to four per slot when paintings are confident), two small group
-transitions and two normalisations; emission probabilities are exponentiated once per child and bin, in tables
+Cost per pair and bin: a few joint groups (two to four per slot when paintings are confident), one small group
+transition and one normalisation; emission probabilities are exponentiated once per child and bin, in tables
 indexed by the batch's listed children. Per child the work is linear in its number of retained pairs; there is no
 per-site work per pair.
 
@@ -345,17 +344,14 @@ def slot_groups(
 
 
 @kernel(overloads=OVERLOADS["pair_bound.scaled_emissions"], cache=True, parallel=True, nogil=True)
-def scaled_emissions(log_emission, exponent, child_list):
-    """Emission bounds relative to each child and bin's best state pair: (full, tempered [n, B, S, S] probabilities,
-    their summed log offsets [n] per view, the bin maxima [n, B])."""
+def scaled_emissions(log_emission):
+    """Emission bounds relative to each child and bin's best state pair: (probabilities [n, B, S, S], their summed
+    log offset [n], the bin maxima [n, B])."""
     children, bins, states, _ = log_emission.shape
-    full = np.zeros(log_emission.shape)
-    tempered = np.zeros(log_emission.shape)
+    scaled = np.zeros(log_emission.shape)
     top = np.full((children, bins), -np.inf)
-    offset_full = np.zeros(children)
-    offset_tempered = np.zeros(children)
+    offset = np.zeros(children)
     for local in prange(children):
-        child = child_list[local]
         for block in range(bins):
             maximum = -np.inf
             for x in range(states):
@@ -365,16 +361,11 @@ def scaled_emissions(log_emission, exponent, child_list):
             top[local, block] = maximum
             if not np.isfinite(maximum):
                 continue
-            eta = exponent[child, block]
-            offset_full[local] += maximum
-            if eta != 0.0:
-                offset_tempered[local] += eta * maximum
+            offset[local] += maximum
             for x in range(states):
                 for y in range(states):
-                    d = log_emission[local, block, x, y] - maximum
-                    full[local, block, x, y] = math.exp(d)
-                    tempered[local, block, x, y] = 1.0 if eta == 0.0 else math.exp(eta * d)
-    return full, tempered, offset_full, offset_tempered, top
+                    scaled[local, block, x, y] = math.exp(log_emission[local, block, x, y] - maximum)
+    return scaled, offset, top
 
 
 @kernel(overloads=OVERLOADS["pair_bound._step"], cache=True, nogil=True)
@@ -421,8 +412,8 @@ def _log_absorb(alpha, log_group, n_p, n_q):
     return maximum + math.log(total)
 
 
-@kernel(overloads=OVERLOADS["pair_bound._absorb_view"], cache=True, nogil=True)
-def _absorb_view(
+@kernel(overloads=OVERLOADS["pair_bound._absorb"], cache=True, nogil=True)
+def _absorb(
     alpha,
     saved,
     factor,
@@ -435,13 +426,13 @@ def _absorb_view(
     local,
     block,
     maximum,
-    eta,
     cap_p,
     cap_q,
     states,
 ):
-    """Multiply one view's aggregated forward by its group emissions and normalise; returns (log normaliser or
-    -inf, whether the probability path was used). The log path redoes an underflowing bin from the log bounds."""
+    """Multiply the aggregated forward by its group emissions and normalise; returns (normaliser, True) on the
+    probability path, else (log normaliser or -inf, False): the log path redoes an underflowing bin from the log
+    bounds."""
     background = states - 1
     total = 0.0
     for i in range(n_p):
@@ -462,15 +453,11 @@ def _absorb_view(
         gx = group_p[x]
         for y in range(states):
             gy = group_q[y]
-            if eta == 0.0:
-                v = 0.0
-            else:
-                v = log_emission[local, block, x, y] - maximum
-                if x == background and cap_p < v:
-                    v = cap_p
-                if y == background and cap_q < v:
-                    v = cap_q
-                v *= eta
+            v = log_emission[local, block, x, y] - maximum
+            if x == background and cap_p < v:
+                v = cap_p
+            if y == background and cap_q < v:
+                v = cap_q
             if v > log_group[gx, gy]:
                 log_group[gx, gy] = v
     return _log_absorb(alpha, log_group, n_p, n_q), False
@@ -485,124 +472,67 @@ def _pair_row(
     entry_q,
     partner,
     log_emission,
-    full_e,
-    tempered_e,
+    scaled,
     top,
-    exponent,
     group,
     count,
     initial,
     transfer,
     available,
-    partner_full,
-    partner_tempered,
+    partner_scaled,
 ):
     states = log_emission.shape[2]
     bins = log_emission.shape[1]
     background = states - 1
     groups = initial.shape[1]
-    child, p, q = trios[row, 0], trios[row, 1], trios[row, 2]
+    p, q = trios[row, 1], trios[row, 2]
     local = row_child[row]
-    a_full = np.zeros((groups, groups))
-    a_temp = np.zeros((groups, groups))
+    alpha = np.zeros((groups, groups))
     work = np.empty((groups, groups))
-    g_full = np.empty((groups, groups))
-    g_temp = np.empty((groups, groups))
+    factor = np.empty((groups, groups))
     saved = np.empty((groups, groups))
     log_group = np.empty((groups, groups))
     for i in range(count[p, 0]):
         for j in range(count[q, 0]):
-            a_full[i, j] = initial[p, i] * initial[q, j]
-            a_temp[i, j] = a_full[i, j]
-    log_full = 0.0
-    log_temp = 0.0
+            alpha[i, j] = initial[p, i] * initial[q, j]
+    log_likelihood = 0.0
     for block in range(bins):
         n_p, n_q = count[p, block], count[q, block]
         if block > 0:
-            a_p, a_q = count[p, block - 1], count[q, block - 1]
-            _step(a_full, work, a_p, a_q, n_p, n_q, transfer[p, block - 1], transfer[q, block - 1])
-            _step(a_temp, work, a_p, a_q, n_p, n_q, transfer[p, block - 1], transfer[q, block - 1])
+            _step(alpha, work, count[p, block - 1], count[q, block - 1], n_p, n_q, transfer[p, block - 1],
+                  transfer[q, block - 1])
         maximum = top[local, block]
         if not np.isfinite(maximum):
             return -np.inf
-        eta = exponent[child, block]
         cap_p = partner[entry_p[row], block] - maximum if available[p] else np.inf
         cap_q = partner[entry_q[row], block] - maximum if available[q] else np.inf
-        pf_p = partner_full[entry_p[row], block] if available[p] else 1.0
-        pf_q = partner_full[entry_q[row], block] if available[q] else 1.0
-        pt_p = partner_tempered[entry_p[row], block] if available[p] else 1.0
-        pt_q = partner_tempered[entry_q[row], block] if available[q] else 1.0
+        ps_p = partner_scaled[entry_p[row], block] if available[p] else 1.0
+        ps_q = partner_scaled[entry_q[row], block] if available[q] else 1.0
         for i in range(n_p):
             for j in range(n_q):
-                g_full[i, j] = 0.0
-                g_temp[i, j] = 0.0
+                factor[i, j] = 0.0
         group_p = group[p, block]
         group_q = group[q, block]
         for x in range(states):
             gx = group_p[x]
             for y in range(states):
                 gy = group_q[y]
-                vf = full_e[local, block, x, y]
-                vt = tempered_e[local, block, x, y]
+                v = scaled[local, block, x, y]
                 if x == background:
-                    vf = min(vf, pf_p)
-                    vt = min(vt, pt_p)
+                    v = min(v, ps_p)
                 if y == background:
-                    vf = min(vf, pf_q)
-                    vt = min(vt, pt_q)
-                if vf > g_full[gx, gy]:
-                    g_full[gx, gy] = vf
-                if vt > g_temp[gx, gy]:
-                    g_temp[gx, gy] = vt
-        value, scaled = _absorb_view(
-            a_full,
-            saved,
-            g_full,
-            log_group,
-            n_p,
-            n_q,
-            group_p,
-            group_q,
-            log_emission,
-            local,
-            block,
-            maximum,
-            1.0,
-            cap_p,
-            cap_q,
-            states,
-        )
-        if scaled:
-            log_full += math.log(value)
+                    v = min(v, ps_q)
+                if v > factor[gx, gy]:
+                    factor[gx, gy] = v
+        value, probability = _absorb(alpha, saved, factor, log_group, n_p, n_q, group_p, group_q, log_emission, local,
+                                     block, maximum, cap_p, cap_q, states)
+        if probability:
+            log_likelihood += math.log(value)
         elif np.isfinite(value):
-            log_full += value
+            log_likelihood += value
         else:
             return -np.inf
-        value, scaled = _absorb_view(
-            a_temp,
-            saved,
-            g_temp,
-            log_group,
-            n_p,
-            n_q,
-            group_p,
-            group_q,
-            log_emission,
-            local,
-            block,
-            maximum,
-            eta,
-            cap_p,
-            cap_q,
-            states,
-        )
-        if scaled:
-            log_temp += math.log(value)
-        elif np.isfinite(value):
-            log_temp += value
-        else:
-            return -np.inf
-    return 0.5 * (log_full + log_temp)
+    return log_likelihood
 
 
 @kernel(overloads=OVERLOADS["pair_bound.pair_bounds"], cache=True, parallel=True, nogil=True)
@@ -613,61 +543,32 @@ def pair_bounds(
     entry_q,
     partner,
     log_emission,
-    full_e,
-    tempered_e,
+    scaled,
     top,
-    offset_full,
-    offset_tempered,
-    exponent,
+    offset,
     group,
     count,
     initial,
     transfer,
     available,
 ):
-    """float64 [T]: the bound on 0.5 (tempered + full) M2 of each row (child, first, second) on one component;
+    """float64 [T]: the bound on the M2 log likelihood of each row (child, first, second) on one component;
     ``row_child`` is each row's position in the batch's child list (the emission tables' first axis)."""
     # Every retained-parent entry belongs to one child. Its cap is reused by all
     # that child's pairs, so exponentiate it once per entry and bin, not per pair.
-    entry_child = np.zeros(partner.shape[0], dtype=np.int64)
     entry_local = np.zeros(partner.shape[0], dtype=np.int64)
     for row in range(trios.shape[0]):
-        entry_child[entry_p[row]] = trios[row, 0]
-        entry_child[entry_q[row]] = trios[row, 0]
         entry_local[entry_p[row]] = row_child[row]
         entry_local[entry_q[row]] = row_child[row]
-    partner_full = np.ones(partner.shape)
-    partner_tempered = np.ones(partner.shape)
+    partner_scaled = np.ones(partner.shape)
     for entry in prange(partner.shape[0]):
         for block in range(partner.shape[1]):
             cap = partner[entry, block] - top[entry_local[entry], block]
-            eta = exponent[entry_child[entry], block]
             if cap < 0.0:
-                partner_full[entry, block] = math.exp(cap)
-                if eta != 0.0:
-                    partner_tempered[entry, block] = math.exp(eta * cap)
+                partner_scaled[entry, block] = math.exp(cap)
     out = np.empty(trios.shape[0])
     for row in prange(trios.shape[0]):
-        value = _pair_row(
-            row,
-            trios,
-            row_child,
-            entry_p,
-            entry_q,
-            partner,
-            log_emission,
-            full_e,
-            tempered_e,
-            top,
-            exponent,
-            group,
-            count,
-            initial,
-            transfer,
-            available,
-            partner_full,
-            partner_tempered,
-        )
-        local = row_child[row]
-        out[row] = value + 0.5 * (offset_full[local] + offset_tempered[local])
+        value = _pair_row(row, trios, row_child, entry_p, entry_q, partner, log_emission, scaled, top, group, count,
+                          initial, transfer, available, partner_scaled)
+        out[row] = value + offset[row_child[row]]
     return out

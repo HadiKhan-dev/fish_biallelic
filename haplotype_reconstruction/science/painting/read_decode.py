@@ -43,6 +43,12 @@ class ReadEmissions:
     # when the confidence strength differs from the path's: a callable returning its (read, read_log), built only when
     # a caller asks (the decode's release posteriors; the copying-model fits and label continuity never do)
     confidence: Callable[[], tuple[np.ndarray, np.ndarray]] | None = None
+    # when the label-error strength (parameters.LABEL_ERROR_CORRELATION) differs from both run strengths: a callable
+    # returning its (read, read_log), built only when the reference decode asks (at_label)
+    label: Callable[[], tuple[np.ndarray, np.ndarray]] | None = None
+    # float64[N, U, B]: the bin-level tempering correction read_log carries (read_factor.read_matrices ``shift``);
+    # calibration gives the hidden blocks' visible part the same correction (read_calibration)
+    read_shift: np.ndarray | None = None
 
     def at_confidence(self, scaled_raw):
         """The batch at the confidence strength: the label emissions rescaled by the caller (emissions.confidence_scale)
@@ -50,6 +56,15 @@ class ReadEmissions:
         if self.confidence is None:
             return ReadEmissions(scaled_raw, self.read, self.read_log, self.initial, self.minor)
         read, read_log = self.confidence()
+        return ReadEmissions(scaled_raw, read, read_log, self.initial, self.minor)
+
+    def at_label(self, scaled_raw):
+        """The batch at the label-error strength: the label emissions rescaled by the caller (emissions.confidence_scale
+        to that strength) and the read matrices built at its weights (the path strength's when it has none: a unit
+        batch, whose matrices do not depend on the strength, or a label strength equal to the path's)."""
+        if self.label is None:
+            return ReadEmissions(scaled_raw, self.read, self.read_log, self.initial, self.minor)
+        read, read_log = self.label()
         return ReadEmissions(scaled_raw, read, read_log, self.initial, self.minor)
 
     def path_only(self):

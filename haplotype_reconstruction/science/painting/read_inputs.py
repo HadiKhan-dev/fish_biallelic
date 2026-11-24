@@ -13,8 +13,9 @@ every unordered label pair and bin (painting.read_factor), built from
   branch) and the bins' design-effect weights (the factor's tempering, R ** w, at the path strength and, when it
   differs, the confidence strength).
 
-Calibration parts (``parts``) are served by the base builder unchanged: the divisors are chosen on the model without
-read state. The stage (stages.painting.read_state) reads the contig's inputs and builds this builder."""
+The path divisor is fixed. The confidence divisor is chosen by read_calibration on the read-state chain. The base
+builder serves label continuity's scalar part emissions (``parts``). The stage (stages.painting.read_state) reads
+the contig's inputs and builds this builder."""
 
 from __future__ import annotations
 
@@ -70,7 +71,8 @@ class ReadEmissionBuilder:
     survival law; error_rate float64[N]; covering float64[N] covering depth per homologue; cohort float64[L_evidence,
     3]; minor the split-class parameter (2 minor + 3 classes); library int64[N] and survivals (one law per library,
     None for the all-sample law) the libraries; confidence_correlation the confidence strength's correlation (None
-    when it equals the path's).
+    when it equals the path's); label_correlation the label-error strength's (parameters.LABEL_ERROR_CORRELATION;
+    None when no decode of this builder reads the label-error statistic).
 
     The label-independent parts of a sample batch (composed class operators, class laws and class likelihoods:
     functions of the counts, the batch's rows and the component's selected sites only) are cached per (rows, contig
@@ -85,14 +87,16 @@ class ReadEmissionBuilder:
     A sample BYPASSES the read state (identity read state: one class, unit matrices, so its chain is the emission
     without read state exactly) when its every called depth over the span is at the deep bound (reads.deep_rows), or
     when its library shows no read sharing (its survival law's status is 'none': reads.fit_survival found no lag bin
-    with sharing). Without sharing the read state carries nothing, while the tempered per-class factor R_s ** w at
-    w < 1 is not neutral: sum_s pi_s R_s ** w < 1 (Jensen) penalises heterozygous label pairs, about 8 nats per bin
-    measured (lab421, GPT 6.2 Astra 421b_lr_tempering_form; Tier 1); C = 1 is the exact limiting case. The rule acts
-    per library when the samples form several libraries."""
+    with sharing). Without sharing the read state carries nothing: with read_factor's bin-level correction its chain is
+    then exactly the emission without read state, so the bypass is a shortcut to the same result (the tempered
+    per-class factor R_s ** w alone, uncorrected, penalised heterozygous label pairs: sum_s pi_s R_s ** w < 1, about 8
+    nats per bin measured, lab421 421b_lr_tempering_form); C = 1 is the exact limiting case. The rule acts per library
+    when the samples form several libraries."""
 
     def __init__(self, base, counts, positions, survival: reads.ReadSurvival, error_rate, covering, cohort, minor,
                  parameters: ReadStateParameters, confidence_correlation=None, library=None, survivals=None, *,
-                 cache_bytes: int = READ_STATE_CACHE_BYTES, map_work=None, unit_batches: bool = False):
+                 cache_bytes: int = READ_STATE_CACHE_BYTES, map_work=None, unit_batches: bool = False,
+                 label_correlation=None):
         self.base = base
         self.counts = counts
         self.positions = np.asarray(positions, dtype=np.int64)
@@ -112,6 +116,7 @@ class ReadEmissionBuilder:
         ]
         self._max_offsets = max(self._offset_widths, default=parameters.offsets)
         self.confidence_correlation = confidence_correlation
+        self.label_correlation = label_correlation
         self.cache_bytes = int(cache_bytes)
         self._parts = OrderedDict()             # (rows, contig columns) -> (composed, laws, class_lik)
         self._parts_bytes = 0
@@ -133,10 +138,11 @@ class ReadEmissionBuilder:
         """Counters of the parts cache (diagnostic): hits, misses, stored, evicted, uncached inserts, bytes held."""
         return dict(self._statistics, bytes=self._parts_bytes, entries=len(self._parts))
 
-    def sample_bytes(self, sites, n_labels: int, n_bins: int, confidence: bool) -> int:
+    def sample_bytes(self, sites, n_labels: int, n_bins: int, confidence: bool | int) -> int:
         """Working bytes per sample of one build over the selected contig columns ``sites`` with ``n_labels`` labels
-        (BACKGROUND included) and ``n_bins`` bins: the read matrices and log scales at the path strength (and the
-        confidence strength when ``confidence``), the label-independent parts at the selected sites, the genotype
+        (BACKGROUND included) and ``n_bins`` bins: the read matrices and log scales at the path strength (and at
+        ``confidence`` further strengths: the confidence and the label-error strength when each differs; a bool counts
+        one), the label-independent parts at the selected sites, the genotype
         likelihoods, and the transient inputs of the parts over the evidence span (counts, offset weights and
         messages and posteriors, per-gap class operators)."""
         sites = np.asarray(sites)
@@ -144,7 +150,8 @@ class ReadEmissionBuilder:
             return 1
         classes, offsets = 2 * self.minor + 3, self._max_offsets
         pairs = n_labels * (n_labels + 1) // 2
-        matrices = pairs * n_bins * (classes * classes * 4 + 8) * (2 if confidence else 1)
+        # read matrices, log scales and the correction's shift; the correction's transient untempered row sums
+        matrices = pairs * n_bins * ((classes * classes * 4 + 16) * (1 + int(confidence)) + classes * 8 + 8)
         parts = len(sites) * ((classes * classes + 5 * classes) * 8 + 3 * 8 + 1)
         span = int(sites[-1]) - int(sites[0]) + 1
         # Peak depth-chain workspace includes both directional messages and its site marginal. Joint edges use a
@@ -153,11 +160,11 @@ class ReadEmissionBuilder:
         return int(matrices + parts + transient)
 
     def matrix_bytes(self, n_labels: int, n_bins: int) -> int:
-        """Bytes per sample of one strength's read matrices and log scales (what a copying-model fit holds)."""
+        """Bytes per sample of one strength's read matrices, log scales and shifts (what a copying-model fit holds)."""
         classes = 2 * self.minor + 3
-        return int(n_labels * (n_labels + 1) // 2 * n_bins * (classes * classes * 4 + 8))
+        return int(n_labels * (n_labels + 1) // 2 * n_bins * (classes * classes * 4 + 16))
 
-    def batch_samples(self, sites, n_labels: int, n_bins: int, confidence: bool, requested: int,
+    def batch_samples(self, sites, n_labels: int, n_bins: int, confidence: bool | int, requested: int,
                       budget: int = READ_STATE_BATCH_BYTES) -> int:
         """The sample batch for ``requested`` CPUs whose read-state working set (sample_bytes) fits ``budget``: the
         requested batch where it fits, else as many samples as fit (at least one)."""
@@ -190,23 +197,32 @@ class ReadEmissionBuilder:
                               np.asarray(background_frequency, dtype=np.float64)[None, :]])
         inputs = (rows, contig, gl, seen, alt_rows, background_frequency, float(robustness_epsilon), bin_starts,
                   bin_stops)
-        matrices, log_scale, initial = self._matrices(*inputs, weight)
+        matrices, log_scale, initial, shift = self._matrices(*inputs, weight)
         confidence = None
         if self.confidence_correlation is not None and float(self.confidence_correlation) != float(site_correlation):
             # deferred: built when the decode asks (ReadEmissions.at_confidence), from this batch's same inputs
             confidence = partial(self._confidence, inputs,
                                  design_weights(informative, bin_starts, self.confidence_correlation, group))
-        return ReadEmissions(raw, matrices, log_scale, initial, self.minor, confidence), flags, informative
+        label = None
+        if self.label_correlation is not None and float(self.label_correlation) != float(site_correlation) and (
+            self.confidence_correlation is None or float(self.label_correlation) != float(self.confidence_correlation)
+        ):
+            # deferred as the confidence matrices: built when the reference decode asks (ReadEmissions.at_label)
+            label = partial(self._confidence, inputs,
+                            design_weights(informative, bin_starts, self.label_correlation, group))
+        emissions = ReadEmissions(raw, matrices, log_scale, initial, self.minor, confidence, label, shift)
+        return emissions, flags, informative
 
     def build_at(self, likelihoods, observed, sites, samples, alt_probability, background_frequency, bin_starts,
                  bin_stops, config, *, robustness_epsilon, site_correlation, bins, columns=None):
         """The batch of a build (__call__) at the bins ``bins`` only (int64 indices into ``bin_starts``, ascending,
         unique): (ReadEmissions whose raw, read and read_log hold those bins in that order (axis 2: position k is bin
-        bins[k]), flags, informative of every bin). A bin's read matrix and log scale come from its own sites and its
-        tempering weight alone (read_factor._matrices; the weights are the design weights of every bin, then
-        selected), so they equal the full build's at those bins bit for bit, at the cost of those bins only; the
-        label-independent parts are the batch's cached ones (computed for every selected site: the class operators
-        and laws site_parts returns). No deferred confidence matrices (a consumer at the path strength)."""
+        bins[k]), flags, informative of every bin). Each read matrix is built from its bin's sites and tempering
+        weight. The log scale also uses the pair's class law carried through all previous bins. The builder
+        computes the read matrices and scales through the last requested bin, then selects the requested bins.
+        They match the full build bit for bit. The cached label-independent parts (the class operators and laws
+        returned by site_parts) still cover every selected site. No deferred confidence matrices (a consumer at
+        the path strength)."""
         raw, flags, informative = self.base(
             likelihoods, observed, sites, samples, alt_probability, background_frequency, bin_starts, bin_stops,
             config, robustness_epsilon=robustness_epsilon, site_correlation=site_correlation,
@@ -227,14 +243,21 @@ class ReadEmissionBuilder:
             read, read_log, initial = _unit_read_state(len(rows), n_pairs, len(bins))
             return ReadEmissions(raw, read, read_log, initial, UNIT_MINOR), flags, informative
         group = max(1, int(config.reference_snps_per_bin) // int(config.snps_per_bin))
-        weight = np.ascontiguousarray(design_weights(informative, bin_starts, site_correlation, group)[:, bins])
+        full_weight = design_weights(informative, bin_starts, site_correlation, group)
         gl, seen = gather_sites(likelihoods, observed, sites, samples)
         seen = seen & flags
         alt_rows = np.vstack([np.asarray(alt_probability, dtype=np.float64),
                               np.asarray(background_frequency, dtype=np.float64)[None, :]])
-        matrices, log_scale, initial = self._matrices(rows, contig, gl, seen, alt_rows, background_frequency,
-                                                      float(robustness_epsilon), bin_starts[bins], bin_stops[bins],
-                                                      weight)
+        # Resolve negative indices against the full grid before slicing. Keep the first bin for an empty request
+        # so the correction can still initialise its carry.
+        bins = np.where(bins < 0, bins + len(bin_starts), bins)
+        prefix_stop = bins.max(initial=0) + 1
+        matrices, log_scale, initial, _ = self._matrices(rows, contig, gl, seen, alt_rows, background_frequency,
+                                                         float(robustness_epsilon), bin_starts[:prefix_stop],
+                                                         bin_stops[:prefix_stop],
+                                                         np.ascontiguousarray(full_weight[:, :prefix_stop]))
+        matrices = np.ascontiguousarray(matrices[:, :, bins])
+        log_scale = np.ascontiguousarray(log_scale[:, :, bins])
         return ReadEmissions(raw, matrices, log_scale, initial, self.minor), flags, informative
 
     def hidden_matrices(self, likelihoods, observed, sites, samples, alt_probability, background_frequency, bin_starts,
@@ -322,19 +345,20 @@ class ReadEmissionBuilder:
 
     def _matrices(self, rows, contig, gl, observed, alt_rows, background_frequency, epsilon, bin_starts, bin_stops,
                   weight):
-        """(read matrices, log scales, first-site class laws) of the batch's samples at the tempering ``weight``, each
-        library with its own survival law."""
+        """(read matrices, log scales, first-site class laws, the bin-level correction's shifts: zero for bypassed
+        samples) of the batch's samples at the tempering ``weight``, each library with its own survival law."""
         n_classes = 2 * self.minor + 3
         n_pairs = alt_rows.shape[0] * (alt_rows.shape[0] + 1) // 2
         matrices = np.empty((len(rows), n_pairs, len(bin_starts), n_classes, n_classes), dtype=np.float32)
         log_scale = np.empty((len(rows), n_pairs, len(bin_starts)))
         initial = np.empty((len(rows), n_classes))
+        shift = np.empty((len(rows), n_pairs, len(bin_starts)))
         for library in np.unique(self.library[rows]):
             local = np.flatnonzero(self.library[rows] == library)           # positions within the batch
-            matrices[local], log_scale[local], initial[local] = self._library_part(
+            matrices[local], log_scale[local], initial[local], shift[local] = self._library_part(
                 rows[local], contig, gl[local], observed[local], alt_rows, background_frequency, epsilon, bin_starts,
                 bin_stops, weight[local], self.survivals[library])
-        return matrices, log_scale, initial
+        return matrices, log_scale, initial, shift
 
     def _unit_batch(self, rows, contig):
         """Whether the batch ``rows`` over the contig columns ``contig`` is returned with one class (unit_batches and
@@ -371,16 +395,19 @@ class ReadEmissionBuilder:
             lg = np.zeros((len(rows), n_pairs, len(bin_starts)))
             init = np.zeros((len(rows), n_classes))
             init[:, 0] = 1.0
+            shift = np.zeros_like(lg)
             shallow = np.flatnonzero(~deep)
             if len(shallow):
-                m[shallow], lg[shallow], init[shallow] = self._library_part(
+                m[shallow], lg[shallow], init[shallow], shift[shallow] = self._library_part(
                     rows[shallow], sites, gl[shallow], observed[shallow], alt_rows, background_frequency, epsilon,
                     bin_starts, bin_stops, weight[shallow], survival)
-            return m, lg, init
+            return m, lg, init, shift
         composed, laws, class_lik = self._label_independent(rows, sites, survival)
+        shift = np.zeros((len(rows), alt_rows.shape[0] * (alt_rows.shape[0] + 1) // 2, len(bin_starts)))
         m, l_, _, _ = read_matrices(class_lik, laws, composed, observed, alt_rows, background_frequency, gl,
-                                    self.cohort[sites], epsilon, bin_starts, bin_stops, weight)
-        return m, l_, laws[0]
+                                    self.cohort[sites], epsilon, bin_starts, bin_stops, weight,
+                                    bin_corrected=True, shift=shift)
+        return m, l_, laws[0], shift
 
     def _label_independent(self, rows, sites, survival):
         """(composed operators [L_kept, n, C, C], class laws [L_kept, n, C], class likelihoods [n, L_kept, 4, C]) of

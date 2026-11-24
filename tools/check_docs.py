@@ -65,7 +65,7 @@ ENVIRONMENT_OWNERS = ("engine",)
 ENVIRONMENT_ATTRIBUTES = frozenset({"environ", "environb", "getenv", "getenvb", "putenv", "unsetenv"})
 
 # Writers and the modules whose published file names the output dictionary must cover.
-OUTPUT_WRITERS = ("outputs", "evaluation/evaluate.py", "interface/example.py")
+OUTPUT_WRITERS = ("outputs", "evaluation/evaluate.py", "interface/example.py", "interface/report_resume.py")
 OUTPUT_DICTIONARY = ("docs/user/outputs.md", "docs/reference/output-columns.md")
 # Variables holding a contig name or its percent-encoded file stem in writers' f-strings.
 CONTIG_NAMES = frozenset({"contig", "stem"})
@@ -98,6 +98,7 @@ DYNAMIC_OUTPUTS = {
         ),
     ),
     ("outputs/reports/pedigree.py", "*.csv"): ("keys", "outputs/reports/pedigree.py", "COLUMNS", "{}.csv"),
+    ("interface/report_resume.py", "*.json"): ("names", ("FAMILY.json",)),
 }
 
 # Export file names are concatenated from a stem, a role and a format suffix (outputs/export/{run,vcf}.py).

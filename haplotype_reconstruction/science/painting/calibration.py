@@ -505,7 +505,8 @@ def divisor_unit(
     return fsum(scores), cells, fsum(paths)
 
 
-def divisor_scores(panels, evidence, config, genetic_map, epsilon, *, batch_samples, reverse, emission_builder):
+def divisor_scores(panels, evidence, config, genetic_map, epsilon, *, batch_samples, reverse, emission_builder,
+                   grid=None, folds=None):
     """(divisor, fold, predictive log density, observed cells, path score), summed over components: every unit of
     divisor_unit, in sequence in one process.
 
@@ -514,11 +515,12 @@ def divisor_scores(panels, evidence, config, genetic_map, epsilon, *, batch_samp
     hidden sites' genotype likelihoods are gathered once per sample batch and scored for all windows together
     (hidden_scores). The cost per divisor is then the model fit, the label-continuity search and one
     forward-backward and decode (_divisor_unit)."""
-    grid = sorted(set(config.divisor_grid))
-    if len(grid) == 1:
-        return ()
+    if grid is None:
+        grid = sorted(set(config.divisor_grid))
+        if len(grid) == 1:
+            return ()
     reference = replace(config, snps_per_bin=config.reference_snps_per_bin)
-    folds = range(config.calibration_folds)
+    folds = range(config.calibration_folds) if folds is None else folds
     totals = {(divisor, fold): [[], [], 0] for divisor in grid for fold in folds}
     for panel in panels:
         states, bins = decoding_grid(panel, reference)

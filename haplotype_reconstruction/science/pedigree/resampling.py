@@ -1,13 +1,13 @@
 """Material-unit bootstrap and leave-one-unit-out (LOBO) support of the full-data decisions.
 
 Each replicate refits everything downstream of the genetic scores (orientation, exposure gate,
-family messages, state, identity, graph) with unit multiplicities: seeded bootstrap draws of
+birth-order layer, state, identity, joint read) with unit multiplicities: seeded bootstrap draws of
 H units with replacement, and H leave-one-unit-out fits (separate counts and denominator) read from the full
-totals minus the left-out unit (selection.omission_totals). A replicate whose final family solve does not
-converge abstains for every sample and stays in the denominator. Counts are integer sums, so support does not
-depend on worker count or order. A fit is a deterministic function of its multiplicities, so each distinct
-bootstrap multiplicity vector is fitted once and counted as many times as it was drawn. Units are the genome's
-1-Morgan material units (DESIGN_417): no chromosome or contig count enters the resampling.
+totals minus the left-out unit (selection.omission_totals). Counts are integer sums, so support does not
+depend on worker count or order. A fit is a deterministic function of its multiplicities (the birth-order sampler's
+stream is keyed by the fit's multiplicity vector, or its left-out unit, under the run's bootstrap seed: order.fit_key),
+so each distinct bootstrap multiplicity vector is fitted once and counted as many times as it was drawn. Units are the
+genome's 1-Morgan material units (DESIGN_417): no chromosome or contig count enters the resampling.
 
 Method: docs/methods/pedigree.md#pd16.
 """
@@ -24,7 +24,6 @@ from ...core.errors import InvariantError
 from ...core.kernels import kernel
 from ...core.random import bootstrap_multiplicities
 from . import selection
-from .family import FamilyMessageNonConvergence
 from .kernels.decision import OVERLOADS
 from .parameters import PedigreeParameters
 from .selection import DecisionInputs
@@ -43,7 +42,7 @@ __all__ = [
 
 # Work and results keep the existing coalesced task order and integer draw counts.
 FitTask = tuple[bool, np.ndarray, np.ndarray, PedigreeParameters]
-FitArrays = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+FitArrays = tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
 FitResult = tuple[bool, np.ndarray, FitArrays]
 
 
@@ -96,30 +95,25 @@ def _accumulate(
                         graph_parent[np.searchsorted(edges, child * n_samples + parent)] += count
 
 
-def evaluate(inputs: DecisionInputs, config: PedigreeParameters, multiplicities: np.ndarray, *, omissions=False) -> FitArrays:
-    """Selections of a chunk of multiplicity vectors: local rows, graph rows, local states and the
-    nonconverged flag of each vector."""
+def evaluate(
+    inputs: DecisionInputs, config: PedigreeParameters, multiplicities: np.ndarray, *, omissions=False
+) -> FitArrays:
+    """Selections of a chunk of multiplicity vectors: local rows, graph rows, local states and whether the joint read
+    restricted any child to the fit's consensus birth order, per vector."""
     n_replicates = len(multiplicities)
     n_samples = inputs.alternatives.n_samples
     local_rows = np.full((n_replicates, n_samples), -1, dtype=np.int64)
     graph_rows = np.full((n_replicates, n_samples), -1, dtype=np.int64)
     local_states = np.full((n_replicates, n_samples), -1, dtype=np.int8)
-    nonconverged = np.zeros(n_replicates, dtype=np.bool_)
-    graph_passes = np.zeros(n_replicates, dtype=np.int64)
-    graph_exhausted = np.zeros(n_replicates, dtype=np.bool_)
+    restricted = np.zeros(n_replicates, dtype=np.bool_)
     for replicate, weights in enumerate(multiplicities):
-        try:
-            chosen, _, _ = (selection.fit(np.empty(0), inputs, config, omitted=int(weights[0]))
-                             if omissions else selection.fit(weights, inputs, config))
-        except FamilyMessageNonConvergence:
-            nonconverged[replicate] = True
-            continue
+        chosen, _, _ = (selection.fit(np.empty(0), inputs, config, omitted=int(weights[0]))
+                         if omissions else selection.fit(weights, inputs, config))
         local_states[replicate] = chosen.local_state
         local_rows[replicate] = chosen.local_row
         graph_rows[replicate] = chosen.graph_row
-        graph_passes[replicate] = chosen.graph_passes_used
-        graph_exhausted[replicate] = chosen.graph_pass_budget_exhausted
-    return local_rows, graph_rows, local_states, nonconverged, graph_passes, graph_exhausted
+        restricted[replicate] = bool(np.any(chosen.order_restricted))
+    return local_rows, graph_rows, local_states, restricted
 
 
 # --------------------------------------------------------------------- driver
@@ -154,12 +148,10 @@ def plan(inputs: DecisionInputs, config: PedigreeParameters, cpus: int = 1) -> R
     fitted = len(distinct)
     work = len(alternatives.rows) * fitted
     worker_count = 1 if cpus <= 1 or fitted < 32 or work < _MINIMUM_POOL_WORK else min(cpus, fitted)
-    # One fit per task, the leave-one-out fits (the slowest) first: fit costs vary (slow-converging family
-    # solves), so small tasks keep the tail short. Support counts are integer sums: neither order nor grouping
-    # changes them.
+    # One fit per task, the leave-one-out fits first: fit costs vary, so small tasks keep the tail short. Support
+    # counts are integer sums: neither order nor grouping changes them.
     chunk = 1 if worker_count > 1 else max(1, fitted)
-    # Then the bootstrap vectors that omit the most units (weaker evidence, typically the slowest
-    # family solves), so that long fits start early rather than in the tail.
+    # Then the bootstrap vectors that omit the most units, in a fixed order.
     order = np.argsort(-np.count_nonzero(distinct == 0.0, axis=1), kind="stable")
     tasks: list[FitTask] = []
     if n_contigs > 1:
@@ -190,16 +182,14 @@ def combine(inputs: DecisionInputs, planned: ResamplingPlan, results: Iterable[F
     edges = named_edges(alternatives.rows, n_samples)
     bootstrap = SupportCounts.zeros(len(alternatives.rows), n_samples, edges)
     loco = SupportCounts.zeros(len(alternatives.rows), n_samples, edges)
-    tallies = {False: [0, 0], True: [0, 0]}  # fits, nonconverged
-    graph_tallies = {False: 0, True: 0}
-    maximum_graph_passes = 0
+    fits = {False: 0, True: 0}
+    restricted_fits = {False: 0, True: 0}
     received = 0
     for is_loco, task_draws, result in results:
         received += 1
         counts = loco if is_loco else bootstrap
-        local_rows, graph_rows, local_states, failed, graph_passes, graph_exhausted = result
-        graph_tallies[is_loco] += int(np.sum(task_draws[graph_exhausted]))
-        maximum_graph_passes = max(maximum_graph_passes, int(np.max(graph_passes, initial=0)))
+        local_rows, graph_rows, local_states, restricted = result
+        restricted_fits[is_loco] += int(np.sum(task_draws[restricted]))
         _accumulate(
             local_rows,
             graph_rows,
@@ -213,18 +203,16 @@ def combine(inputs: DecisionInputs, planned: ResamplingPlan, results: Iterable[F
             counts.local_parent.values,
             counts.graph_parent.values,
         )
-        tallies[is_loco][0] += int(np.sum(task_draws))
-        tallies[is_loco][1] += int(np.sum(task_draws[failed]))
+        fits[is_loco] += int(np.sum(task_draws))
     if received != len(planned.tasks):
         raise InvariantError(f"resampling received {received} task results for {len(planned.tasks)} planned tasks")
-    bootstrap = replace(bootstrap, fits=tallies[False][0], nonconverged=tallies[False][1])
-    loco = replace(loco, fits=tallies[True][0], nonconverged=tallies[True][1])
+    bootstrap = replace(bootstrap, fits=fits[False])
+    loco = replace(loco, fits=fits[True])
     return Resampling(
         bootstrap,
         loco,
         planned.multiplicities,
         planned.worker_count,
-        bootstrap_graph_budget_exhausted=graph_tallies[False],
-        loco_graph_budget_exhausted=graph_tallies[True],
-        maximum_graph_passes_used=maximum_graph_passes,
+        bootstrap_order_restricted=restricted_fits[False],
+        loco_order_restricted=restricted_fits[True],
     )

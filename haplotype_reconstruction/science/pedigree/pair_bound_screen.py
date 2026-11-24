@@ -43,9 +43,9 @@ def retained_pair_count(compact) -> int:
 
 def retained_batches(compact, bins: int, states: int, classes: int = 1):
     """PairBatch generator over every retained pair, bounded by BATCH_ROWS rows and WORKSPACE_BYTES of tables."""
-    # emission tables of one listed child (never an index span), with the read state its class transfer bounds of
-    # both views (read_bounds.class_bound_matrices)
-    per_child = (3 + (2 * classes * classes if classes > 1 else 0)) * bins * states * states * 8
+    # emission tables of one listed child (never an index span; log and scaled), with the read state its class
+    # transfer bounds (read_bounds.class_bound_matrices)
+    per_child = (2 + (classes * classes if classes > 1 else 0)) * bins * states * states * 8
     kids: list[int]
     trios, kids, cands, ep, eq, local = [], [], [], [], [], []
     offsets = [0]
@@ -66,8 +66,8 @@ def retained_batches(compact, bins: int, states: int, classes: int = 1):
         cands.append(parents)
         offsets.append(base + r)
         rows += len(i)
-        # Partner log bounds plus the full/tempered probability factors.
-        workspace = len(kids) * per_child + offsets[-1] * bins * 24
+        # Partner log bounds plus their probability factors.
+        workspace = len(kids) * per_child + offsets[-1] * bins * 16
         if rows >= BATCH_ROWS or workspace >= WORKSPACE_BYTES:
             yield PairBatch(
                 np.concatenate(trios),
@@ -195,9 +195,7 @@ def component_bounds(context: ComponentContext, batch: PairBatch, claim_threads=
         batch.candidates,
     )
     claim_threads()
-    full_e, tempered_e, offset_full, offset_tempered, top = scaled_emissions(
-        log_emission, terms.exponent, batch.children
-    )
+    scaled, offset, top = scaled_emissions(log_emission)
     claim_threads()
     if terms.n_classes > 1:
         # the read class carried (read_bounds.pair_bounds_classes): named states exact, BACKGROUND over the
@@ -207,8 +205,8 @@ def component_bounds(context: ComponentContext, batch: PairBatch, claim_threads=
         lo, hi = read_bounds.slot_intervals(projection.state_alt, relaxed, context.low, context.high)
         matrices = read_bounds.class_bound_matrices(
             np.ascontiguousarray(batch.children, dtype=np.int64), 0, projection.n_bins, lo, hi, lo, hi, terms.gl,
-            terms.coefficient, terms.site_index, terms.site_start, terms.site_stop, terms.exponent,
-            terms.read_offset, terms.read_reset, terms.read_operator, terms.read_ratio, terms.read_powered,
+            terms.coefficient, terms.site_index, terms.site_start, terms.site_stop, terms.read_offset,
+            terms.read_reset, terms.read_operator, terms.read_ratio,
         )
         claim_threads()
         # runs of rows sharing (child, first parent): the canonical order keeps each run contiguous
@@ -222,9 +220,8 @@ def component_bounds(context: ComponentContext, batch: PairBatch, claim_threads=
                                              + [run_start[-1:]])).astype(np.int64)
         with numba.parallel_chunksize(1):
             return read_bounds.pair_bounds_classes(
-                trios, batch.row_child, log_emission, full_e, tempered_e, top, offset_full, offset_tempered,
-                terms.exponent, context.group, context.count, context.initial, context.transfer, matrices,
-                terms.read_initial, terms.read_width, run_start,
+                trios, batch.row_child, log_emission, scaled, top, offset, context.group, context.count,
+                context.initial, context.transfer, matrices, terms.read_initial, terms.read_width, run_start,
             )
     return pair_bounds(
         batch.trios,
@@ -233,12 +230,9 @@ def component_bounds(context: ComponentContext, batch: PairBatch, claim_threads=
         batch.entry_q,
         partner,
         log_emission,
-        full_e,
-        tempered_e,
+        scaled,
         top,
-        offset_full,
-        offset_tempered,
-        terms.exponent,
+        offset,
         context.group,
         context.count,
         context.initial,

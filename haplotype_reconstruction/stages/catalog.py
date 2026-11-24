@@ -135,6 +135,12 @@ STAGES = {
         kernel_roots=("science.painting", "science.evidence.likelihoods"), kernels=("painting",),
         steps=("calibrate",), prefix="painting/calibration",
     ),
+    "calibration_divisor_fit": Stage(
+        "stages.painting.calibration_tasks", "stages.painting.calibration_records", "divisor_fit",
+        owners=("stages.painting.calibration_tasks",),
+        kernel_roots=("science.painting", "science.evidence.likelihoods"), kernels=("painting",),
+        prefix="painting/calibration/divisor_fit",
+    ),
     "calibration_divisor": Stage(
         "stages.painting.calibration_tasks", "stages.painting.calibration_records", "divisor",
         owners=("stages.painting.calibration_tasks",),
@@ -180,6 +186,26 @@ STAGES = {
         kernels=("refit",),
         steps=("pedigree",),
         prefix="founder_refit",
+    ),
+    # 4.22 QC A: per-library contamination. A contig's sufficient statistics after its painting (reconstruct), the
+    # run's decision over every analysed contig (pedigree step), read by the repaint, the pedigree and family phase
+    "contamination_cells": Stage(
+        "stages.painting.contamination",
+        "stages.painting.contamination_records",
+        "cells",
+        owners=("stages.painting.contamination",),
+        kernel_roots=("science.painting.contamination",),
+        steps=("reconstruct",),
+        prefix="painting",
+    ),
+    "contamination": Stage(
+        "stages.painting.contamination",
+        "stages.painting.contamination_records",
+        "contamination",
+        owners=("stages.painting.contamination",),
+        kernel_roots=("science.painting.contamination",),
+        steps=("pedigree",),
+        prefix="painting",
     ),
     "refit": Stage(
         "stages.refit.tasks",

@@ -1,7 +1,7 @@
 """Genome-wide decision from the material-unit scores (before the full-marker count release).
 
 Steps: configuration rows of the eligible universe -> the full-data
-fit (orientation, exposure gate, family terms, state, identity, graph) -> prior sensitivity of M0 ->
+fit (orientation, exposure gate, birth-order layer, state, identity, joint read) -> prior sensitivity of M0 ->
 unit bootstrap and leave-one-unit-out (LOBO) fits -> per-child support -> Tier A (from U >= tier_a_morgans) /
 Tier B / complete views, marginal edges and candidate sets.
 
@@ -10,40 +10,46 @@ Method: docs/methods/pedigree.md#one-weighted-fit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import numpy as np
 
 from ...contracts.pedigree import (
+    BirthOrderRecord,
     Decision,
     DecisionTrace,
-    FamilySolveRecord,
-    TierCalls,
-    PartialEdges,
     GenomeScores,
     Orientation,
+    PartialEdges,
     Resampling,
     Selection,
+    TierCalls,
 )
 from ...core.errors import InputError
 from ...core.numerics import ordered_sum
 from ...core.ties import TieCounter
 from . import alternatives as alternatives_module
+from . import orientation as orientation_module
 from . import release, selection
 from .alternatives import Alternatives
 from .eligibility import ParentEligibility
-from . import orientation as orientation_module
+from .order import OrderFit
 from .orientation import direction_windows, junction_evidence, unit_failure
-from .regimes import classify
 from .parameters import PedigreeParameters
+from .regimes import classify
 from .selection import DecisionInputs
 from .ties import unique_finite_winner
 
 __all__ = [
     "informative_units",
     "FullFit",
+    "FitStart",
+    "FullSelection",
     "start_fit",
+    "start_inputs",
+    "full_selection",
+    "assemble",
     "decide_resampled",
 ]
 
@@ -75,7 +81,31 @@ class FullFit:
     inputs: DecisionInputs
     full: Selection
     orientation: Orientation
-    adjusted: tuple[np.ndarray, np.ndarray]
+    adjusted: OrderFit
+    trace: dict
+    sensitivity: tuple
+    counter: TieCounter
+
+
+@dataclass(frozen=True)
+class FitStart:
+    """The decision state before its full-data fit: contiguous scores, eligibility and the fit inputs (alternatives,
+    exposure, the direction model's junction evidence, the leave-one-unit-out totals). The full-data fit and the
+    resampled fits all read these inputs and nothing of each other, so they can run side by side."""
+
+    scores: GenomeScores
+    eligibility: ParentEligibility
+    inputs: DecisionInputs
+
+
+@dataclass(frozen=True)
+class FullSelection:
+    """The full-data fit (FullFit's fit fields): selection, orientation, birth-order layer, trace, prior-sensitivity
+    selections and the decision's tie counter."""
+
+    full: Selection
+    orientation: Orientation
+    adjusted: OrderFit
     trace: dict
     sensitivity: tuple
     counter: TieCounter
@@ -83,6 +113,19 @@ class FullFit:
 
 def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeParameters) -> FullFit:
     """Build the full-data fit from the alternatives' composite log likelihoods as supplied."""
+    start = start_inputs(scores, eligibility, config)
+    return assemble(start, full_selection(start.inputs, config))
+
+
+def assemble(start: FitStart, chosen: FullSelection) -> FullFit:
+    """The decision state before resampling from its inputs and its full-data fit."""
+    return FullFit(start.scores, start.eligibility, start.inputs, chosen.full, chosen.orientation, chosen.adjusted,
+                   chosen.trace, chosen.sensitivity, chosen.counter)
+
+
+def start_inputs(scores: GenomeScores, eligibility: ParentEligibility, config: PedigreeParameters) -> FitStart:
+    """The fit inputs from the alternatives' composite log likelihoods as supplied (everything before the full-data
+    fit, the direction model's neutral fit included)."""
     # np.argwhere's Fortran memory order must not choose downstream reductions.
     # Any: each value replaces an ndarray field by name, which mypy cannot match from a **mapping to the fields.
     contiguous: dict[str, Any] = {
@@ -92,6 +135,8 @@ def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: Pedi
     }
     scores = replace(scores, **contiguous)
     alternatives = alternatives_module.build(scores, eligibility)
+    # the birth-order chain's draw order: sample indices in sorted-identifier order (as the relationship references)
+    sample_order = np.array(sorted(range(len(scores.sample_ids)), key=lambda i: scores.sample_ids[i]), dtype=np.int64)
     failure = unit_failure(scores.working_morgans, config.relationship.failure_region_rate,
                            config.relationship.failure_region_length)
     window = direction_windows(scores.working_morgans, config.direction.window_morgans)
@@ -112,7 +157,8 @@ def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: Pedi
         )
 
     reliability, coin_share, reference_pairs, reference_units = _direction_model(
-        scores, DecisionInputs(alternatives, exposure, evidence(), regime=scores.regime), failure, config
+        scores, DecisionInputs(alternatives, exposure, evidence(), regime=scores.regime, sample_order=sample_order),
+        failure, config
     )
     inputs = DecisionInputs(
         alternatives,
@@ -120,24 +166,29 @@ def start_fit(scores: GenomeScores, eligibility: ParentEligibility, config: Pedi
         evidence(reliability=reliability, coin_share=coin_share, reference_pairs=reference_pairs,
                  reference_units=reference_units),
         regime=scores.regime,
+        sample_order=sample_order,
     )
     # Leave-one-unit-out fits read full totals minus the left-out unit (one pass; decisions equal per-unit refits).
     inputs = replace(inputs, omission_totals=selection.omission_totals(inputs))
+    return FitStart(scores, eligibility, inputs)
+
+
+def full_selection(inputs: DecisionInputs, config: PedigreeParameters) -> FullSelection:
+    """The full-data fit (every unit once) and its prior-sensitivity selections."""
     trace: dict = {}
     counter = TieCounter()
-    full, orientation, adjusted = selection.fit(np.ones(len(scores.contigs)), inputs, config, trace, counter=counter)
+    units = np.ones(inputs.alternatives.log_likelihoods.shape[0])
+    full, orientation, adjusted = selection.fit(units, inputs, config, trace, counter=counter)
     sensitivity = tuple(
         (
             tuple(priors),
             full
             if tuple(priors) == tuple(config.selection.state_priors)
-            else selection.select(*adjusted, alternatives, priors, orientation, config),
+            else selection.select(adjusted, inputs.alternatives, priors, orientation, config),
         )
         for priors in config.selection.prior_sensitivity
     )
-    return FullFit(
-        scores, eligibility, inputs, full, orientation, adjusted, trace, sensitivity, counter
-    )
+    return FullSelection(full, orientation, adjusted, trace, sensitivity, counter)
 
 
 def _direction_model(scores: GenomeScores, inputs: DecisionInputs, failure: np.ndarray,
@@ -210,19 +261,15 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreePara
                  release.partial_edges("tier_a", config.release.tier_a, tier_a, evidence, alternatives, config))
     partial_b = release.partial_edges("tier_b", config.release.tier_b, tier_b, evidence, alternatives, config)
     candidates = release.candidate_sets(tier_b, partial_b, full, alternatives, resampled, log_odds, config)
-    direction = config.direction
-    family_solve = FamilySolveRecord(
-        iterations=int(trace["final_family_iterations"]),
-        residual=float(trace["final_family_residual"]),
-        tolerance=direction.final_tolerance,
-        maximum_iterations=direction.final_max_iterations,
-        retry_iterations=int(trace["final_family_retry_iterations"]),
-        retry_limit=direction.retry_iterations,
-        retry_damping=direction.retry_damping,
-        frozen_path_preparation_passes=direction.message_passes,
-        # Resamples that abstained for every sample (lower support, never a call).
-        nonconverged_bootstrap_replicates=int(resampled.bootstrap.nonconverged),
-        nonconverged_loco_replicates=int(resampled.loco.nonconverged),
+    birth_order = BirthOrderRecord(
+        burn_in_sweeps=config.order.burn_in_sweeps,
+        full_sweeps=int(trace["birth_order_sweeps"]),
+        resampled_sweeps=config.order.resample_sweeps,
+        full_order_restricted=int(np.count_nonzero(full.order_restricted)),
+        bootstrap_order_restricted=int(resampled.bootstrap_order_restricted),
+        loco_order_restricted=int(resampled.loco_order_restricted),
+        full_raised_references=state.adjusted.chain.raised_references,
+        full_guarded_recomputes=state.adjusted.chain.guarded_recomputes,
     )
     return Decision(
         scores,
@@ -230,7 +277,7 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreePara
         inputs,
         full,
         state.orientation,
-        state.adjusted,
+        (state.adjusted.state_scores, state.adjusted.identity_scores),
         DecisionTrace(**trace),
         state.sensitivity,
         resampled,
@@ -243,7 +290,7 @@ def decide_resampled(state: FullFit, resampled: Resampling, config: PedigreePara
         partial_b,
         candidates,
         regime.reach,
-        family_solve,
+        birth_order,
         tie_events,
         informative_count,
         informative_morgans,

@@ -71,6 +71,10 @@ class ReadModel:
     and ALT reads ~ Binomial(depth, p_g) with p = (error_rate, heterozygote_alt_probability,
     1 - error_rate). read_length_bp > 0 draws paired-end fragments instead (insert length
     Normal(fragment_mean_bp, fragment_sd_bp)), so sites closer than a fragment share reads.
+    heterozygote_alt_probability belongs to the independent-site sampler only (it has no reads); the read samplers
+    keep it at 1/2 and make allelic imbalance at the read level: reference_bias loses a paired-end mate (every base
+    it covers) with probability 1 - exp(-reference_bias k**reference_bias_power), k the ALT alleles of the
+    fragment's homologue under the mate, so a kept read is consistent with its homologue at every site.
     In either mode, uncalled_base_probability independently removes each covered base from
     REF/ALT counts after the allele draw. Configured depth precedes this thinning.
     site_depth_cv adds a mean-one lognormal site factor shared by samples; a positive
@@ -89,10 +93,24 @@ class ReadModel:
     error rate (Phred normal, read_quality_mean / read_quality_sd), split into substitutions (substitution_share; a
     third reach the other allele) and indels (half deletions, which leave no base). A share context_sites of sites
     (shared by all samples) has one allele extending a homopolymer, whose indel rate is multiplied by context_factor
-    times a mean-one exponential site strength (context_convert of those errors read as the other allele). reference_bias removes a read's base with probability
+    times a mean-one exponential site strength (context_convert of those errors read as the other allele). With long
+    reads reference_bias removes a read's base (local clipping) with probability
     1 - exp(-reference_bias k**reference_bias_power), k the read homologue's ALT alleles within
     reference_bias_window_bp; reference_pull reads an ALT base as REF (mean probability, scaled by the read's error
-    rate). foreign_read_share of the reads come from another sequenced sample (a uniform other sample and homologue).
+    rate). foreign_read_share of the reads (long reads or paired-end fragments) come from a uniform other sequenced
+    sample's homologue; a contaminated library takes a share of its reads from one donor (contamination_share law, or
+    the explicit contamination_samples / contamination_shares / contamination_donors lists; any sampler).
+    duplicate_rate (paired-end): a library's reads include PCR duplicates at its rate (duplicate_rate x Exponential(1)),
+    left in, each repeating its parent fragment's alleles and errors plus independent errors. library_error_sigma:
+    each library's error factor, lognormal with mean one and this log-scale sd (genome-wide), multiplies its
+    error_rate and the call-set layer's systematic per-read rates (an increase is clipped at LIBRARY_ERROR_RATE_LIMIT,
+    a configured rate is never lowered; the long-read quality law is not scaled). chimera_share (long
+    reads): chimeric reads whose shorter segment is lost below chimera_min_segment_bp, or with chimera_mismap_share
+    aligned at the partner's locus with unrelated alleles.
+    exogenous_read_share (any sampler): reads of another species map only inside conserved windows (a share
+    exogenous_window_fraction of windows of exogenous_window_bp) and carry that species' base, ALT with probability
+    exogenous_alt_probability, fixed per site; a sample is contaminated with probability exogenous_sample_fraction, at a
+    share of its mapped reads exogenous_read_share x Exponential(1).
     error_rate is not used by this sampler.
     """
 
@@ -135,6 +153,39 @@ class ReadModel:
     )
     reference_pull: float = record_field("obs", units="1", dtype="float64", default=generating.REFERENCE_PULL)
     foreign_read_share: float = record_field("obs", units="1", dtype="float64", default=generating.FOREIGN_READ_SHARE)
+    contamination_share: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.CONTAMINATION_SHARE
+    )
+    contamination_sample_fraction: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.CONTAMINATION_SAMPLE_FRACTION
+    )
+    contamination_samples: tuple[str, ...] = record_field("obs", units="1", dtype="tuple[str, ...]", default=())
+    contamination_shares: tuple[float, ...] = record_field("obs", units="1", dtype="tuple[float, ...]", default=())
+    contamination_donors: tuple[str, ...] = record_field("obs", units="1", dtype="tuple[str, ...]", default=())
+    duplicate_rate: float = record_field("obs", units="1", dtype="float64", default=generating.DUPLICATE_RATE)
+    library_error_sigma: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.LIBRARY_ERROR_SIGMA
+    )
+    chimera_share: float = record_field("obs", units="1", dtype="float64", default=generating.CHIMERA_SHARE)
+    chimera_min_segment_bp: int = record_field(
+        "obs", units="bp", dtype="int", default=generating.CHIMERA_MIN_SEGMENT_BP
+    )
+    chimera_mismap_share: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.CHIMERA_MISMAP_SHARE
+    )
+    exogenous_read_share: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.EXOGENOUS_READ_SHARE
+    )
+    exogenous_sample_fraction: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.EXOGENOUS_SAMPLE_FRACTION
+    )
+    exogenous_window_fraction: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.EXOGENOUS_WINDOW_FRACTION
+    )
+    exogenous_window_bp: int = record_field("obs", units="bp", dtype="int", default=generating.EXOGENOUS_WINDOW_BP)
+    exogenous_alt_probability: float = record_field(
+        "obs", units="1", dtype="float64", default=generating.EXOGENOUS_ALT_PROBABILITY
+    )
     # Gate G1i (ADVICE2 11.4): ordered genotypes replaced before reads at this rate (per pattern: simulation/injection.py)
     injected_outlier_rate: float = record_field("obs", units="1", dtype="float64", default=0.0)
     injected_outlier_pattern: str = record_field("obs", units="1", dtype="str", default="uniform")
@@ -183,6 +234,9 @@ class ReadModel:
             raise SettingsError("count_dispersion must be finite and nonnegative")
         if not 0 < self.heterozygote_alt_probability < 1:
             raise SettingsError("heterozygote_alt_probability must be in (0, 1)")
+        reads = bool(self.read_length_bp or self.long_read_mean_bp)
+        if reads and self.heterozygote_alt_probability != 0.5:
+            raise SettingsError(generating.HETEROZYGOTE_BALANCE_WITH_READS)
         if not 0 <= self.dropout_fraction < 1:
             raise SettingsError("dropout_fraction must be in [0, 1)")
         if int(self.read_length_bp) != self.read_length_bp or self.read_length_bp < 0:
@@ -220,10 +274,62 @@ class ReadModel:
             raise SettingsError("reference_pull must be between zero and one")
         if not 0 <= self.foreign_read_share < 1:
             raise SettingsError("foreign_read_share must be in [0, 1)")
+        if self.foreign_read_share and not (self.read_length_bp or self.long_read_mean_bp):
+            raise SettingsError("foreign_read_share needs reads (read_length_bp or long_read_mean_bp): independent "
+                                "sites have no molecules to misassign; use contamination_* for a contaminated library")
+        for name in ("contamination_samples", "contamination_donors"):
+            object.__setattr__(self, name, tuple(str(s) for s in getattr(self, name)))
+        object.__setattr__(self, "contamination_shares", tuple(float(s) for s in self.contamination_shares))
+        if not 0 <= self.contamination_share <= generating.CONTAMINATION_SHARE_LIMIT:
+            raise SettingsError("contamination_share must be in [0, 1]")
+        if not 0 <= self.contamination_sample_fraction <= 1:
+            raise SettingsError("contamination_sample_fraction must be between zero and one")
+        if len(self.contamination_shares) != len(self.contamination_samples) or (
+            self.contamination_donors and len(self.contamination_donors) != len(self.contamination_samples)
+        ):
+            raise SettingsError("contamination_shares (and contamination_donors, when given) must list one value per "
+                                "contamination_samples entry")
+        if any(not 0 < s <= 1 for s in self.contamination_shares):
+            raise SettingsError("contamination_shares must be in (0, 1]")
+        if len(set(self.contamination_samples)) != len(self.contamination_samples):
+            raise SettingsError("contamination_samples must not repeat a sample")
+        if any(d == s for s, d in zip(self.contamination_samples, self.contamination_donors, strict=False)):
+            raise SettingsError("a contaminated sample cannot be its own donor")
+        if self.contamination_samples and self.contamination_share:
+            raise SettingsError("set either contamination_samples (an explicit list) or contamination_share (a law)")
+        if not (math.isfinite(self.library_error_sigma) and 0 <= self.library_error_sigma <= 3):
+            raise SettingsError("library_error_sigma must be in [0, 3]")
+        if not 0 <= self.duplicate_rate < generating.DUPLICATE_RATE_LIMIT:
+            raise SettingsError("duplicate_rate must be in [0, 0.9)")
+        if self.duplicate_rate and not self.read_length_bp:
+            raise SettingsError("duplicate_rate needs paired-end reads (read_length_bp): PCR-free long-read libraries "
+                                "carry few duplicates, and independent sites have no molecules")
+        if not 0 <= self.chimera_share < 1 or not 0 <= self.chimera_mismap_share <= 1:
+            raise SettingsError("chimera_share must be in [0, 1) and chimera_mismap_share in [0, 1]")
+        if int(self.chimera_min_segment_bp) != self.chimera_min_segment_bp or self.chimera_min_segment_bp < 0:
+            raise SettingsError("chimera_min_segment_bp must be a nonnegative integer")
+        if self.chimera_share and not self.long_read_mean_bp:
+            raise SettingsError("chimera_share applies to long reads (long_read_mean_bp)")
+        if not 0 <= self.exogenous_read_share < 0.5:
+            raise SettingsError("exogenous_read_share must be in [0, 0.5)")
+        for name in ("exogenous_sample_fraction", "exogenous_window_fraction", "exogenous_alt_probability"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise SettingsError(f"{name} must be between zero and one")
+        if int(self.exogenous_window_bp) != self.exogenous_window_bp or self.exogenous_window_bp < 0:
+            raise SettingsError("exogenous_window_bp must be a nonnegative integer")
+        if self.exogenous_read_share and not (self.exogenous_window_fraction and self.exogenous_window_bp):
+            raise SettingsError("exogenous_read_share needs positive exogenous_window_fraction and exogenous_window_bp")
         if int(self.reference_bias_window_bp) != self.reference_bias_window_bp or self.reference_bias_window_bp < 0:
             raise SettingsError("reference_bias_window_bp must be a nonnegative integer")
-        if self.reference_bias and not self.reference_bias_window_bp:
-            raise SettingsError("positive reference_bias requires positive reference_bias_window_bp")
+        if self.reference_bias and not (self.read_length_bp or self.long_read_mean_bp):
+            raise SettingsError("reference_bias needs reads: set read_length_bp or long_read_mean_bp")
+        if self.long_read_mean_bp and self.reference_bias and not self.reference_bias_window_bp:
+            raise SettingsError("positive reference_bias with long reads requires positive reference_bias_window_bp")
+        if self.read_length_bp and self.reference_bias_window_bp:
+            raise SettingsError(
+                "reference_bias_window_bp applies to long reads only: a paired-end mate's ALT count is taken over "
+                "the mate itself"
+            )
 
 
 @dataclass(frozen=True)
@@ -410,8 +516,12 @@ class SimulationConfig:
             raise SettingsError("generating_rate_cm_per_mb must be finite and nonnegative")
         if self.genome_contigs and self.genome_contigs != self.contigs:
             raise SettingsError("simulation.genome.contigs and input.contigs must have the same order")
-        if self.reads.long_read_mean_bp and self.artefacts.enabled and self.artefacts.balance_dispersion:
-            raise SettingsError(generating.BALANCE_WITH_LONG_READS)
+        if (
+            (self.reads.long_read_mean_bp or self.reads.read_length_bp)
+            and self.artefacts.enabled
+            and self.artefacts.balance_dispersion
+        ):
+            raise SettingsError(generating.BALANCE_WITH_READS)
         if any(v.contig not in self.contigs for v in self.structure.variants):
             raise SettingsError("structural variants must name simulated contigs")
         if len({s.name for s in self.stocks}) != len(self.stocks):

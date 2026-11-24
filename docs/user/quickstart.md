@@ -58,39 +58,39 @@ read error and balanced heterozygotes; all depth-heterogeneity controls are off.
 Existing configurations retain their random draws and read counts when the new
 controls are off.
 
-For a plausible short-read low-pass scenario, replace an existing
-`[simulation.reads]` table with this block, or add it if absent. Generated examples
-and saved configurations contain explicit read defaults: remove the keys you want
-the preset to supply, because those explicit defaults override the preset too.
+For realistic short reads, replace an existing `[simulation.reads]` table with this block, or add it if absent.
+Generated examples and saved configurations contain explicit read defaults: remove the keys you want the preset to
+supply (and an explicit `[quality] site_filter = "auto"`, which would keep QC off), because explicit keys override
+the preset.
 
 ```toml
 [simulation.reads]
-preset = "realistic"
-# Explicit keys override the preset, even if equal to a schema default:
-# count_dispersion = 0.0
+preset = "realistic"            # or "realistic_long_reads"
 ```
 
-The preset expands to these values in the saved `config.toml`:
+The preset is calibrated so that the pipeline's own estimates on a simulated cross match those of a real cichlid
+cross (TroMau: outlier rates, site-QC removals, heterozygote balance, read error, missingness). The outlier rates
+come from missed variant calls, and their per-sample trend with depth is the opposite of TroMau's. Besides the read model it switches on site-specific errors (`[simulation.artefacts]`), the
+structure model and site/sample QC. Values, mechanisms and the calibration are in the
+[simulation methods](../methods/simulation.md#realistic-profile):
 
 | Setting | Value | Rationale |
 |---|---:|---|
-| `read_length_bp` | 150 | Two 150 bp mates; neighbouring sites can share a fragment and homologue |
-| `fragment_mean_bp`, `fragment_sd_bp` | 375, 150 | Retain the existing broad short-insert library model; rounded normal, clipped at 50 bp and the upper six-SD boundary |
-| `depth_cv` | 0.3 | Moderate library-to-library depth variation; matches the paired-end depth-sweep scenario |
-| `site_depth_cv` | 0.5 | Moderate shared variation in coverage propensity across the genome |
-| `site_depth_window_bp` | 1000 | Share site propensity within short physical windows to represent local coverage bias |
-| `count_dispersion` | 0.1 | Mild residual extra-Poisson count variance: at conditional mean 2, variance is 2.4 |
-| `heterozygote_alt_probability` | 0.48 | Mild reference bias, retaining a 48:52 ALT:REF balance |
-| `error_rate` | 0.01 | A 1% effective homozygous error scenario, including mapping/observation errors |
-| `dropout_fraction` | 0.0 | No forced missing tracts; heterogeneity and low depth already cause zero counts |
+| `read_length_bp`, `fragment_mean_bp`, `fragment_sd_bp` | 150, 375, 150 | Two 150 bp mates; neighbouring sites can share a fragment and homologue |
+| `error_rate` | 2e-5 | Clean reads (fitted error of the real cross 1.4e-5); discordance comes from site-specific errors |
+| `depth_cv` | 0.3 | Library sizes of the real cross's bulk |
+| `site_loss_fraction`, `site_loss_fine_fraction` | 0.30 (1 kb), 0.05 (300 bp) | Low-mappability depth loss shared by samples; site QC removes most of these sites |
+| `site_depth_cv` | 0.05 | Small shared coverage variation at sites QC keeps |
+| `region_depth_cv` | 0.08 (4 kb) | Mild per-sample coverage waves |
+| `reference_bias`, `reference_bias_power` | 0.02, 2 | A mate with k ALT mismatches fails to align with probability 1 - exp(-0.02 k^2) |
+| `[simulation.artefacts]` `systematic_sites`, `systematic_lo`, `systematic_hi` | 0.06, 0.03, 0.15 | Site-specific low-rate errors shared by samples (REF reads read as ALT); the per-cell balance off |
+| `[simulation.artefacts]` `hard_sites`, `stretch_cover`, `miss` | 0.002, 0.006, 0.0024 | Missed variant calls at 0.2 times the layer's defaults, reported as reference blocks (the only rewritten cells) |
+| `[simulation.structure]` `enabled` | true | Deletions, duplications, inversions and misorder at the cichlid rates |
+| `[quality]` `site_filter`, `sample_filter` | on | Real runs filter; simulations must too |
 
-Two 150 bp mates follow [Illumina's WGS read-length guidance](https://www.illumina.com/science/technology/next-generation-sequencing/plan-experiments/read-length.html).
-[Benjamini and Speed (2012)](https://doi.org/10.1093/nar/gks001) establish that GC
-content and fragment properties affect coverage. The numerical CVs, dispersion,
-window width, bias and effective error above are explicit sensitivity assumptions,
-not estimates from that paper or a fitted cichlid library. Keep `[simulation] depth`
-at the coverage you want to study; the preset does not set it. Very sparse marker
-panels may have only one marker per 1 kb window and therefore little window correlation.
+It sets no depth: keep `[simulation] depth` at the coverage you want to study (calibrated at 11).
+`heterozygote_alt_probability` applies to the independent-site sampler only; with reads, allelic imbalance is the
+read-level `reference_bias`.
 
 `depth_cv` draws one lognormal factor per sample and normalises the sample mean to
 one. `site_depth_cv` draws lognormal factors with population mean one, shared by

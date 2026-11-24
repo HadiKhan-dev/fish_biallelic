@@ -15,6 +15,7 @@ KEYS = dict(
     robustness="painting/calibration/robustness",
     refine="painting/calibration/refine",
     outlier="painting/calibration/outlier",
+    divisor_fit="painting/calibration/divisor_fit",
     divisor="painting/calibration/divisor",
     calibration="painting/calibration",
 )
@@ -32,7 +33,15 @@ class Reader:
         return dict(payload)
 
 
-def expected(store, manifest, *, product="calibration", contig=None):
+def fit_round(fold, divisor=None):
+    return str(fold) if divisor is None else f"{fold}-{float(divisor)}"
+
+
+def fit_key(fold, divisor):
+    return f"{KEYS['divisor_fit']}/{fit_round(fold, divisor)}"
+
+
+def expected(store, manifest, *, product="calibration", contig=None, fold=None, divisor=None):
     # Pooled over the analysed contigs (the reconstruction axis), like the pedigree.
     contigs = tuple(AnalysisContigs.from_manifest(manifest).included)
     from .records import bound_upstream
@@ -74,6 +83,9 @@ def expected(store, manifest, *, product="calibration", contig=None):
         result = refine[contig]
     elif product == "outlier":
         result = outlier
+    elif product == "divisor_fit":
+        key = fit_key(fold, divisor)
+        return Reader(identity(key, contig, dict(outlier=outlier)), key)
     elif product == "divisor":
         result = identity("divisor", contig, dict(outlier=outlier))
     else:

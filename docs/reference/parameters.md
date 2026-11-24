@@ -497,7 +497,7 @@ Source: [haplotype_reconstruction/science/evidence/quality/parameters.py](../../
 | `enabled` | `True` | 1 | Enable per-library quality exclusion from founder construction (boolean); painting still uses every sample. |
 | `carrier_tail_level` | `0.05` | 1 | Carrier-tail level and nominal library-test calibration (probability); controls cohort-wise carrier calls and the working multiple-test threshold. |
 | `minimum_foreign_fraction` | `0.01` | 1 | Working foreign-read fraction (fraction); half this value is the minimum foreign-allele amplitude tested against own errors, not a calibrated contamination estimate. |
-| `heterozygote_floor_ratio` | `0.5` | 1 | Foreign-allele ceiling multiplier of half the lower clean heterozygote balance (dimensionless); separates the foreign grid from own heterozygotes. |
+| `heterozygote_floor_ratio` | `0.5` | 1 | Foreign-allele ceiling multiplier of half the lowest clean heterozygote balance across allele orientations (dimensionless); separates the foreign grid from own heterozygotes. |
 | `heterozygote_depth_classes` | `4` | 1 | Eligible-cell depth quantile classes (count); allows own-error and heterozygote weights to vary with depth. |
 | `minimum_samples` | `20` | 1 | Minimum libraries (samples) for quality fitting; smaller cohorts have too little private-allele evidence to distinguish foreign-like reads. |
 | `artefact_regions` | `16` | 1 | Equal-site-count regions per contig (count); allows a separate local-artefact share in each region under both hypotheses. |
@@ -512,6 +512,7 @@ Source: [haplotype_reconstruction/science/evidence/quality/parameters.py](../../
 | `SITE_SITE_EM_ITERATIONS` | `60` | See model | Maximum genotype-frequency EM updates per site (iterations). |
 | `SITE_MIXTURE_ITERATIONS` | `300` | See model | Maximum clean/artefact mixture EM updates (iterations). |
 | `SITE_HISTOGRAM_RANGE_PERCENTILES` | `(0.5, 99.5)` | See model | Histogram range endpoints (percentiles); limits the empirical core fit to the central depth/heterogeneity range. |
+| `SITE_WALK_MAXIMUM_BINS` | `16000` | See model | Largest number of bins the window walk adds beyond the core histogram's percentile range (count, of the core's width): a tail beyond that range is assessed rather than skipped; values past this many bins lie outside the window. |
 | `SITE_M_STEP_GRADIENT` | `1e-09` | See model | Projected-gradient stopping scale of the error-mixture M step (dimensionless). |
 | `SITE_M_STEP_STEP` | `1e-08` | See model | Relative coordinate-motion stopping scale of the error-mixture M step (dimensionless). |
 | `SITE_M_STEP_ROUNDING` | `1e-13` | See model | Objective-rounding allowance for M-step backtracking (dimensionless). |
@@ -668,6 +669,11 @@ Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotyp
 | `READ_STATE_BATCH_BYTES` | `16 << 30` | See model | Read-state batch budget (bytes; dimension-only): one sample batch's read-state working set (read matrices at both strengths, label-independent parts, their transient inputs over the evidence span). Batches shrink below the CPU-sized batch only where that would exceed it, e.g. near 30 founders over thousands of bins (496 label pairs x 5,000 bins x 5 classes: 0.27 GB of read matrices per sample and strength). Results do not depend on the batch. |
 | `READ_TABLE_CACHE_BYTES` | `1 << 30` | See model | Read-state table cache (bytes; dimension-only): the depth and class tables of the read state's (survival bin, depth value) pairs (science/shared/reads.py build_tables), kept across a contig's sample batches; about 0.5 MB per pair at the deepest tables. A table is a function of its key alone, so values never depend on it. |
 | `EMISSION_RESCALE_BELOW` | `1e-150` | See model | Probability-product floor (dimensionless): fold the product into its log below this value; factors below it are logged directly, so bin aggregation never underflows. |
+| `LABEL_ERROR_CORRELATION` | `0.0` | See model | Site correlation (dimensionless; divisor 1 + r (reference_snps_per_bin - 1) = 1) of the chain the label-error statistic h = (u, v_0, v_1) is read from (fidelity.label_errors; the pedigree's A9, A10 and PD29 allowances). h is the posterior probability that a released label is wrong, so it is read from the untempered chain: the copying model fitted at r = 0 (fidelity.estimate_chain) and its label-pair masses. The run's two strengths keep their roles (the path strength decodes the labels, the confidence strength gates their release). Held-out read prediction ignores label identity. It chooses confidence strength and, without the read state, path strength. With the read state, the path divisor is fixed at 4. Known-truth simulations (release 4.22): with h at the confidence strength, an independent-site design at half depth chose divisor 4 instead of 32 and its label posterior sharpened on thinner data (mean u fell x0.3 while the true label error rose x3.8); at r = 0 h rises with the true error on every design tested (independent-site, short-read backcross, medium- and long-read designs at depth 5 and 2.5), its top tenth holds 5.3 to 9.0 times the mean error, and the independent-site design's observed/stated error falls from 8.6 / 84 to 4.1 / 7.9. Divisors 4, 8 and 32 each failed a check on some design. h stays a working score (2.7 to 22 times overconfident on those designs), not a calibrated probability. |
+| `CONTAMINATION_ALPHA_FLOOR` | `0.008` | See model | Per-library contamination (4.22 QC A, science/painting/contamination.py). A library is corrected when its population-law alpha (read fraction of foreign DNA) is at least CONTAMINATION_ALPHA_FLOOR above the cohort's median alpha (the clean level) AND its robust z of alpha over the cohort is at least CONTAMINATION_Z_FLOOR. Both are needed: clean libraries carry a misfit floor (alpha 0.004-0.009 in known-truth designs, highest in a systematic subgroup -- the F1s of TroMau-like crosses -- so a robust z alone flags clean F1s, z up to 6.7), and a fixed floor alone ignores a noisier cohort. The floor is on the excess over the median because the clean level moves with the data: under the realistic simulator's artefacts a clean half-sib cohort sat at alpha 0.010-0.017 (median 0.015) and a fixed 0.01 floor let its founder subgroup (0.020, z 7-8) be flagged and corrected (4.22 release validation). 0.008 is the fixed 0.01 floor at the clean level of the runs it was validated on (median 0.0014-0.0018): on the saved reports of every known-truth run and of TroMau, the excess floor changes no decision except those three founders (TroMau's smallest corrected library, alpha 0.0101 with a named donor, keeps its correction; at an excess of 0.01 it would lose it). The relative floor was not re-run end to end (owner's ruling, 23 Nov). On five known-truth runs (~560 clean, 15 contaminated libraries at 2-30 %) the rule flagged no clean library and 14 of 15 contaminated ones (the miss: a nominal 2 % library whose realized share was ~1 %, which changed no pedigree call). The best sequenced donor is named when its same-homozygote residual (foreign minor reads where library and donor are the same homozygote, per unit of donor alpha) is at most CONTAMINATION_DONOR_RESIDUAL: true donors gave 0.001-0.016 and stand-ins for an unsequenced source (founders standing in for an outside fish) 0.079-0.213 on known truth; a stand-in's donor law lost edges (96 vs 105 with the population plug-in), so a stand-in is never used. Libraries above CONTAMINATION_CARE_ALPHA are corrected and reported "interpret with care" (the owner's line, 3-5 %: 5 %). |
+| `CONTAMINATION_Z_FLOOR` | `4.0` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
+| `CONTAMINATION_DONOR_RESIDUAL` | `0.04` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
+| `CONTAMINATION_CARE_ALPHA` | `0.05` | See model | Scientific settings of the painting stage (label continuity, then component painting). |
 ## science.painting.parameters — ReadStateParameters
 
 Source: [haplotype_reconstruction/science/painting/parameters.py](../../haplotype_reconstruction/science/painting/parameters.py).
@@ -750,18 +756,10 @@ Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../..
 
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
-| `mismatch_probability` | `0.01` | See model | PS19/PD06; the FLOOR (4.21, ADVICE2 11.1) of the per-bin probability that a meiotic copy has a different painted local class: the direction kernels use min(1/2, max(0.01, v_child + v_parent)) and the family transmission vote min(1/2, max(0.01, v)) per label, v the reference painting's per-track label error, so an over-confident posterior is never more decisive than 4.20. Decision replays at 0.001, 0.01 and 0.1 agreed at Tier B for a real multi-generation cross, the TroMau cross and large known-truth simulations; 0.1 added false full-fit edges in a 30-founder known-truth simulation. |
+| `mismatch_probability` | `0.01` | See model | PS19/PD06; the FLOOR (4.21, ADVICE2 11.1) of the per-bin probability that a meiotic copy has a different painted local class: the direction kernels use min(1/2, max(0.01, v_child + v_parent)), v the reference painting's per-track label error; the family transmission vote (4.22 R4b) bounds each error pattern of a member's two labels below by its independence value at this floor (one wrong label 0.01 (1 - 0.01), both 0.01^2) and gives a wrong label's whole mass to whichever class a hypothesis needs, so an over-confident posterior is never more decisive than 4.20 in either. Decision replays at 0.001, 0.01 and 0.1, all with the 4.21 vote algebra (before R4b), agreed at Tier B for a real multi-generation cross, the TroMau cross and large known-truth simulations; 0.1 added false full-fit edges in a 30-founder known-truth simulation. |
 | `window_morgans` | `0.0` | Morgan | DESIGN_417 rev 4; width W of the direction windows (consecutive windows of W working Morgans of the unit axis) whose summed direction log odds are capped at window_cap; 0 (default) turns the cap off. A count-free bound on a long (chromosome-wide) painting failure's votes, measured in V5 with a positive control before the owner chooses W. |
 | `window_cap` | `float(np.log(39.0))` | nats | DESIGN_417 rev 4; ln 39 = 3.66 nats, 4.16.1's per-chromosome cap (failure probability 0.05), below the release cut-off ln 49, so one window cannot orient an edge alone. |
-| `pair_failure_probability` | `0.02` | See model | PD06/PD08/PD09/PD10; pair-level failure probability 0.02 bounds the orientation correction, and the orientation prior that the run's direction model reads from the direction-free solve (within [0.01, 0.99]). |
-| `message_passes` | `4` | See model | PD06/PD08/PD09/PD10; 4 synchronous cavity passes prepare the frozen short-ancestry factor. |
-| `final_max_iterations` | `8192` | See model | PD06/PD08/PD09/PD10; budget of 8192 iterations for the undamped reciprocal solve. |
-| `final_progress_window` | `512` | See model | PD06/PD08/PD09/PD10; 512 residual observations per progress window before forecasting a damped retry. |
-| `final_pause_budgets` | `4` | See model | PD06/PD08/PD09/PD10; dimensionless multiplier 4 of the final iteration budget for the pause forecast. |
-| `final_tolerance` | `1e-08` | See model | PD06/PD08/PD09/PD10; maximum cavity-message change tolerance 1e-8 nats, measured before damping. |
-| `retry_iterations` | `4096` | See model | PD06/PD08/PD09/PD10; at most 4096 iterations in the damped reciprocal retry. |
-| `retry_damping` | `0.5` | See model | PD06/PD08/PD09/PD10; dimensionless mixing weight 0.5 in the reciprocal retry. |
-| `ancestry_path_budget` | `16` | See model | PD06/PD08/PD09/PD10; retain at most 16 joint configurations per sample in the reverse two-edge ancestry factor. |
+| `pair_failure_probability` | `0.02` | See model | PD06; pair-level failure probability 0.02 bounds the orientation correction, and the orientation prior that the run's direction model reads from the direction-free fit (within [0.01, 0.99]). |
 ## science.pedigree.decision_parameters — SelectionParameters
 
 Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../../haplotype_reconstruction/science/pedigree/decision_parameters.py).
@@ -771,7 +769,6 @@ Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../..
 | `state_priors` | `(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0)` | See model | PD04/PD12/PD13/PD14; dimensionless M0/M1/M2 probabilities of one third each before evidence. |
 | `prior_sensitivity` | `((0.5, 0.3, 0.2), (1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0), (0.2, 0.3, 0.5))` | See model | PD04/PD12/PD13/PD14; three fixed dimensionless M0/M1/M2 prior vectors; released M0 must survive all. |
 | `m0_contamination_probability` | `0.02` | See model | PD04/PD12/PD13/PD14; probability weight 0.02 mixes child M0 into aggregated M1/M2 likelihoods. |
-| `graph_local_search_passes` | `3` | See model | PD04/PD12/PD13/PD14; at most 3 coordinate passes of acyclic graph repair. |
 ## science.pedigree.decision_parameters — ResamplingParameters
 
 Source: [haplotype_reconstruction/science/pedigree/decision_parameters.py](../../haplotype_reconstruction/science/pedigree/decision_parameters.py).
@@ -798,7 +795,6 @@ Source: [haplotype_reconstruction/science/pedigree/exclusion_parameters.py](../.
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `alpha` | `0.01` | See model | PD22; dimensionless exclusion level 0.01 sets the dyad log-e threshold log(2N/alpha). |
-| `genotype_replacement_probability` | `0.01` | See model | PD22; probability 0.01 of uniform genotype replacement in the Mendelian compatibility ratio. |
 | `bet_sizes` | `(1 / 1024, 1 / 256, 1 / 64, 1 / 16, 1 / 4, 1.0)` | See model | PD22; dimensionless bet fractions from 1/1024 through 1 average exclusion evidence at several strengths. |
 | `window_widths_bp` | `(1000000, 5000000, 20000000)` | See model | PD22; physical window widths 1000000, 5000000 and 20000000 bp, half-overlapping plus the whole chromosome. |
 ## science.pedigree.family_transmission_parameters — FamilyTransmissionParameters
@@ -890,7 +886,6 @@ Source: [haplotype_reconstruction/science/pedigree/numerical_parameters.py](../.
 | `site_polynomial_threshold` | `1e-08` | See model | PS09; dimensionless likelihood threshold 1e-8 selects direct emission evaluation to avoid polynomial cancellation. |
 | `log_floor` | `-60.0` | See model | PS11; log-relative M1 score floor of -60 nats for nonretained parent identities. |
 | `tiny` | `1e-280` | See model | PS15; positive mass threshold 1e-280 selects probability-domain rather than log-domain pair-bound absorption. |
-| `family_exp_underflow` | `750.0` | See model | PD09; magnitude cutoff 750 nats skips exponentials whose float64 contributions vanish. |
 | `order_minimum_unit_weight` | `2.0` | See model | PD07; require more than 2 callability-weighted unit comparisons (one per material unit since 4.18) for graph-ordering support. |
 | `order_variance_offset` | `1.0` | See model | PD07; additive variance offset 1 in squared junction-count units for graph-ordering support. |
 | `direction_reliability_grid` | `40` | See model | PD06; number of midpoints of (0, 1) on which the posterior of the run's direction reliability is summed (spacing 0.025; the posterior mean moves by less than 0.005 against 80 midpoints on the calibration layouts). Numerical resolution, not a model constant. |
@@ -926,7 +921,6 @@ Source: [haplotype_reconstruction/science/pedigree/numerical_parameters.py](../.
 | `SITE_POLYNOMIAL_THRESHOLD` | `SCORING_NUMERICS.site_polynomial_threshold` | See model | Fixed numerical tolerances for pedigree inference. |
 | `LOG_FLOOR` | `SCORING_NUMERICS.log_floor` | See model | Fixed numerical tolerances for pedigree inference. |
 | `TINY` | `SCORING_NUMERICS.tiny` | See model | Fixed numerical tolerances for pedigree inference. |
-| `FAMILY_EXP_UNDERFLOW` | `SCORING_NUMERICS.family_exp_underflow` | See model | Fixed numerical tolerances for pedigree inference. |
 | `ORDER_MINIMUM_UNIT_WEIGHT` | `SCORING_NUMERICS.order_minimum_unit_weight` | See model | Fixed numerical tolerances for pedigree inference. |
 | `ORDER_VARIANCE_OFFSET` | `SCORING_NUMERICS.order_variance_offset` | See model | Fixed numerical tolerances for pedigree inference. |
 | `DIRECTION_RELIABILITY_GRID` | `SCORING_NUMERICS.direction_reliability_grid` | See model | Fixed numerical tolerances for pedigree inference. |
@@ -947,6 +941,17 @@ Source: [haplotype_reconstruction/science/pedigree/numerical_parameters.py](../.
 | `SELECTIVE_FRONTIER_ULPS` | `SCORING_NUMERICS.selective_frontier_ulps` | See model | Fixed numerical tolerances for pedigree inference. |
 | `PAIR_NULL_RELATIVE_GUARD` | `SCORING_NUMERICS.pair_null_relative_guard` | See model | Fixed numerical tolerances for pedigree inference. |
 | `EXCLUSION_TINY` | `SCORING_NUMERICS.exclusion_tiny` | See model | Fixed numerical tolerances for pedigree inference. |
+## science.pedigree.order_parameters — OrderParameters
+
+Source: [haplotype_reconstruction/science/pedigree/order_parameters.py](../../haplotype_reconstruction/science/pedigree/order_parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `burn_in_sweeps` | `100` | sweeps (one sweep reinserts every sample once) | R4 step 2 (lab422/r4/STEP2.md) and the sampler check (lab422/r4/sampler/SAMPLER.md section 6): from random initial orders the log target reaches its post-burn median within 1-7 sweeps on the six captured roots (16 chains each, split R-hat 0.9998-1.0004, integrated autocorrelation 1.0-2.5 sweeps); 100 leaves a wide margin. Discarded sweeps contribute nothing to the estimates. |
+| `resample_sweeps` | `400` | sweeps after burn-in | R4 step 2's value for every bootstrap, leave-one-unit-out and sensitivity fit, with which the birth-order prior was gated; its Monte Carlo sd of a near-tie state-evidence margin is 0.12 nats (SAMPLER.md section 3), so a child whose support sits within one bootstrap draw of a release cut can differ between seeds. Cost is linear in sweeps (0.45-0.68 s per fit at N = 80-116, 3.0 s at N = 320 for 500 sweeps). |
+| `full_sweeps` | `2000` | sweeps after burn-in | R4 step 2's value for the full-data fits (the decision fit and the direction model's neutral fit, both of which record a trace); five times the resample length because their row posteriors and orientation log odds enter the release directly, not through bootstrap counts. |
+| `cancellation_guard` | `0.001` | share of Z_c | Numerical, not statistical. A move of sample s needs Z_c without the rows of c that name s; it is taken as the maintained Z_c minus those rows unless that keeps less than this share of Z_c (s is c's dominant parent), when it is recomputed exactly from c's rows. The subtraction's relative error is then at most about 2 machine-epsilon / guard = 4e-13. Exactness against enumeration: SAMPLER.md section 2. About 1.5 recomputes per child per sweep at every N measured. |
+| `max_weight_span` | `600.0` | nats | Numerical, not statistical. Row weights are held in linear space relative to each child's best always-allowed row (its M0 or exposure-untestable row); a row more than this many nats above it raises the child's reference to keep every weight and the sum of a scan over N insertion positions finite in float64 (exp(709) is the largest finite value). Captured roots span at most 256 nats; a raised reference is counted in the chain diagnostics. |
 ## science.pedigree.parameters — PedigreeParameters
 
 Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotype_reconstruction/science/pedigree/parameters.py).
@@ -954,12 +959,13 @@ Source: [haplotype_reconstruction/science/pedigree/parameters.py](../../haplotyp
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `reverse_conventions` | `False` | See model | PD27; boolean false selects the default explicit arbitrary tie convention. |
-| `preparation` | `PreparationParameters()` | See model | PD27; internal marker-selection and tempering parameter group; units are declared by its fields. |
+| `preparation` | `PreparationParameters()` | See model | PD27; internal marker-selection parameter group; units are declared by its fields. |
 | `scoring` | `ScoringParameters()` | See model | PD27; internal projected-transmission parameter group; units are declared by its fields. |
 | `panel` | `PanelParameters()` | See model | PD27; internal bounded-M2-search parameter group; units are declared by its fields. |
 | `exposure` | `ExposureParameters()` | See model | PD27; internal exposure-gate parameter group; units are declared by its fields. |
-| `direction` | `DirectionParameters()` | See model | PD27; internal orientation and family-factor parameter group; units are declared by its fields. |
-| `selection` | `SelectionParameters()` | See model | PD27; internal state-prior and acyclic-search parameter group; units are declared by its fields. |
+| `direction` | `DirectionParameters()` | See model | PD27; internal orientation parameter group; units are declared by its fields. |
+| `order` | `OrderParameters()` | See model | PD27; internal birth-order sampler parameter group (sweeps, burn-in, numerical guards); units are declared by its fields. |
+| `selection` | `SelectionParameters()` | See model | PD27; internal state-prior parameter group; units are declared by its fields. |
 | `resampling` | `ResamplingParameters()` | See model | PD27; internal unit-bootstrap parameter group; units are declared by its fields. |
 | `release` | `ReleaseParameters()` | See model | PD27; internal evidence-tier parameter group; units are declared by its fields. |
 | `exclusion` | `ExclusionParameters()` | See model | PD27; internal full-marker exclusion parameter group; units are declared by its fields. |
@@ -988,9 +994,6 @@ Source: [haplotype_reconstruction/science/pedigree/scoring_parameters.py](../../
 | Name | Default expression | Units | Provenance |
 |---|---|---|---|
 | `markers_per_bin` | `10` | See model | PS01; select at most 10 evenly spaced markers per painting bin for transmission scoring. |
-| `markers_per_information_block` | `100` | See model | PS01; group at least 100 selected markers per information block for tempering. |
-| `effective_markers_per_information_block` | `3.0` | See model | PS01; cap each information block at 3 effective markers through its emission exponent. |
-| `information_temperature` | `'confidence'` | See model | 4.21 B1 (ADVICE2 11.3, 14.1 item 7): the tempered view's exponent x = 1 / (1 + (n - 1) r_T) for n informative markers in the group, r_T = (d - 1) / (reference_snps_per_bin - 1) with d the painting's CONFIDENCE divisor (confidence), or its path divisor (path); fixed is 4.20's min(3, n) / n. r_T is a TRANSFERRED working temperature: estimated by this run under the painting's model, not the pedigree's (at d = 128 the implied correlation exceeds 1); no calibrated pedigree evidence is claimed. For a fixed path the net coefficient on the log emissions is (1 + x) / 2 >= 1/2. |
 ## science.pedigree.scoring_parameters — ScoringParameters
 
 Source: [haplotype_reconstruction/science/pedigree/scoring_parameters.py](../../haplotype_reconstruction/science/pedigree/scoring_parameters.py).
@@ -1009,7 +1012,7 @@ Source: [haplotype_reconstruction/science/pedigree/scoring_parameters.py](../../
 |---|---|---|---|
 | `max_pairs_per_child` | `256` | See model | PS07; nominal cap of 256 M2 pairs per child, every retained eligible pair below it (no relevance screen, DESIGN_417 S8, owner 14 Nov 2026), the largest full-data bounds above it; boundary ties and unknown bounds remain, and binding is flagged. |
 | `pair_bound_high_mass` | `0.01` | See model | PS07; probability-mass cutoff 0.01 for separate named-state groups; controls bound tightness and cost. |
-| `information_tempering_power` | `0.5` | See model | PS07; dimensionless exponent 0.5 on information-block count sets chromosome softmax temperature. |
+| `information_tempering_power` | `0.5` | See model | PS07; dimensionless exponent 0.5 on the selected-marker count sets the retention band's and the chromosome softmax temperature (4.21 B2 at r_T = 0; 4.22 R4: a compute budget of the latent-order decision, wide band and no cap giving the same decisions on every measured root). |
 | `maximum_contig_weight_ratio` | `4.0` | See model | PS07; dimensionless ratio 4 clips sqrt(marker count) relative to its median before normalizing weights. |
 | `rank_weight` | `0.35` | See model | PS07; probability weight 0.35 for tied-rank evidence in diagnostic utility; the remainder uses contaminated softmax. |
 | `chromosome_contamination` | `0.02` | See model | PS07; probability weight 0.02 of the uniform eligible-parent distribution in chromosome diagnostic utility. |
@@ -1021,16 +1024,12 @@ Source: [haplotype_reconstruction/science/pedigree/workspace_parameters.py](../.
 |---|---|---|---|
 | `relationship_sequence_chunk` | `32768` | count | PD28; bound binary sequence workspaces per contig task; execution grain only. |
 | `common_emission_cache_bytes` | `256 << 20` | See model | PS09; 268435456 bytes is the cutoff for retaining common child-emission caches. |
-| `class_transfer_cache_bytes` | `1 << 30` | See model | LR phase 2 Tier 2; 1073741824 bytes bound one child batch's class-transfer cache of the read state (read_transfer.class_transfers: bins x 2 views x S^2 x C^2 float64 per child); a child whose cache exceeds it is scored per site (the same values). |
+| `class_transfer_cache_bytes` | `1 << 30` | See model | LR phase 2 Tier 2; 1073741824 bytes bound one child batch's class-transfer cache of the read state (read_transfer.class_transfers: bins x S^2 x C^2 float64 per child); a child whose cache exceeds it is scored per site (the same values). |
 | `bound_workspace_bytes` | `512 << 20` | See model | PS15; workspace target 536870912 bytes sizes pair-bound batches without limiting concurrency. |
 | `bound_batch_rows` | `4000000` | See model | PS15; at most 4000000 pair-bound workspace rows per batch. |
-| `exclusion_pattern_limit` | `1024` | See model | PS20; cache at most 1024 distinct genotype-likelihood patterns per sample before direct fallback. |
 | `emission_sample_block` | `16` | See model | PS01; batches of 16 samples bound live recomputed-emission and genotype-likelihood storage. |
-| `family_lanes_per_thread` | `8` | See model | PD09; 8 interleaved independent-item lanes per supplied thread count distribute unequal family row counts. |
-| `family_claim_work` | `20000000` | See model | PD09; target 20000000 row-scan work terms per cavity iteration chunk. |
-| `family_transpose_block` | `64` | See model | PD09; transpose cavity messages in blocks of 64 samples for contiguous child reads. |
 | `selective_bound_group_bins` | `8` | See model | PS22; group 8 consecutive bins when constructing selective-bound geometry. |
-| `exclusion_dyad_batch` | `256` | See model | PS20; batches of 256 dyads bound exclusion scanner workspaces. |
+| `exclusion_dyad_batch` | `4096` | See model | PS20; batches of 4096 dyads bound exclusion scanner outputs (each dyad's window workspace is its own). 4.22 A11: the observation-model scan has no likelihood-pattern cache and certificates stop dyads at very different sites, so a batch must give every thread many dyads; kernel core use 0.52 -> 0.76 (f3 roots) and 0.78 -> 0.86-0.91 (famhs) against 256 with the round-robin dealing of exclusion_bound.score_contig (lab422/r4a); execution grain only, results do not depend on it. |
 ## science.pedigree.workspace_parameters
 
 Source: [haplotype_reconstruction/science/pedigree/workspace_parameters.py](../../haplotype_reconstruction/science/pedigree/workspace_parameters.py).
@@ -1042,11 +1041,7 @@ Source: [haplotype_reconstruction/science/pedigree/workspace_parameters.py](../.
 | `CLASS_TRANSFER_CACHE_BYTES` | `PEDIGREE_WORKSPACE.class_transfer_cache_bytes` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 | `BOUND_WORKSPACE_BYTES` | `PEDIGREE_WORKSPACE.bound_workspace_bytes` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 | `BOUND_BATCH_ROWS` | `PEDIGREE_WORKSPACE.bound_batch_rows` | See model | Workspace limits for pedigree scoring, screening and family inference. |
-| `EXCLUSION_PATTERN_LIMIT` | `PEDIGREE_WORKSPACE.exclusion_pattern_limit` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 | `EMISSION_SAMPLE_BLOCK` | `PEDIGREE_WORKSPACE.emission_sample_block` | See model | Workspace limits for pedigree scoring, screening and family inference. |
-| `FAMILY_LANES_PER_THREAD` | `PEDIGREE_WORKSPACE.family_lanes_per_thread` | See model | Workspace limits for pedigree scoring, screening and family inference. |
-| `FAMILY_CLAIM_WORK` | `PEDIGREE_WORKSPACE.family_claim_work` | See model | Workspace limits for pedigree scoring, screening and family inference. |
-| `FAMILY_TRANSPOSE_BLOCK` | `PEDIGREE_WORKSPACE.family_transpose_block` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 | `SELECTIVE_BOUND_GROUP_BINS` | `PEDIGREE_WORKSPACE.selective_bound_group_bins` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 | `EXCLUSION_DYAD_BATCH` | `PEDIGREE_WORKSPACE.exclusion_dyad_batch` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 ## science.phase.parameters — PhaseParameters
@@ -1359,9 +1354,9 @@ Source: [haplotype_reconstruction/simulation/parameters.py](../../haplotype_reco
 | `ARTEFACT_MISS` | `0.012` | See model | Baseline non-reference miss probability before sample/region factors. |
 | `ARTEFACT_MISS_SAMPLE_CV` | `0.5` | See model | Dimensionless CV of a mean-one lognormal baseline factor. |
 | `ARTEFACT_HOM_ALT_MISS_FACTOR` | `0.02` | See model | Miss probability of a hom-ALT cell over a het's: the 52-sample ONT |
-| `BALANCE_WITH_LONG_READS` | `'[simulation.artefacts] balance_dispersion must be 0 with long reads ([simulation.reads] long_read_mean_bp > 0): the long-read model makes the heterozygote balance itself, and the per-cell redraw would erase the reads that neighbouring sites share (the long_read_cohort read preset sets it to 0)'` | See model | trios miss 0.04-0.11% of hom-ALT cells against 3.5-4.6% of hets. Long reads carry their own allele balance (context sites, reference bias, shared reads); the call-set layer's per-cell beta-binomial redraw would resample each heterozygous cell on its own, erasing the reads shared by neighbouring sites, and its value was fitted to a spread that included the misses the layer adds separately. |
-| `ARTEFACT_CALL_MIN_ALT_FRACTION` | `0.15` | See model | Minimum ALT/read fraction calling a hom-reference cell. |
-| `ARTEFACT_BLOCK_BAND` | `0.5` | See model | Relative width of logarithmic depth bands, dimensionless; reproduces the measured share of cells in identical-depth runs. |
+| `BALANCE_WITH_READS` | `'[simulation.artefacts] balance_dispersion must be 0 with reads ([simulation.reads] read_length_bp > 0 or long_read_mean_bp > 0): the per-cell redraw would make reads disagree with their own homologue at single sites; reads get their balance from [simulation.reads] reference_bias (the realistic read presets set it)'` | See model | trios miss 0.04-0.11% of hom-ALT cells against 3.5-4.6% of hets. Reads carry their own allele balance (reference bias, context sites, shared reads). The call-set layer's per-cell beta-binomial redraw would resample each heterozygous cell on its own: reads covering the cell would report the other homologue's allele there and their own elsewhere, a within-read inconsistency no molecule has (4.21 D5: the read state reads such conversions as phase-inconsistent reads). The redraw is for the independent-site sampler. |
+| `HETEROZYGOTE_BALANCE_WITH_READS` | `"[simulation.reads] heterozygote_alt_probability must be 0.5 with reads (read_length_bp > 0 or long_read_mean_bp > 0): allelic imbalance with reads is read-level, set reference_bias (and reference_bias_power) instead; heterozygote_alt_probability is the independent-site sampler's per-cell law"` | See model | The same reason retires a per-hit heterozygote balance with reads (4.21 D5). |
+| `ARTEFACT_BLOCK_BAND` | `0.5` | See model | Relative log depth-band width of missed-cell runs; fits identical-depth run shares. |
 | `ARTEFACT_BALANCE_DISPERSION` | `0.05` | See model | Beta-binomial intraclass correlation of heterozygous reads. |
 | `ARTEFACT_SYSTEMATIC_SITES` | `0.03` | See model | Probability of a shared systematic ALT-error site; reproduces the measured false-ALT read share. |
 | `ARTEFACT_SYSTEMATIC_LO` | `0.1` | See model | Lower endpoint of the uniform systematic ALT/read probability. |
@@ -1389,11 +1384,27 @@ Source: [haplotype_reconstruction/simulation/parameters.py](../../haplotype_reco
 | `CONTEXT_SITES` | `0.0` | See model | Share of sites where one allele extends a homopolymer (shared by all samples). |
 | `CONTEXT_FACTOR` | `10.0` | See model | Mean multiplier of the indel error rate on the run-extending allele at a context site |
 | `CONTEXT_CONVERT` | `0.5` | See model | (each site's multiplier is context_factor times a mean-one exponential strength). Share of context indel errors read as the other allele (the rest give no base). |
-| `REFERENCE_BIAS` | `0.0` | See model | Loss hazard scale: a read's base at a site is lost (local clipping or misalignment |
-| `REFERENCE_BIAS_WINDOW_BP` | `0` | See model | against the reference) with probability 1 - exp(-reference_bias x k**power), k = the ALT alleles of the read's homologue within the window (the site included). bp; half-width of the window counting the homologue's ALT alleles; 0 = off. |
+| `REFERENCE_BIAS` | `0.0` | See model | Reference mapping-bias hazard scale, dimensionless. Paired-end: a mate fails to align |
+| `REFERENCE_BIAS_WINDOW_BP` | `0` | See model | (MAPQ or mismatch filters) and loses every base it covers with probability 1 - exp(-reference_bias x k**power), k = the ALT alleles of the fragment's homologue under the mate. Long reads: a read's base at a site is lost (local clipping or misalignment) with that probability, k counted within the window (the site included). bp; long reads: half-width of the window counting the homologue's ALT alleles. |
 | `REFERENCE_BIAS_POWER` | `1.0` | See model | Exponent of the ALT count: the loss hazard is reference_bias x k**power (clusters |
-| `FOREIGN_READ_SHARE` | `0.0` | See model | of differences misalign more than their count suggests). Share of a sample's long reads that come from another sequenced sample (cross-sample |
-| `REFERENCE_PULL` | `0.0` | See model | contamination or barcode misassignment); errors then cluster within those reads. Mean probability that a read's ALT base is reported as REF (alignment or calling toward |
+| `FOREIGN_READ_SHARE` | `0.0` | See model | of differences misalign more than their count suggests). Share of every sample's reads (long reads or paired-end fragments) that come from a |
+| `CONTAMINATION_SHARE` | `0.0` | See model | uniform other sequenced sample's homologue, drawn per read (barcode misassignment, index hopping, low-level bleed); errors then cluster within those reads. Per-sample cross-sample contamination, off while CONTAMINATION_SHARE is zero and no sample is listed. A contaminated library holds DNA of one other individual (a single donor, as heavy contamination or a mix-up usually is), at a share of its reads; most libraries stay clean. Mean share of a contaminated library's reads from its donor; each contaminated |
+| `CONTAMINATION_SAMPLE_FRACTION` | `1.0` | See model | library draws share x Exponential(1), clipped at CONTAMINATION_SHARE_LIMIT. Probability that a library is contaminated (once per sample, genome-wide). |
+| `CONTAMINATION_SHARE_LIMIT` | `1.0` | See model | A drawn share above this is clipped; 1 is a complete sample mix-up. |
+| `DUPLICATE_RATE` | `0.0` | See model | PCR duplicates (paired-end), off while DUPLICATE_RATE is zero. Copies of one library molecule left in the data (not marked: a pipeline that marks and removes them sees only a lower depth, which the depth law already covers). Mean share of a library's reads that are duplicates; each library draws rate x Exp(1). |
+| `DUPLICATE_RATE_LIMIT` | `0.9` | See model | A drawn library rate above this is clipped (generating bound). |
+| `LIBRARY_ERROR_SIGMA` | `0.0` | See model | Library-level error susceptibility, off while LIBRARY_ERROR_SIGMA is zero. Libraries differ in DNA damage, PCR cycles and run quality, so their stray-read rates differ: each library draws one lognormal factor (mean one, log-scale standard deviation sigma; genome-wide) that multiplies its base error_rate and the call-set layer's systematic per-read rates. TroMau's per-sample read error spans q50 1.4e-5 to q90 2.4e-4 (lab422/sim BUILD.md section 20). An increase is clipped at LIBRARY_ERROR_RATE_LIMIT: above it a stray read would rival a heterozygote's minor allele. Log-scale standard deviation of a library's error factor; 0 = every library alike. |
+| `LIBRARY_ERROR_RATE_LIMIT` | `0.25` | See model | Cap on a factor's increase of a per-read error rate; never lowers a rate. |
+| `CHIMERA_SHARE` | `0.0` | See model | Chimeric long reads, off while CHIMERA_SHARE is zero. Two molecules of one library joined (ligation or a missed adapter); the aligner maps each segment to its own locus (primary and supplementary alignment) and soft-clips a segment too short to place, so the shorter segment is lost when below CHIMERA_MIN_SEGMENT_BP. Share of long reads that are chimeric. |
+| `CHIMERA_MIN_SEGMENT_BP` | `500` | See model | bp; a chimera's shorter segment below this does not align (lost). |
+| `CHIMERA_MISMAP_SHARE` | `0.0` | See model | Share of those short segments aligned contiguously at the partner's locus instead, |
+| `EXOGENOUS_READ_SHARE` | `0.0` | See model | reporting alleles unrelated to the local genotype (a local misalignment). Exogenous (other-species) contamination, off while EXOGENOUS_READ_SHARE is zero. DNA of another species (human handling, bacteria) mostly fails to map; the reads that map land in sequence conserved enough to align, so they are confined to a small share of the genome, where they add depth and carry the other species' base. Mean share of a contaminated sample's MAPPED reads that are exogenous (after |
+| `EXOGENOUS_SAMPLE_FRACTION` | `1.0` | See model | mapping filters), dimensionless; each contaminated sample draws share x Exp(1). Probability that a sample is contaminated (once per sample, on every contig). |
+| `EXOGENOUS_WINDOW_FRACTION` | `0.03` | See model | Share of occupied windows conserved enough for exogenous reads to map |
+| `EXOGENOUS_WINDOW_BP` | `500` | See model | (~3% of a vertebrate genome is under strong constraint; 2-5% plausible). bp; conserved-window width (conserved elements are hundreds of bp). |
+| `EXOGENOUS_SHARE_LIMIT` | `0.45` | See model | A drawn sample share above this is clipped: exogenous reads cannot be most |
+| `EXOGENOUS_ALT_PROBABILITY` | `0.2` | See model | of a usable library's mapped reads. Generating bound, read by no inference. Probability that the other species' base at a site is the ALT allele |
+| `REFERENCE_PULL` | `0.0` | See model | (else REF). In a conserved window it carries the ancestral base, and the ALT allele is ancestral at a minority of cohort SNPs (the reference holds the derived one); third bases, rare in conserved windows, are not modelled. Mean probability that a read's ALT base is reported as REF (alignment or calling toward |
 | `STRUCTURE_PRESET` | `'cichlid'` | See model | Structural rearrangements (simulation/structure.py), off by default; enabling the "cichlid" preset uses these values. Sources: large inversions from Blumer et al. 2025 (Science 388:eadr9961): five of 22 Lake Malawi chromosomes carry an inversion polymorphic among lineages, each 17-23 Mb and more than half the chromosome; crossovers are suppressed in heterokaryotypes. Deletions and duplications: the order of the Lake Malawi pangenome (Quah et al. 2024, bioRxiv 2024.03.28.587230): 0.22 structural-variant bubbles per kb across eight assemblies, 13.8% of the reference backbone variable among them (the union of what the other haplotypes lack), transposable-element sized (kb); who lacks it follows the genealogy. Misorder: the lab's linkage breakpoints in a recent long-read assembly (23 shared-switch points in one sire's 11 daughters, about 12 misplaced segments per Gb). Values not fitted to any cross; carriers come from the source genealogy. Name of the generating structure preset. |
 | `STRUCTURE_ENABLED` | `False` | See model | Whether structural variants are generated. |
 | `STRUCTURE_INVERSION_RATE` | `5 / 22` | See model | Expected large inversions per contig (five of 22 chromosomes). |
@@ -1410,6 +1421,10 @@ Source: [haplotype_reconstruction/simulation/parameters.py](../../haplotype_reco
 | `STRUCTURE_MISORDER_RATE_PER_MB` | `0.012` | See model | Reference segments in the wrong place or orientation, per Mb. |
 | `STRUCTURE_MISORDER_MEAN_BP` | `500000.0` | See model | bp; mean exponential misordered-segment length (assumption). |
 | `STRUCTURE_CARRIER_FREQUENCY` | `0.5` | See model | File sources: probability that a source haplotype carries a variant. |
+| `STRUCTURE_COLLAPSED_FRACTION` | `0.0` | See model | Collapsed paralogs (off unless collapsed_fraction > 0): segmental duplications whose copies the reference assembly collapsed into one, so every copy's reads align to the one reference segment. Each copy raises the depth there by one homologue's depth, carries the ancestral base at the cohort's own SNPs (they arose at the other locus) and its own fixed differences (paralogous sequence variants), which the caller writes as SNPs the cohort does not segregate: pseudo-heterozygous sites shared by every sample. Off by default; the calibration against TroMau's paralog-like site shares is in docs/methods/simulation.md ("Collapsed paralogs"). Expected share of the contig inside collapsed segments (0 = off). |
+| `STRUCTURE_COLLAPSED_MEAN_BP` | `5000.0` | See model | bp; mean exponential collapsed-segment length (segmental duplications |
+| `STRUCTURE_COLLAPSED_PSV_SHARE` | `0.02` | See model | are kb to tens of kb; reads of 150 bp to 3 kb sit inside them). Share of written sites inside a collapsed segment that are paralogous |
+| `STRUCTURE_COLLAPSED_CARRIER_FREQUENCY` | `1.0` | See model | sequence variants: the realistic preset's value, calibrated so that the PSVs surviving site QC give TroMau's kept excess-heterozygous share (young duplications with few fixed differences). Probability that a stable source haplotype carries a segment's |
 ## stages.phase.parameters
 
 Source: [haplotype_reconstruction/stages/phase/parameters.py](../../haplotype_reconstruction/stages/phase/parameters.py).

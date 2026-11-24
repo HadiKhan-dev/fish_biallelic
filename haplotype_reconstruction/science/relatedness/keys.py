@@ -16,7 +16,9 @@ def _evidence_ranks(C):
     """Exact lexicographic order of the sample's own retained child-term vector, computed once per fit.
 
     Terms depend only on that sample's normalised GLs and observed mask, never the cohort allele frequency.
-    Compare numeric values in site/parent-genotype order, in bounded chunks to stop at the first difference.
+    Production term vectors use the contig search coding, so their numeric lexicographic
+    order is invariant to exchanging REF and ALT. Compare in site/parent-genotype order,
+    in bounded chunks to stop at the first difference.
     Unlike a digest order, this does not scramble unrelated samples when an upstream fit changes a last bit.
     Equal vectors share a rank: identities within that evidence class are interchangeable, so outputs are
     defined up to their permutation. No name or axis index is appended, and no likelihood tolerance or

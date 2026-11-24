@@ -288,6 +288,7 @@ def run_exchange(
         session.inputs.genetic_map,
         session.ties.reverse,
         session.ties.census,
+        search_alleles_reversed=session.inputs.search_alleles_reversed,
     )
     contexts = [macro_context(component, l1_context) for component in components]
     team = RefinementTeam(cores, current_budget())
@@ -360,6 +361,7 @@ def publish_refinement_index(session: AssemblySession, state: HierarchyState, jo
         state.level,
         session.inputs.genetic_map,
         session.ties.reverse,
+        search_alleles_reversed=session.inputs.search_alleles_reversed,
     )
     scope = records.scoped(refined_key(state.level))
     entries = []

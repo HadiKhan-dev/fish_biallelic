@@ -870,6 +870,7 @@ Source: [haplotype_reconstruction/contracts/evidence.py](../../haplotype_reconst
 | `founder_excluded` | `NDArray[np.bool_]` | state | ('N',) | 1 | bool | True | `required` |
 | `block_spans` | `NDArray[np.int64]` | state | ('B', '2') | site | int64 | True | `required` |
 | `cohort_frequencies` | `NDArray[np.float64] &#124; None` | state | ('L', '3') | probability | float64 | True | `None` |
+| `search_alleles_reversed` | `bool` | obs | () | 1 | bool | True | `False` |
 
 ## evidence.FixedFitDetails
 
@@ -1723,11 +1724,10 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `log_e` | `np.ndarray` | state | ('D',) | nats | float64 | True | `required` |
 | `observed_sites` | `np.ndarray` | obs | ('D',) | 1 | int64 | True | `required` |
 | `markers` | `int` | obs | () | 1 | int | True | `required` |
-| `pattern_fallback_samples` | `int` | diagnostic | () | 1 | int | True | `required` |
 | `log_e_upper` | `np.ndarray &#124; None` | state | ('D',) | nats | float64 | True | `None` |
 | `log_weight` | `float` | state | () | 1 | float | True | `float('nan')` |
 | `certifiable` | `np.ndarray &#124; None` | state | ('D',) | 1 | bool | True | `None` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `3` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `4` |
 
 ## pedigree.PedigreeCalls
 
@@ -1859,6 +1859,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `junctions` | `JunctionEvidence` | evidence | () | 1 | JunctionEvidence | True | `required` |
 | `regime` | `str` | state | () | 1 | str | True | `'standard'` |
 | `omission_totals` | `OmissionTotals &#124; None` | evidence | () | 1 | OmissionTotals &#124; None | True | `None` |
+| `sample_order` | `np.ndarray` | state | ('N',) | 1 | int64 | True | `required` |
 
 ## pedigree.Selection
 
@@ -1874,24 +1875,12 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `local_state` | `np.ndarray` | state | ('N',) | 1 | int8 | True | `required` |
 | `local_row` | `np.ndarray` | state | ('N',) | 1 | int64 | True | `required` |
 | `graph_row` | `np.ndarray` | state | ('N',) | 1 | int64 | True | `required` |
-| `tie_conflict` | `np.ndarray` | state | ('N',) | 1 | bool | True | `required` |
+| `order_restricted` | `np.ndarray` | state | ('N',) | 1 | bool | True | `required` |
 | `direction_resolved` | `np.ndarray` | state | ('N',) | 1 | bool | True | `required` |
 | `role_probability` | `np.ndarray` | state | ('N',) | 1 | float64 | True | `required` |
 | `state_margin` | `np.ndarray` | state | ('N',) | nats | float64 | True | `required` |
 | `identity_margin` | `np.ndarray` | state | ('N',) | nats | float64 | True | `required` |
 | `unresolved_reason` | `tuple[str &#124; None, ...]` | state | () | 1 | tuple[str &#124; None, ...] | True | `required` |
-| `graph_passes_used` | `int` | diagnostic | () | 1 | int | True | `0` |
-| `graph_pass_budget_exhausted` | `bool` | diagnostic | () | 1 | bool | True | `False` |
-
-## pedigree.LocalGraphChoices
-
-Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
-
-| Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
-|---|---|---|---|---|---|---|---|
-| `rows` | `dict[int, int]` | state | ('selected_child',) | 1 | int64 | True | `required` |
-| `state_margins` | `np.ndarray` | state | ('N',) | nats | float64 | True | `required` |
-| `identity_margins` | `np.ndarray` | state | ('N',) | nats | float64 | True | `required` |
 
 ## pedigree.GraphSelection
 
@@ -1902,8 +1891,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `rows` | `dict[int, int]` | state | ('selected_child',) | 1 | int64 | True | `required` |
 | `direction_resolved` | `frozenset[int]` | state | () | 1 | frozenset[int] | True | `required` |
 | `role_probability` | `dict[int, float]` | state | ('selected_child',) | probability | float64 | True | `required` |
-| `graph_passes_used` | `int` | diagnostic | () | 1 | int | True | `0` |
-| `graph_pass_budget_exhausted` | `bool` | diagnostic | () | 1 | bool | True | `False` |
 
 ## pedigree.EdgeCounts
 
@@ -1927,7 +1914,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `local_parent` | `EdgeCounts` | call | () | 1 | EdgeCounts | True | `required` |
 | `graph_parent` | `EdgeCounts` | call | () | 1 | EdgeCounts | True | `required` |
 | `fits` | `int` | call | () | 1 | int | True | `required` |
-| `nonconverged` | `int` | call | () | 1 | int | True | `required` |
 
 ## pedigree.Resampling
 
@@ -1939,9 +1925,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `loco` | `SupportCounts` | call | () | 1 | SupportCounts | True | `required` |
 | `multiplicities` | `np.ndarray` | call | ('R', 'C') | 1 | float64 | True | `required` |
 | `worker_count` | `int` | diagnostic | () | 1 | int | True | `required` |
-| `bootstrap_graph_budget_exhausted` | `int` | diagnostic | () | 1 | int | True | `0` |
-| `loco_graph_budget_exhausted` | `int` | diagnostic | () | 1 | int | True | `0` |
-| `maximum_graph_passes_used` | `int` | diagnostic | () | 1 | int | True | `0` |
+| `bootstrap_order_restricted` | `int` | diagnostic | () | 1 | int | True | `0` |
+| `loco_order_restricted` | `int` | diagnostic | () | 1 | int | True | `0` |
 
 ## pedigree.ChildEvidence
 
@@ -2099,7 +2084,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `partial_b` | `PartialEdges` | state | () | 1 | PartialEdges | True | `required` |
 | `candidates` | `CandidateSets` | state | () | 1 | CandidateSets | True | `required` |
 | `reach` | `TierReach` | state | () | 1 | TierReach | True | `required` |
-| `family_solve` | `FamilySolveRecord` | state | () | 1 | FamilySolveRecord | True | `required` |
+| `birth_order` | `BirthOrderRecord` | state | () | 1 | BirthOrderRecord | True | `required` |
 | `tie_events` | `TieCounts` | diagnostic | () | 1 | TieCounts | True | `required` |
 | `informative_units` | `np.ndarray` | state | ('N',) | units | float64 | True | `required` |
 | `informative_morgans` | `np.ndarray` | report | ('N',) | Morgans | float64 | True | `required` |
@@ -2183,7 +2168,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `support` | `SupportRecord &#124; None` | call | () | 1 | SupportRecord &#124; None | True | `required` |
 | `sibling_guard` | `GuardRecord &#124; None` | call | () | 1 | GuardRecord &#124; None | True | `required` |
 | `views` | `PedigreeViews` | report | () | 1 | PedigreeViews | True | `required` |
-| `family_solve` | `FamilySolveRecord &#124; None` | state | () | 1 | FamilySolveRecord &#124; None | True | `required` |
+| `birth_order` | `BirthOrderRecord &#124; None` | state | () | 1 | BirthOrderRecord &#124; None | True | `required` |
 | `guard_summary` | `GuardSummary &#124; None` | report | () | 1 | GuardSummary &#124; None | True | `required` |
 | `exclusion` | `ExclusionSummary` | state | () | 1 | ExclusionSummary | True | `required` |
 | `retained` | `PedigreeRetained &#124; None` | state | () | 1 | PedigreeRetained &#124; None | True | `required` |
@@ -2191,7 +2176,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `regime` | `str` | state | () | 1 | str | True | `'standard'` |
 | `material` | `MaterialChoice &#124; None` | report | () | 1 | MaterialChoice &#124; None | True | `None` |
 | `map_scale` | `MapScaleEstimate &#124; None` | report | () | 1 | MapScaleEstimate &#124; None | True | `None` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `9` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `10` |
 
 ## pedigree.PedigreeResult
 
@@ -2215,7 +2200,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `children` | `np.ndarray` | state | ('N',) | 1 | bool | True | `required` |
 | `parents` | `np.ndarray` | state | ('N', 'N') | 1 | bool | True | `required` |
 
-## pedigree.FamilySolveRecord
+## pedigree.BirthOrderRecord
 
 Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
@@ -2223,16 +2208,14 @@ Extends `SummaryMapping`.
 
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
-| `iterations` | `int` | state | () | 1 | int | True | `required` |
-| `residual` | `float` | state | () | nats | float | True | `required` |
-| `tolerance` | `float` | state | () | 1 | float | True | `required` |
-| `maximum_iterations` | `int` | state | () | 1 | int | True | `required` |
-| `retry_iterations` | `int` | state | () | 1 | int | True | `required` |
-| `retry_limit` | `int` | state | () | 1 | int | True | `required` |
-| `retry_damping` | `float` | state | () | 1 | float | True | `required` |
-| `frozen_path_preparation_passes` | `int` | state | () | 1 | int | True | `required` |
-| `nonconverged_bootstrap_replicates` | `int` | state | () | 1 | int | True | `required` |
-| `nonconverged_loco_replicates` | `int` | state | () | 1 | int | True | `required` |
+| `burn_in_sweeps` | `int` | state | () | 1 | int | True | `required` |
+| `full_sweeps` | `int` | state | () | 1 | int | True | `required` |
+| `resampled_sweeps` | `int` | state | () | 1 | int | True | `required` |
+| `full_order_restricted` | `int` | state | () | 1 | int | True | `required` |
+| `bootstrap_order_restricted` | `int` | state | () | 1 | int | True | `required` |
+| `loco_order_restricted` | `int` | state | () | 1 | int | True | `required` |
+| `full_raised_references` | `int` | diagnostic | () | 1 | int | True | `required` |
+| `full_guarded_recomputes` | `int` | diagnostic | () | 1 | int | True | `required` |
 
 ## pedigree.EligibilityRecord
 
@@ -2264,7 +2247,7 @@ Extends `SummaryMapping`.
 |---|---|---|---|---|---|---|---|
 | `model` | `str` | report | () | 1 | str | True | `required` |
 | `alpha` | `float` | report | () | 1 | float | True | `required` |
-| `genotype_replacement_probability` | `float` | report | () | 1 | float | True | `required` |
+| `unresolved_rate_samples` | `int` | report | () | 1 | int | True | `required` |
 | `conditional_on_supported_edge_directions` | `bool` | report | () | 1 | bool | True | `required` |
 | `candidate_dyads` | `int` | report | () | 1 | int | True | `required` |
 | `contigs` | `int` | obs | () | 1 | int | True | `required` |
@@ -2300,12 +2283,9 @@ Extends `SummaryMapping`.
 | `structural_identity` | `np.ndarray` | state | ('A',) | nats | float64 | True | `required` |
 | `testable` | `np.ndarray` | state | ('A',) | 1 | bool | True | `required` |
 | `direction` | `np.ndarray` | state | ('A',) | nats | float64 | True | `required` |
-| `ancestry_paths` | `np.ndarray` | state | ('A',) | nats | float64 | True | `required` |
-| `reciprocal_family` | `np.ndarray` | state | ('A',) | nats | float64 | True | `required` |
+| `birth_order` | `np.ndarray` | state | ('A',) | nats | float64 | True | `required` |
 | `orientation_log_odds` | `np.ndarray` | state | ('N', 'N') | nats | float64 | True | `required` |
-| `final_family_iterations` | `int` | state | () | 1 | int | True | `required` |
-| `final_family_retry_iterations` | `int` | state | () | 1 | int | True | `required` |
-| `final_family_residual` | `float` | state | () | nats | float64 | True | `required` |
+| `birth_order_sweeps` | `int` | state | () | 1 | int | True | `required` |
 
 ## pedigree.StructuralCompatibility
 
@@ -2430,7 +2410,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `identifiable` | `bool` | report | () | 1 | bool | True | `required` |
 | `dag_displaced` | `bool` | report | () | 1 | bool | True | `required` |
 | `graph_conflict` | `bool` | report | () | 1 | bool | True | `required` |
-| `graph_tie_conflict` | `bool` | report | () | 1 | bool | True | `required` |
+| `order_restricted` | `bool` | report | () | 1 | bool | True | `required` |
 | `graph_direction_resolved_alternative` | `bool` | report | () | 1 | bool | True | `required` |
 | `local_parent_role_probability` | `float` | report | () | 1 | float64 | True | `required` |
 | `selected_parent_role_probability` | `float` | report | () | 1 | float64 | True | `required` |
@@ -2505,7 +2485,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `inference_status` | `str` | report | () | 1 | str | True | `required` |
 | `dag_displaced` | `bool` | report | () | 1 | bool | True | `required` |
 | `graph_conflict` | `bool` | report | () | 1 | bool | True | `required` |
-| `graph_tie_conflict` | `bool` | report | () | 1 | bool | True | `required` |
+| `order_restricted` | `bool` | report | () | 1 | bool | True | `required` |
 | `graph_direction_resolved_alternative` | `bool` | report | () | 1 | bool | True | `required` |
 | `selected_parent_role_probability` | `float` | report | () | 1 | float64 | True | `required` |
 | `tier_a_state_call` | `bool` | report | () | 1 | bool | True | `required` |
@@ -2567,8 +2547,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `structural_state_log_evidence` | `float` | report | () | nats | float64 | True | `required` |
 | `structural_identity_eligible` | `bool` | report | () | 1 | bool | True | `required` |
 | `direction_log_contribution` | `float` | report | () | nats | float64 | True | `required` |
-| `reciprocal_family_log_contribution` | `float` | report | () | nats | float64 | True | `required` |
-| `ancestry_path_log_contribution` | `float` | report | () | nats | float64 | True | `required` |
+| `birth_order_log_contribution` | `float` | report | () | nats | float64 | True | `required` |
 | `adjusted_state_log_evidence` | `float` | report | () | nats | float64 | True | `required` |
 | `adjusted_identity_log_evidence` | `float` | report | () | nats | float64 | True | `required` |
 | `parent_state_log_prior` | `float` | report | () | nats | float64 | True | `required` |
@@ -2892,7 +2871,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `genotype_likelihoods` | `np.ndarray` | state | ('N', 'M', '3') | probability | float64 | True | `required` |
 | `observed` | `np.ndarray` | state | ('N', 'M') | 1 | bool | True | `required` |
 | `state_classes` | `np.ndarray` | state | ('N', 'B', '2') | 1 | int16 | True | `required` |
-| `information_exponent` | `np.ndarray` | state | ('N', 'B') | 1 | float64 | True | `required` |
 | `selector_fallback_bp` | `np.ndarray &#124; None` | state | ('B-1',) | bp | float64 | True | `None` |
 | `label_error` | `np.ndarray &#124; None` | state | ('N', 'B', '3') | probability | float32 | True | `None` |
 | `child_reads` | `ChildReads &#124; None` | state | () | 1 | ChildReads &#124; None | True | `None` |
@@ -2908,8 +2886,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `components` | `tuple[PreparedComponent, ...]` | state | ('components',) | 1 | tuple[PreparedComponent, ...] | True | `required` |
 | `omitted_reason` | `str &#124; None` | state | () | 1 | str &#124; None | True | `None` |
 | `configured_morgans` | `float` | state | () | Morgans | float64 | True | `float('nan')` |
-| `effective_units` | `float` | state | () | 1 | float64 | True | `float('nan')` |
-| `schema` | `int` | diagnostic | () | 1 | int | True | `6` |
+| `search_alleles_reversed` | `bool` | obs | () | 1 | bool | True | `False` |
+| `schema` | `int` | diagnostic | () | 1 | int | True | `7` |
 
 ## pedigree.ChromosomeScores
 
@@ -2979,7 +2957,7 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `floors` | `np.ndarray` | state | ('C', 'N') | nats | float64 | True | `required` |
 | `markers` | `np.ndarray` | obs | ('C',) | 1 | float64 | True | `required` |
 | `eligible_counts` | `np.ndarray` | state | ('N',) | 1 | int64 | True | `required` |
-| `units` | `np.ndarray &#124; None` | state | ('C',) | 1 | float64 | True | `None` |
+| `units` | `np.ndarray` | state | ('C',) | 1 | float64 | True | `required` |
 
 ## pedigree.ScreenBatchCounts
 
@@ -3088,9 +3066,8 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `loco` | `SupportCounts` | call | () | 1 | SupportCounts | True | `required` |
 | `multiplicities` | `np.ndarray` | call | ('R', 'C') | 1 | float64 | True | `required` |
 | `worker_count` | `int` | diagnostic | () | 1 | int | True | `required` |
-| `bootstrap_graph_budget_exhausted` | `int` | diagnostic | () | 1 | int | True | `0` |
-| `loco_graph_budget_exhausted` | `int` | diagnostic | () | 1 | int | True | `0` |
-| `maximum_graph_passes_used` | `int` | diagnostic | () | 1 | int | True | `0` |
+| `bootstrap_order_restricted` | `int` | diagnostic | () | 1 | int | True | `0` |
+| `loco_order_restricted` | `int` | diagnostic | () | 1 | int | True | `0` |
 | `bootstrap_fractions` | `SupportFractions` | call | () | 1 | SupportFractions | True | `required` |
 | `loco_fractions` | `SupportFractions` | call | () | 1 | SupportFractions | True | `required` |
 
@@ -4019,12 +3996,15 @@ Source: [haplotype_reconstruction/simulation/truth.py](../../haplotype_reconstru
 | `flips` | `TruthFlips` | obs | () | 1 | TruthFlips | True | `required` |
 | `dropped_positions` | `np.ndarray` | obs | ('D',) | bp | int64 | True | `required` |
 | `missed` | `np.ndarray &#124; None` | obs | ('N', 'L') | 1 | bool &#124; None | True | `None` |
-| `block` | `np.ndarray &#124; None` | obs | ('N', 'L') | 1 | bool &#124; None | True | `None` |
 | `systematic_site` | `np.ndarray &#124; None` | obs | ('L',) | 1 | bool &#124; None | True | `None` |
 | `spurious` | `np.ndarray &#124; None` | obs | ('L',) | 1 | bool &#124; None | True | `None` |
 | `structure` | `StructureTruth &#124; None` | obs | () | 1 | StructureTruth &#124; None | True | `None` |
 | `injected_alleles` | `np.ndarray &#124; None` | obs | ('N', 'L', '2') | 1 | int8 &#124; None | True | `None` |
 | `injected_mask` | `np.ndarray &#124; None` | obs | ('N', 'L') | 1 | bool &#124; None | True | `None` |
+| `contamination_share` | `np.ndarray &#124; None` | obs | ('N',) | 1 | float64 &#124; None | True | `None` |
+| `contamination_donor` | `tuple &#124; None` | obs | ('N',) | 1 | tuple &#124; None | True | `None` |
+| `duplicate_rate` | `np.ndarray &#124; None` | obs | ('N',) | 1 | float64 &#124; None | True | `None` |
+| `library_error_factor` | `np.ndarray &#124; None` | obs | ('N',) | 1 | float64 &#124; None | True | `None` |
 | `schema` | `int` | diagnostic | () | 1 | int | True | `SCHEMA` |
 
 ## pedigree.PedigreeTable

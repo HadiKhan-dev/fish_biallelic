@@ -651,6 +651,15 @@ def compile_kernel(name: tuple[str, str], signatures: bytes, declared: bytes) ->
     return _compile_function(name, signatures, declared)
 
 
+def restrict_warmup(state: CacheState, modules: set[str]) -> None:
+    """Keep only the scheduled warm-up misses. Other overloads can still compile and be learned lazily."""
+    for name in tuple(state.missing):
+        if name[0] not in modules:
+            missing = state.missing.pop(name)
+            state.union[name].difference_update(missing)
+            state.requested -= len(missing)
+
+
 def compile_tasks(state: CacheState) -> tuple:
     """The plan's compilations as graph tasks, one per missing overload, for a caller that runs them beside its
     stages instead of before them (interface.run). The caller attaches each consumer's missing compile keys as

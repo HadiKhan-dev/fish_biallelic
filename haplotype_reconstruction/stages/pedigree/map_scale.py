@@ -35,15 +35,16 @@ from ...contracts.payload import from_payload, to_payload
 from ...contracts.roles import require_schema
 from ...core.concurrency import threaded_each
 from ...core.errors import InputError
-from ...engine.cpu import thread_team
+from ...engine.cpu import TASK_THREADS, thread_team
 from ...engine.graph import Expansion, ResourceRequest, ResultRef, Task, TaskKey
 from ...engine.records import record_diagnostic
+from ...science.painting.parameters import PaintingParameters
 from ...science.pedigree import map_scale as science
 from ...science.pedigree import map_scale_frames as frames_science
 from ...science.pedigree import map_scale_reads as reads_science
 from ...science.pedigree.parameters import PedigreeParameters
 from ...store.identity import code_dependency_identity
-from ...store.protocol import Derivation, NumericalPolicy
+from ...store.protocol import Derivation, NumericalPolicy, claim, publish, read_items, resume
 from ...store.store import CheckpointStore
 from ..framework import load_product, publish_product
 from ..relatedness.working_map import map_identity
@@ -51,6 +52,9 @@ from ..relatedness.working_map import map_identity
 __all__ = ["KEY", "MapScaleAdapter", "derivation", "expected", "load", "run_stored"]
 
 KEY = "pedigree/map_scale"
+INPUTS = "pedigree/map_scale_inputs"
+PAIRS = "pedigree/map_scale_pairs"
+FRAMES = "pedigree/map_scale_frames"
 
 
 class MapScaleAdapter:
@@ -88,21 +92,12 @@ def expected(store: CheckpointStore, manifest: Mapping[str, Any], parameters: Pe
 
     A caller that already checked those contig dependencies can pass them in configured order.
     """
-    from ..evidence import records as evidence_records
-    from ..painting import repaint as painting_records  # the painting the pedigree reads (4.21 P)
     from ..relatedness import families_records
-
-    def bind(c: str) -> tuple[str, str, str]:
-        painted = painting_records.result_reader(store, manifest, product="refit_reference", contig=c, panels=False)
-        observed = evidence_records.result_reader(store, manifest, product="evidence", contig=c)
-        if painted is None or observed is None:
-            raise InputError(f"the map-scale estimate requires painting and evidence for {c}")
-        return painted.identity, observed.identity, map_identity(store, manifest, c)
 
     contigs = AnalysisContigs.from_manifest(manifest).included
     upstream: dict[str, str] = {}
     if contig_inputs is None:
-        contig_inputs = dict(zip(contigs, threaded_each(bind, contigs), strict=True))
+        contig_inputs, _ = contig_causes(store, manifest)
     if tuple(contig_inputs) != contigs:
         raise InputError("map-scale inputs differ from the included contig axis")
     for c, (painted, observed, working_map) in contig_inputs.items():
@@ -114,6 +109,39 @@ def expected(store: CheckpointStore, manifest: Mapping[str, Any], parameters: Pe
         raise InputError("the map-scale estimate requires relatedness/families")
     upstream["relatedness/families"] = family.identity
     return derivation(parameters, upstream, numerical_policy=numerical_policy)
+
+
+def contig_causes(store: CheckpointStore, manifest: Mapping[str, Any]) -> tuple[dict[str, tuple[str, str, str]], str]:
+    """Bind repaint, evidence and map headers with one run-wide contamination binding."""
+    from ..painting import contamination_records
+    from ..refit import records as refit_records
+
+    contigs = AnalysisContigs.from_manifest(manifest).included
+    # Contamination binds the original paintings of every contig. Bind that reduction once, outside
+    # the contig map, and read repaint identities without their optional emission caches.
+    contamination = contamination_records.expected(store, manifest, product="contamination").identity
+    refit_records.expected(store, manifest, product="priors")  # warm the shared worker-local refit binding
+    causes = threaded_each(partial(contig_cause, store, manifest, contamination=contamination), contigs)
+    return dict(zip(contigs, causes, strict=True)), contamination
+
+
+def contig_cause(store: CheckpointStore, manifest: Mapping[str, Any], contig: str, *,
+                 contamination: str) -> tuple[str, str, str]:
+    from ..evidence import records as evidence_records
+    from ..painting import records as painting_records
+    from ..painting import repaint
+    from ..refit import records as refit_records
+
+    if not store.contig(contig).has(repaint.REFIT_REFERENCE):
+        raise InputError(f"the pedigree requires repaint for {contig}")
+    reference = painting_records.expected(store, manifest, product="reference", contig=contig)
+    refit = refit_records.expected(store, manifest, product="refit", contig=contig)
+    observed = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
+    if reference is None or refit is None or observed is None:
+        raise InputError(f"the pedigree requires painting, refit and evidence for {contig}")
+    painted = repaint.derivation(reference.identity, refit.identity, contamination,
+                                 numerical_policy=NumericalPolicy(**manifest["numerical_policy"]))
+    return painted, observed.identity, map_identity(store, manifest, contig)
 
 
 def load(store: CheckpointStore, identity: str) -> MapScaleEstimate:
@@ -165,6 +193,13 @@ def _component_inputs(store, manifest, contig_index, contig, rows, threads) -> t
             if evidence is None:
                 observed = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
                 evidence = evidence_records.load_dense(file, expected_identity=observed.identity)
+                # 4.22 QC A: flagged libraries on corrected likelihoods, as in the repaint whose packed emissions
+                # the other components reuse
+                from ..painting import contamination as contamination_stage
+
+                evidence = contamination_stage.corrected_evidence(
+                    store, manifest, contig, evidence, evidence_identity=observed.identity
+                )
             packed = frames_science.packed_emissions(
                 comp, painting.parameters, painting.robustness_epsilon, evidence, rows, site_correlation,
                 map_work=threaded_each,
@@ -216,6 +251,11 @@ def _contig_reads(store, manifest, contig: str, context: tuple) -> reads_science
     file = store.contig(contig)
     observed = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
     evidence = evidence_records.load_dense(file, expected_identity=observed.identity)
+    from ..painting import contamination as contamination_stage  # 4.22 QC A: flagged libraries corrected
+
+    evidence = contamination_stage.corrected_evidence(
+        store, manifest, contig, evidence, evidence_identity=observed.identity
+    )
     cohort = evidence.cohort_frequencies
     builder = stage_builder(partial(scalar_emissions, cohort=cohort), file, observed.identity, cohort, None,
                             parameters, unit_batches=True)
@@ -239,8 +279,11 @@ class _FamilyFrames:
 def _build_contig(root, manifest, contig, components, sites, context, samples, families, active, guard_pass,
                   batch_bytes, *, threads=1):
     store = CheckpointStore(root, nthreads=threads)
-    source = reads_science.ReadFrames(sites, samples, lambda _: _contig_reads(store, manifest, contig, context),
-                                     batch_bytes=batch_bytes)
+    source = (
+        reads_science.ScalarFrames(components) if context is None else
+        reads_science.ReadFrames(sites, samples, lambda _: _contig_reads(store, manifest, contig, context),
+                                 batch_bytes=batch_bytes)
+    )
     pieces = frames_science.frame_pieces(components, families, active, threaded_each)
     # The read law crosses the ordered sites between successive requested bins. Scattering contigs and
     # restricting the emission bins leaves the evidence read and label-independent builder work; on TroMau
@@ -251,7 +294,8 @@ def _build_contig(root, manifest, contig, components, sites, context, samples, f
     batches = []
     for piece in pieces:
         i, family, rows, _, bins, _ = piece
-        symbols, entry, offsets = frames_science.piece_emissions(piece, source, source.class_count(i, rows))
+        classes = 1 if context is None else source.class_count(i, rows)
+        symbols, entry, offsets = frames_science.piece_emissions(piece, source, classes)
         if not guard_pass:
             symbols = np.ascontiguousarray(symbols[:, frames_science.FULL_SIB_COLUMNS])
         batches.append(_FamilyFrames(components[i].contig, i, family, rows[offsets[:-1]], offsets,
@@ -292,8 +336,167 @@ def _join_frames(batches, guard_pass):
     return frames, em25
 
 
+@dataclass(frozen=True)
+class _Inputs:
+    components: tuple[frames_science.ComponentInput, ...]
+    sites: tuple[reads_science.FrameSites, ...]
+    context: tuple[PaintingParameters, float, float] | None
+    schema: int = 1
+
+    def parts(self):
+        return self.components, self.sites, self.context
+
+
+@dataclass(frozen=True)
+class _Frames:
+    batches: tuple[_FamilyFrames, ...]
+    schema: int = 1
+
+
+def _family_inputs(store, manifest):
+    from ..relatedness import families_records
+
+    reader = families_records.result_reader(store, manifest, product="families")
+    if reader is None:
+        raise InputError("the map-scale estimate requires relatedness/families")
+    product = families_records.load(store.run, reader.identity)
+    if product is None or tuple(product.sample_ids) != tuple(manifest["sample_ids"]):
+        raise InputError("relatedness/families sample axis differs from the map-scale estimate's")
+    family = np.asarray(product.family, dtype=np.int64)
+    parents = np.asarray(product.parents, dtype=np.int64)
+    rows = frames_science.relevant_samples(family, parents)
+    return rows, frames_science.families_of(family, parents, rows), reader.identity
+
+
+def _inputs_identity(manifest, index, contig, causes, family_identity):
+    painting, evidence, working_map = causes
+    return Derivation(
+        code_dependency_identity((__name__,)), dict(product=INPUTS, contig=contig, index=index, schema=1),
+        NumericalPolicy(**manifest["numerical_policy"]),
+        dict(painting=painting, evidence=evidence, map=working_map, families=family_identity),
+    ).identity
+
+
+def _published_inputs(store, contig, identity, *, required=False):
+    saved = resume(store.contig(contig), INPUTS, identity)
+    if saved is None:
+        if required:
+            raise InputError(f"{contig}: publish pedigree --stage map-inputs before the map-scale gather")
+        return None
+    require_schema(saved.payload, 1)
+    return from_payload(_Inputs, saved.payload).parts()
+
+
+def _pair_state(components, families, parameters):
+    return frames_science.pair_guard(components, families, parameters.map_scale, threaded_each)
+
+
+def _publish_pairs(store, identity, state):
+    guard = dict(
+        active=[[f, sorted(members)] for f, members in state.active.items()],
+        excluded_pair=state.excluded_pair,
+        pair_tests=list(state.pair_tests.items()),
+    )
+    publish(store.run, PAIRS, identity, dict(schema=1, guard=guard))
+
+
+def _read_pairs(store, identity):
+    saved = resume(store.run, PAIRS, identity)
+    if saved is None:
+        raise InputError("publish pedigree --stage map-pairs before building map-scale frames")
+    require_schema(saved.payload, 1)
+    guard = saved.payload["guard"]
+    return frames_science.GuardResult(
+        {f: set(members) for f, members in guard["active"]},
+        tuple(guard["excluded_pair"]), (), (), {row: tuple(counts) for row, counts in guard["pair_tests"]},
+    )
+
+
+def _read_frames(store, contig, identity, *, required=False):
+    saved = resume(store.contig(contig), FRAMES, identity)
+    if saved is None:
+        if required:
+            raise InputError(f"{contig}: publish pedigree --stage map-frames before the map-scale gather")
+        return None
+    require_schema(saved.payload, 1)
+    return from_payload(_Frames, saved.payload).batches
+
+
+def scatter_inputs(root, manifest, contig, *, threads=1):
+    """Publish the same restricted component data the single-node map-scale graph transfers."""
+    from ..painting import contamination_records
+
+    store = CheckpointStore(root, nthreads=threads)
+    index = AnalysisContigs.from_manifest(manifest).included.index(contig)
+    contamination = contamination_records.expected(store, manifest, product="contamination").identity
+    causes = contig_cause(store, manifest, contig, contamination=contamination)
+    rows, _, family_identity = _family_inputs(store, manifest)
+    identity = _inputs_identity(manifest, index, contig, causes, family_identity)
+    file = store.contig(contig)
+    with claim(file, INPUTS, identity) as needed:
+        if needed:
+            components, sites, context = _component_inputs(store, manifest, index, contig, rows, threads)
+            publish(file, INPUTS, identity, to_payload(_Inputs(tuple(components), tuple(sites), context)))
+    return identity
+
+
+def scatter_pairs(root, manifest, parameters, policy, *, threads=1):
+    """Gather the contig inputs and freeze the active families of the first frame round."""
+    store = CheckpointStore(root, nthreads=threads)
+    causes, _ = contig_causes(store, manifest)
+    identity = expected(store, manifest, parameters, policy, contig_inputs=causes)
+    with claim(store.run, PAIRS, identity) as needed:
+        if needed:
+            _, families, family_identity = _family_inputs(store, manifest)
+            # Contig decodes share the task's team. Each map item supplies its own live codec allowance.
+            readers = CheckpointStore(root, nthreads=TASK_THREADS)
+            inputs = threaded_each(
+                lambda row: _published_inputs(readers, row[1], _inputs_identity(
+                    manifest, row[0], row[1], causes[row[1]], family_identity), required=True),
+                enumerate(causes),
+            )
+            components = [component for part, _, _ in inputs for component in part]
+            state = _pair_state(components, families, parameters)
+            _publish_pairs(store, identity, state)
+    return identity
+
+
+def scatter_frames(root, manifest, contig, parameters, policy, *, threads=1):
+    """Publish the contig's first-round frame emissions from the frozen pair guard."""
+    store = CheckpointStore(root, nthreads=threads)
+    causes, _ = contig_causes(store, manifest)
+    identity = expected(store, manifest, parameters, policy, contig_inputs=causes)
+    file = store.contig(contig)
+    with claim(file, FRAMES, identity) as needed:
+        if needed:
+            guard = _read_pairs(store, identity)
+            batches = ()
+            if any(len(members) >= 2 for members in guard.active.values()):
+                rows, families, family_identity = _family_inputs(store, manifest)
+                index = tuple(causes).index(contig)
+                inputs = _published_inputs(store, contig, _inputs_identity(
+                    manifest, index, contig, causes[contig], family_identity), required=True)
+                if inputs[0]:
+                    share = max(1, reads_science.READ_STATE_BATCH_BYTES // len(causes))
+                    batches = tuple(_build_contig(
+                        root, manifest, contig, *inputs, rows, families, guard.active,
+                        parameters.map_scale.target_iterations > 0, share, threads=threads,
+                    ))
+            publish(file, FRAMES, identity, to_payload(_Frames(batches)))
+    return identity
+
+
+def _frames_stored(root, manifest, contig, inputs, samples, families, active, guard_pass, share, identity,
+                   iteration, gather_only, *, threads=1):
+    if iteration == 0:
+        batches = _read_frames(CheckpointStore(root, nthreads=threads), contig, identity, required=gather_only)
+        if batches is not None:
+            return batches
+    return _build_contig(root, manifest, contig, *inputs, samples, families, active, guard_pass, share, threads=threads)
+
+
 def _frame_tasks(root, manifest, maps, parameters, identity, inputs, samples, families, state, iteration,
-                 maximum_cores, retained=(), changed=None):
+                 maximum_cores, retained=(), changed=None, *, gather_only=False):
     active = state.active if changed is None else {f: state.active[f] for f in changed}
     contigs = AnalysisContigs.from_manifest(manifest).included
     guard_pass = iteration < parameters.map_scale.target_iterations
@@ -303,8 +506,9 @@ def _frame_tasks(root, manifest, maps, parameters, identity, inputs, samples, fa
     has_families = any(len(members) >= 2 for members in active.values())
     share = max(1, reads_science.READ_STATE_BATCH_BYTES // max(1, len(contigs)))
     tasks = tuple(
-        Task(TaskKey("pedigree", "map_scale.frames", c, str(iteration)), _build_contig,
-             args=(root, manifest, c, *inputs[i], samples, families, active, guard_pass, share),
+        Task(TaskKey("pedigree", "map_scale.frames", c, str(iteration)), _frames_stored,
+             args=(root, manifest, c, inputs[i], samples, families, active, guard_pass, share, identity,
+                   iteration, gather_only),
              resources=ResourceRequest(max_cores=maximum_cores), thread_argument="threads")
         for i, c in enumerate(contigs) if has_families and inputs[i][0]
     )
@@ -348,34 +552,28 @@ def run_stored(
     *,
     threads: int = 1,
     maximum_cores: int | None = None,
+    gather_only: bool = False,
 ) -> str | Expansion:
     """Resume or compute the record; returns its identity (the barrier reads the record by it)."""
-    from ..relatedness import families_records
-
     store = CheckpointStore(root, nthreads=threads)
-    # Resume and family input depend on the complete upstream identity. The contig reads run independently.
-    # Removing repeated refit binding cut this TroMau task from 114.6 wall / 166.7 CPU s to 17.7 / 23.8 s.
-    # The remaining family read and the single derivation follow the checked contig results.
-    identity = expected(store, manifest, parameters, numerical_policy)
-    adapter = MapScaleAdapter()
-    if load_product(store.run, KEY, identity, adapter) is not None:
+    causes, _ = contig_causes(store, manifest)
+    identity = expected(store, manifest, parameters, numerical_policy, contig_inputs=causes)
+    saved = read_items(store.run, KEY, identity, ("schema",))
+    if saved is not None:
+        require_schema(saved.payload, MapScaleAdapter.schema)
         return identity
-    family_reader = families_records.result_reader(store, manifest, product="families")
-    families_product = families_records.load(store.run, family_reader.identity)
-    if families_product is None or tuple(families_product.sample_ids) != tuple(manifest["sample_ids"]):
-        raise InputError("relatedness/families sample axis differs from the map-scale estimate's")
-    family = np.asarray(families_product.family, dtype=np.int64)
-    parents = np.asarray(families_product.parents, dtype=np.int64)
-    rows = frames_science.relevant_samples(family, parents)
-    families = frames_science.families_of(family, parents, rows)
+    rows, families, family_identity = _family_inputs(store, manifest)
     contigs = AnalysisContigs.from_manifest(manifest).included
     if maximum_cores is not None:
         tasks = tuple(Task(TaskKey("pedigree", "map_scale.inputs", c), _load_contig,
-                           args=(root, manifest, i, c, rows), resources=ResourceRequest(max_cores=maximum_cores),
+                           args=(root, manifest, i, c, rows, _inputs_identity(manifest, i, c, causes[c], family_identity),
+                                 gather_only),
+                           resources=ResourceRequest(max_cores=maximum_cores),
                            thread_argument="threads") for i, c in enumerate(contigs))
         gather = Task(TaskKey("pedigree", "map_scale.pairs"), _after_inputs,
                       args=(tuple(ResultRef(t.key) for t in tasks), root, manifest, maps, parameters,
                             identity, families, rows, maximum_cores),
+                      kwargs=dict(gather_only=gather_only),
                       resources=ResourceRequest(max_cores=maximum_cores), thread_argument="threads")
         return Expansion(tasks, gather)
     inputs = _concurrent([partial(_component_inputs, store, manifest, k, c, rows, threads)
@@ -383,11 +581,16 @@ def run_stored(
     return _after_inputs(inputs, root, manifest, maps, parameters, identity, families, rows, None, threads=threads)
 
 
-def _load_contig(root, manifest, index, contig, rows, *, threads=1):
-    return _component_inputs(CheckpointStore(root, nthreads=threads), manifest, index, contig, rows, threads)
+def _load_contig(root, manifest, index, contig, rows, input_identity, gather_only, *, threads=1):
+    store = CheckpointStore(root, nthreads=threads)
+    saved = _published_inputs(store, contig, input_identity, required=gather_only)
+    if saved is not None:
+        return saved
+    return _component_inputs(store, manifest, index, contig, rows, threads)
 
 
-def _after_inputs(inputs, root, manifest, maps, parameters, identity, families, rows, maximum_cores, *, threads=1):
+def _after_inputs(inputs, root, manifest, maps, parameters, identity, families, rows, maximum_cores, *,
+                  threads=1, gather_only=False):
     store = CheckpointStore(root, nthreads=threads)
     contigs = AnalysisContigs.from_manifest(manifest).included
     clock = _PhaseClock()
@@ -401,12 +604,15 @@ def _after_inputs(inputs, root, manifest, maps, parameters, identity, families, 
         clock.mark("collect inputs")
         if contexts and len(sites) != len(components):
             raise InputError("the map-scale estimate needs every contig's painting with or without the read state")
-        if contexts and maximum_cores is not None:
+        if maximum_cores is not None and (contexts or gather_only or store.run.has(PAIRS)):
             # The target frame requests depend on this pair guard. Its contig/family work is already mapped
             # independently. On TroMau its gather and guard took 5.8 CPU s in 0.48 wall s after rebinding.
-            state = frames_science.pair_guard(components, families, parameters.map_scale, threaded_each)
+            if gather_only or store.run.has(PAIRS):
+                state = _read_pairs(store, identity)
+            else:
+                state = _pair_state(components, families, parameters)
             return _frame_tasks(root, manifest, maps, parameters, identity, inputs, rows, families, state, 0,
-                                maximum_cores)
+                                maximum_cores, gather_only=gather_only)
         if contexts:
             source = reads_science.ReadFrames(
                 sites, rows, lambda k: _contig_reads(store, manifest, contigs[k], contexts[k]), concurrent=_concurrent)

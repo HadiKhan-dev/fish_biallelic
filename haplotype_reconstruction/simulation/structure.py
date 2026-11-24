@@ -35,6 +35,20 @@ Random streams (PCG64, SHA-256 keyed by stable identifiers after the realised se
 for the variants, carriers and paralogous differences; ``simulation.sv.gamete`` (seed, key...) for unlinked segments'
 homologue choices; ``simulation.sv.reads`` (read seed, sample index) for the copy reads and deletion thinning. With the
 model off nothing here runs and no stream is created.
+
+Collapsed paralogs (``collapsed_fraction`` > 0, structure enabled): segmental duplications that the reference assembly
+collapsed into one segment, so the reads of every copy align to it. Segments are disjoint half-open intervals: a
+Poisson number with mean collapsed_fraction x extent / collapsed_mean_bp, uniform starts, exponential lengths, a
+segment overlapping an earlier one dropped. Each stable source haplotype carries a segment's copy with probability
+``collapsed_carrier_frequency`` (1: fixed; below 1 a copy-number polymorphism, inherited through the pedigree by the
+source haplotype at the segment's start, as the duplications above). A share ``collapsed_psv_share`` of the written
+sites inside a segment are paralogous sequence variants (PSVs): the cohort is reference-only there (the panel's
+alleles are set to REF and the site is marked spurious, so the truth calls it monomorphic) and the copy carries ALT.
+At every other site inside a segment the copy carries the ancestral base (REF, or ALT where the reference genome holds
+the derived allele): the cohort's own SNPs arose at the other locus. Each carried copy adds one homologue's depth of
+reads, simulated as reads inside the segment by the sample's sampler (simulation/reads.py). Stream
+``simulation.sv.collapsed``: (seed, contig) for segments and carriers, (seed, contig, "psv") for the PSVs, (read seed,
+"reads", sample index) for the copy reads; nothing is drawn when collapsed_fraction is 0.
 """
 
 from __future__ import annotations
@@ -55,14 +69,15 @@ from .haplotypes import Mosaic, source_at
 __all__ = [
     "KINDS", "StructuralVariant", "StructureModel", "ContigStructure", "StructureTruth", "sv_stream",
     "draw_structure", "homologue_carriers", "filter_crossovers", "structured_transmit", "haplotype_carriers",
-    "copy_alleles", "structural_counts", "StructureReads", "paralog_sites",
+    "copy_alleles", "structural_counts", "StructureReads", "paralog_sites", "CollapsedParalogs", "draw_collapsed",
+    "collapsed_psv_sites", "collapsed_copies",
 ]
 
 KINDS = ("inversion", "deletion", "duplication", "reversed", "moved", "unlinked")
 INVERSION, DELETION, DUPLICATION, REVERSED, MOVED, UNLINKED = range(6)
 POLYMORPHIC = (INVERSION, DELETION, DUPLICATION)
 ORDER = (INVERSION, REVERSED, MOVED, UNLINKED)
-STREAMS = ("simulation.sv", "simulation.sv.gamete", "simulation.sv.reads")
+STREAMS = ("simulation.sv", "simulation.sv.gamete", "simulation.sv.reads", "simulation.sv.collapsed")
 
 
 def sv_stream(name: str, seed: int, *key) -> np.random.Generator:
@@ -144,6 +159,14 @@ class StructureModel:
     )
     misorder_mean_bp: float = record_field("obs", units="bp", dtype="float64", default=p.STRUCTURE_MISORDER_MEAN_BP)
     carrier_frequency: float = record_field("obs", dtype="float64", default=p.STRUCTURE_CARRIER_FREQUENCY)
+    collapsed_fraction: float = record_field("obs", dtype="float64", default=p.STRUCTURE_COLLAPSED_FRACTION)
+    collapsed_mean_bp: float = record_field(
+        "obs", units="bp", dtype="float64", default=p.STRUCTURE_COLLAPSED_MEAN_BP
+    )
+    collapsed_psv_share: float = record_field("obs", dtype="float64", default=p.STRUCTURE_COLLAPSED_PSV_SHARE)
+    collapsed_carrier_frequency: float = record_field(
+        "obs", dtype="float64", default=p.STRUCTURE_COLLAPSED_CARRIER_FREQUENCY
+    )
     variants: tuple[StructuralVariant, ...] = record_field("obs", dtype="tuple[StructuralVariant, ...]", default=())
     schema: int = schema_field(1)
 
@@ -155,14 +178,17 @@ class StructureModel:
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise SettingsError(f"structure {name} must be finite and nonnegative")
-        for name in ("small_inversion_mean_bp", "deletion_mean_bp", "duplication_mean_bp", "misorder_mean_bp"):
+        for name in ("small_inversion_mean_bp", "deletion_mean_bp", "duplication_mean_bp", "misorder_mean_bp",
+                     "collapsed_mean_bp"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 1:
                 raise SettingsError(f"structure {name} must be a finite length of at least 1 bp")
         for name in ("inversion_span_lo", "inversion_span_hi", "dispersed_fraction", "paralog_divergence",
-                     "carrier_frequency"):
+                     "carrier_frequency", "collapsed_psv_share", "collapsed_carrier_frequency"):
             if not 0 <= getattr(self, name) <= 1:
                 raise SettingsError(f"structure {name} must be between zero and one")
+        if not 0 <= self.collapsed_fraction < 1:
+            raise SettingsError("structure collapsed_fraction must be in [0, 1)")
         if not 0 < self.inversion_span_lo <= self.inversion_span_hi < 1:
             raise SettingsError("structure inversion spans need 0 < inversion_span_lo <= inversion_span_hi < 1")
         variants = tuple(v if isinstance(v, StructuralVariant) else StructuralVariant(*v) for v in self.variants)
@@ -245,6 +271,9 @@ class StructureTruth:
     switch_offsets/switch_positions: per gamete of TruthCrossovers (same order), the reference-axis points where the
     transmitted haplotype changes parental homologue (bp); they equal the crossovers except around rearrangements;
     paralog_offsets/paralog_sites: per variant, the marker indices where a duplication's copy differs from its source.
+    collapsed_start/collapsed_end/collapsed_copies/collapsed_psv_sites: collapsed-paralog segments (half-open bp), each
+    analysed sample's copies of them int8 [N, P] and the marker indices of their PSV sites (empty when the mode is off;
+    PSV sites are also marked spurious, but a spurious site inside a segment need not be a PSV).
     """
 
     kind: np.ndarray = record_field("obs", axes=("V",), units="1", dtype="int8")
@@ -257,6 +286,18 @@ class StructureTruth:
     switch_positions: np.ndarray = record_field("obs", axes=("switches",), units="bp", dtype="float64")
     paralog_offsets: np.ndarray = record_field("obs", axes=("V+1",), units="index", dtype="int64")
     paralog_sites: np.ndarray = record_field("obs", axes=("paralog",), units="index", dtype="int64")
+    collapsed_start: np.ndarray = record_field(
+        "obs", axes=("P",), units="bp", dtype="int64", default_factory=lambda: np.empty(0, np.int64)
+    )
+    collapsed_end: np.ndarray = record_field(
+        "obs", axes=("P",), units="bp", dtype="int64", default_factory=lambda: np.empty(0, np.int64)
+    )
+    collapsed_copies: np.ndarray = record_field(
+        "obs", axes=("N", "P"), units="1", dtype="int8", default_factory=lambda: np.empty((0, 0), np.int8)
+    )
+    collapsed_psv_sites: np.ndarray = record_field(
+        "obs", axes=("psv",), units="index", dtype="int64", default_factory=lambda: np.empty(0, np.int64)
+    )
     schema: int = schema_field(1)
 
     def __post_init__(self) -> None:
@@ -598,14 +639,16 @@ class StructureReads:
         freeze_record_arrays(self)
 
 
-def structural_counts(counts, alleles, present, copies, lam, error, rng, thin):
+def structural_counts(counts, alleles, present, copies, lam, error, rng, thin, duplicate=0.0):
     """Apply deletions and extra copies to one sample's sampled counts int64 [L, 2] (returned new).
 
     alleles int8 [2, L] (the homologues' sequence alleles), present bool [2, L], copies int8 [2, L], lam float64 [L]
     (expected reads of one homologue copy at each marker), error (probability that a read reports the other allele).
     thin: the sampler did not know about deletions, so each sampled read is assigned to a homologue (1/2 each) and
     reads of an absent homologue are removed, the kept reads redrawn per homologue; otherwise the counts already
-    exclude absent homologues. Each carried copy adds Poisson(lam) reads of its allele at error ``error``."""
+    exclude absent homologues. Each carried copy adds Poisson(lam) reads of its allele at error ``error``. duplicate:
+    the library's PCR duplicate rate d; each copy read then has Poisson(d / (1 - d)) duplicates repeating its read
+    (allele and error), plus their own independent errors (drawn after the copy reads, only when d > 0)."""
     out = np.array(counts, dtype=np.int64, copy=True)
     if thin:
         cells = np.flatnonzero(~present.all(axis=0))
@@ -625,4 +668,101 @@ def structural_counts(counts, alleles, present, copies, lam, error, rng, thin):
             alt = rng.binomial(extra, np.where(copies[h, cells] == 1, 1 - error, error))
             out[cells, 0] += extra - alt
             out[cells, 1] += alt
+            if duplicate:
+                # Duplicates of the ALT-read and REF-read parents (Poisson splitting), each then with its own error.
+                ratio = duplicate / (1.0 - duplicate)
+                dup_alt, dup_ref = rng.poisson(ratio * alt), rng.poisson(ratio * (extra - alt))
+                to_ref, to_alt = rng.binomial(dup_alt, error), rng.binomial(dup_ref, error)
+                out[cells, 1] += dup_alt - to_ref + to_alt
+                out[cells, 0] += dup_ref - to_alt + to_ref
     return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Collapsed paralogs (module docstring)
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CollapsedParalogs:
+    """Collapsed segments of one contig: sorted disjoint half-open [start, end) and the stable source haplotypes that
+    carry each segment's copy."""
+
+    contig: str = record_field("obs", dtype="str")
+    start: NDArray[np.int64] = record_field("obs", axes=("P",), units="bp", dtype="int64")
+    end: NDArray[np.int64] = record_field("obs", axes=("P",), units="bp", dtype="int64")
+    carriers: NDArray[np.bool_] = record_field("obs", axes=("S", "P"), dtype="bool")
+    seed: int = record_field("obs", dtype="int")
+    psv_share: float = record_field("obs", dtype="float64")
+    schema: int = schema_field(1)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "start", np.asarray(self.start, dtype=np.int64))
+        object.__setattr__(self, "end", np.asarray(self.end, dtype=np.int64))
+        object.__setattr__(self, "carriers", np.asarray(self.carriers, dtype=bool))
+        P = len(self.start)
+        if self.end.shape != (P,) or self.carriers.ndim != 2 or self.carriers.shape[1] != P:
+            raise InputError("collapsed-paralog axes do not agree")
+        if np.any(self.end <= self.start) or np.any(self.start[1:] < self.end[:-1]):
+            raise InputError("collapsed segments must be sorted, disjoint and non-empty")
+        freeze_record_arrays(self)
+
+    def __len__(self) -> int:
+        return len(self.start)
+
+    def index(self, positions: NDArray[np.int64]) -> NDArray[np.int64]:
+        """int64 [L]: the segment holding each position, -1 outside every segment."""
+        positions = np.asarray(positions, dtype=np.int64)
+        j = np.searchsorted(self.start, positions, side="right") - 1
+        inside = (j >= 0) & (positions < self.end[np.maximum(j, 0)]) if len(self) else np.zeros(len(positions), bool)
+        return np.where(inside, j, -1).astype(np.int64)
+
+
+def draw_collapsed(model: StructureModel, seed: int, contig: str, first_bp: int, last_bp: int,
+                   total_sources: int) -> CollapsedParalogs | None:
+    """The contig's collapsed segments and their carriers (module docstring); None when the model or the mode is off,
+    without creating a stream."""
+    if not model.enabled or not model.collapsed_fraction:
+        return None
+    rng = sv_stream("simulation.sv.collapsed", seed, contig)
+    extent = last_bp - first_bp + 1
+    n = int(rng.poisson(model.collapsed_fraction * extent / model.collapsed_mean_bp))
+    starts = first_bp + rng.integers(0, extent, size=n)
+    lengths = np.maximum(1, np.rint(rng.exponential(model.collapsed_mean_bp, size=n))).astype(np.int64)
+    draws = rng.random((total_sources, n))
+    kept, kept_end, last_end = [], [], first_bp
+    for i in np.argsort(starts, kind="stable"):
+        a, b = int(starts[i]), min(int(starts[i] + lengths[i]), last_bp + 1)
+        if a >= last_end and b > a:
+            kept.append(int(i))
+            kept_end.append(b)
+            last_end = b
+    kept = np.asarray(kept, np.int64)
+    carriers = draws[:, kept] < model.collapsed_carrier_frequency
+    return CollapsedParalogs(contig, starts[kept].astype(np.int64), np.asarray(kept_end, np.int64), carriers,
+                             int(seed), float(model.collapsed_psv_share))
+
+
+def collapsed_psv_sites(collapsed: CollapsedParalogs, positions: NDArray[np.int64]) -> NDArray[np.bool_]:
+    """bool [L]: the written sites that are paralogous sequence variants (each site inside a segment with probability
+    psv_share, from the contig's own PSV stream)."""
+    rng = sv_stream("simulation.sv.collapsed", collapsed.seed, collapsed.contig, "psv")
+    draws = rng.random(len(positions))
+    return (collapsed.index(positions) >= 0) & (draws < collapsed.psv_share)
+
+
+def collapsed_copies(offspring, collapsed: CollapsedParalogs) -> NDArray[np.int8]:
+    """int8 [N, P]: copies of each segment a sample carries (0-2), read from each homologue's source haplotype at the
+    segment's start."""
+    copies = np.zeros((len(offspring), len(collapsed)), dtype=np.int8)
+    if not len(collapsed):
+        return copies
+    anchors = collapsed.start.astype(np.float64)
+    columns = np.arange(len(collapsed))
+    for i, pair in enumerate(offspring):
+        for mosaic in pair:
+            sources = source_at(mosaic, anchors)
+            if np.any(sources < 0) or np.any(sources >= collapsed.carriers.shape[0]):
+                raise InputError("a haplotype names a source outside the collapsed-paralog carrier table")
+            copies[i] += collapsed.carriers[sources, columns]
+    return copies

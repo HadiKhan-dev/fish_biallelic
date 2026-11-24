@@ -1,10 +1,11 @@
 """Run independent resampling fits as engine subtasks under the engine's CPU authority.
 
-Resampling (PD16): one weighted fit is GIL-bound Python over the N children (selection, family
-messages, ties), so threads of one process cannot run fits side by side (at N = 1,003, 16 nested
-threads realised about 4.5 CPUs). The decision task therefore returns the
-planned fits as an engine Expansion: work-sized batches of planned fit tasks, run in the engine's
-forkserver worker processes under its CPU and memory authority.
+Resampling (PD16): one weighted fit is one sequential birth-order chain plus GIL-bound Python over the N children
+(selection, ties), so threads of one process cannot run fits side by side (at N = 1,003, 16 nested threads realised
+about 4.5 CPUs). The decision task therefore returns the planned fits as an engine Expansion: work-sized batches of
+planned fit tasks, run in the engine's forkserver worker processes under its CPU and memory authority. The decision's
+full-data fit reads the same inputs and nothing of the resampled fits (nor they of it), so it is one more subtask
+beside them, declared first because it is the longest (its chain runs full_sweeps rather than resample_sweeps).
 The read-only DecisionInputs arrays go to shared memory once (engine.workers.share_value); each
 subtask attaches them without copying. The gather receives the results in the plan's fixed order
 and reduces them there (integer support sums), then releases the segments.
@@ -22,12 +23,17 @@ from ...engine.workers import (
     call_shared,
     share_value,
 )
+from ...science.pedigree import run as science
+from ...science.pedigree.decision import FullSelection
+from ...science.pedigree.parameters import PedigreeParameters
 from ...science.pedigree.resampling import FitResult, FitTask, ResamplingPlan, evaluate_task
 
 __all__ = [
     "fit_subtasks",
     "fit_batch",
     "fit_batches",
+    "full_fit",
+    "full_fit_subtask",
 ]
 
 # Selection scans per batch; two waves per worker retain load balancing. This is
@@ -77,6 +83,24 @@ def _fit_batch_attached(inputs: DecisionInputs, tasks: tuple[FitTask, ...]) -> t
 def fit_batch(inputs: SharedValue, tasks: tuple[FitTask, ...]) -> tuple[FitResult, ...]:
     """Attach the shared decision inputs once and evaluate one batch serially."""
     return call_shared(inputs, _fit_batch_attached, tasks)
+
+
+def _full_fit_attached(inputs: DecisionInputs, parameters: PedigreeParameters) -> FullSelection:
+    # One sequential chain (full_sweeps) and the selection's Python: one core, like a resampled fit.
+    with thread_team(1):
+        return science.full_selection(inputs, parameters)
+
+
+def full_fit(inputs: SharedValue, parameters: PedigreeParameters) -> FullSelection:
+    """Attach the shared decision inputs and run the decision's full-data fit."""
+    return call_shared(inputs, _full_fit_attached, parameters)
+
+
+def full_fit_subtask(shared: SharedValue, parameters: PedigreeParameters, stage: str) -> Task:
+    """The decision's full-data fit as one single-core subtask on the shared inputs of fit_subtasks; its gather joins
+    it to the fit inputs (science.full_fit_state)."""
+    return Task(TaskKey(stage, "full_fit"), full_fit, args=(shared, parameters),
+                resources=ResourceRequest(min_cores=1, max_cores=1))
 
 
 def fit_subtasks(

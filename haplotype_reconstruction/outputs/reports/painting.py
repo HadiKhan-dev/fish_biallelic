@@ -403,9 +403,24 @@ def painting_frames(painting, positions, observed, searches=(), feedback=(), inp
     return frames
 
 
-def write_painting(output, parts) -> list[Path]:
-    """Publish all run-level painting tables in configured contig order."""
-    return write_contig_tables(output, "painting", parts)
+def write_painting(output, parts, *, results=None) -> list[Path]:
+    """Publish all run-level painting tables in configured contig order. With ``results`` and a published contamination
+    decision, sample_switches.csv gains each library's contamination tier (4.22 QC A: the owner's tier policy marks the
+    library and its downstream calls; quality/contamination.csv)."""
+    paths = write_contig_tables(output, "painting", parts)
+    decision = None if results is None else results.contamination()
+    if decision is not None:
+        import pandas as pd
+
+        from .quality import contamination_rows
+
+        tiers = {row[0]: row[-1] for row in contamination_rows(decision)}
+        for path in paths:
+            if Path(path).name == "sample_switches.csv" and Path(path).exists():
+                frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+                frame["contamination_tier"] = [tiers.get(str(name), "clean") for name in frame["sample"]]
+                frame.to_csv(path, index=False)
+    return paths
 
 
 SEGMENT_COLUMNS = ("SampleID", "Component", "Track", "Start", "End", "Status", "Label", "Rows")
@@ -727,6 +742,7 @@ SAMPLE_SWITCH_COLUMNS = (
     "PaintedSwitches",
     "CohortMedianSwitches",
     "SwitchesOverCohortMedian",
+    "ContaminationTier",
 )
 """Columns in published order.
 
@@ -736,6 +752,8 @@ SAMPLE_SWITCH_COLUMNS = (
     PaintedSwitches: painted switches (1).
     CohortMedianSwitches: cohort median switches (1).
     SwitchesOverCohortMedian: painted switches divided by the cohort median; NaN if median is not positive (1).
+    ContaminationTier: the library's contamination tier: clean, corrected or interpret_with_care (quality/
+        contamination.csv; 4.22); present when the run's contamination decision is published (text).
 """
 
 

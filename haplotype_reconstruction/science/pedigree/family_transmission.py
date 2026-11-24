@@ -73,13 +73,35 @@ def segment_models(tc, mcls, mknown, cpairs, theta, floor, mdelta, ft, seed, wid
 
 
 def member_allowances(schedule, members: np.ndarray, lo: int, hi: int, delta: float) -> np.ndarray:
-    """float64 [M, hi - lo, 2]: each member's per-bin, per-homologue mismatch allowance min(1/2, max(delta, v)) on bins
-    lo:hi, v the schedule's homologue label errors (zero without them: every allowance is the floor ``delta``)."""
+    """float64 [M, hi - lo, 4]: each member's per-bin probabilities of its two painted labels' error pattern on bins
+    lo:hi (PD29, 4.22 R4b): (both right, label 0 wrong and label 1 right, label 0 right and label 1 wrong, both wrong).
+    A wrong label's whole mass goes to whichever class a hypothesis needs (the statistic keeps no class-specific mass),
+    so the vote is never more decisive than this law about a wrong label, whatever the number of local classes.
+
+    From the painting's untempered label-error statistic moved onto the scheduled homologues (junctions._label_errors):
+    v_t, the probability that label t is wrong, and u, that the released pair is wrong. For two true labels "the pair
+    is right" is "both released classes are carried", so u = P(label 0 wrong or label 1 wrong) and the posterior joint
+    law is exact: both wrong v_0 + v_1 - u, one wrong v_t - (both), none 1 - u. The posterior is overconfident (4.22
+    R5), so the 4.20 floor delta bounds the law: each label's marginal lies in [delta, 1/2]; both-wrong is clipped to
+    what the marginals allow; and every error pattern is at least its independence value at the floor (one label wrong
+    delta (1 - delta), both delta^2), the remainder being both right. No pattern is then zero: every member emission
+    is positive, so a hypothesis that needs a wrong label is penalised, never excluded, and no member's selector states
+    can all emit 0. Without label errors this is the floor's independence law of 4.21: (1 - delta)^2,
+    delta (1 - delta), delta (1 - delta), delta^2."""
+    n = hi - lo
     errors = getattr(schedule, "homologue_error", None)
-    if errors is None:
-        return np.full((len(members), hi - lo, 2), float(delta))
-    values = np.asarray(errors, dtype=np.float64)[members, lo:hi]
-    return np.ascontiguousarray(np.minimum(0.5, np.maximum(float(delta), values)))
+    pairs = getattr(schedule, "pair_error", None)
+    v = (np.zeros((len(members), n, 2)) if errors is None
+         else np.asarray(errors, dtype=np.float64)[members, lo:hi])
+    u = np.zeros((len(members), n)) if pairs is None else np.asarray(pairs, dtype=np.float64)[members, lo:hi]
+    floor = float(delta)
+    v0 = np.minimum(0.5, np.maximum(floor, v[..., 0]))
+    v1 = np.minimum(0.5, np.maximum(floor, v[..., 1]))
+    joint = np.minimum(np.maximum(v[..., 0] + v[..., 1] - u, 0.0), np.minimum(v0, v1))
+    both = np.maximum(floor * floor, joint)
+    single = floor * (1.0 - floor)
+    first, second = np.maximum(single, v0 - both), np.maximum(single, v1 - both)
+    return np.ascontiguousarray(np.stack((1.0 - first - second - both, first, second, both), axis=2))
 
 
 def component_plan(schedule, theta: np.ndarray, parameters) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
@@ -108,8 +130,9 @@ def segment_unit(schedule, plan, theta: np.ndarray, members: tuple[int, ...], u:
         np.ascontiguousarray(schedule.known[idx, lo:hi], dtype=np.bool_),
         np.ascontiguousarray(schedule.pairs[idx[0], lo:hi].T, dtype=np.int64),
         np.array(theta[lo:hi - 1], dtype=np.float64, order="C", copy=True),
-        float(floor), member_allowances(schedule, idx, lo, hi, delta), parameters.family_transmission, parameters.resampling.bootstrap_seed, width=width,
-        mapper=mapper,
+        float(floor),
+        member_allowances(schedule, idx, lo, hi, delta),
+        parameters.family_transmission, parameters.resampling.bootstrap_seed, width=width, mapper=mapper,
     )
 
 

@@ -181,12 +181,14 @@ class ComponentWorkspace:
         | None = None,
         message_step: int | None = None,
         latent: Sequence[NDArray[np.int16] | None] | None = None,
+        search_alleles_reversed: bool = False,
     ) -> None:
         if genetic_map is None:
             raise ValueError("founder refinement needs the contig's genetic map (map-derived switch costs)")
         if genotype_error != DEFAULT_GENOTYPE_ERROR:
             raise ValueError("the robust emission's genotype error is fixed at 0.01")
         self.panels = tuple(panels)
+        self.search_alleles_reversed = search_alleles_reversed
         # One frozen representation before the first consumer (setup kernels, windows, normalisers), whatever the
         # caller passed (a direct replay's own array): a no-copy view of the stage's component_evidence.
         evidence = frozen(evidence, np.float32)

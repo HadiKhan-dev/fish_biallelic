@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+from dataclasses import replace
 
 import numpy as np
 from numba import prange, typeof, types
@@ -142,6 +143,9 @@ from .parameters import (
 )
 from .parameters import (
     SITE_SITE_TILE_CELLS as _SITE_TILE_CELLS,
+)
+from .parameters import (
+    SITE_WALK_MAXIMUM_BINS as _WALK_MAXIMUM_BINS,
 )
 
 RULES = ("r1", "r2", "r3", "r4", "r5")
@@ -400,7 +404,8 @@ def _genotype_expectations_counts(counts, samples, eps, h, iters, team: ThreadSo
 
 
 def _peak_core(x, smooth, integer=False, *, reverse=False):
-    """Mode and left/right Gaussian-equivalent sds from the half-maximum crossings of a smoothed histogram."""
+    """Mode and left/right Gaussian-equivalent sds from the half-maximum crossings of a smoothed histogram over the
+    core percentile range; the observed values are kept for the window walk's extension beyond that range."""
     x = np.asarray(x, float)
     x = x[np.isfinite(x)]
     lo, hi = np.percentile(x, _HISTOGRAM_RANGE_PERCENTILES)
@@ -446,21 +451,64 @@ def _peak_core(x, smooth, integer=False, *, reverse=False):
         bins=nb,
         centres=centres,
         smooth=smoothed,
+        counts=counts,
+        kernel=kernel,
+        values=x,
         n=len(x),
         width=float(edges[1] - edges[0]),
     )
 
 
-def _bounds(core, level):
-    """Window around the mode inside which the core's local posterior is >= level."""
-    if core["sd_left"] == 0.0 and core["sd_right"] == 0.0:
-        return (-np.inf, np.inf)
-    c = core["centres"]
-    density = core["smooth"] / (core["n"] * core["width"])
+def _core_posterior(core, c, smooth):
+    """The core's local posterior (Gaussian null from the half-maximum widths / smoothed density) at bin centres c."""
+    density = smooth / (core["n"] * core["width"])
     sd = np.where(c < core["mode"], core["sd_left"], core["sd_right"])
     z = np.divide(c - core["mode"], sd, out=np.where(c == core["mode"], 0.0, np.inf), where=sd > 0)
     null = core["peak_density"] * np.exp(-0.5 * z**2)
-    posterior = np.where(density > 0, np.clip(null / np.maximum(density, POSITIVE_WEIGHT_FLOOR), 0, 1), 1.0)
+    return np.where(density > 0, np.clip(null / np.maximum(density, POSITIVE_WEIGHT_FLOOR), 0, 1), 1.0)
+
+
+def _walk_beyond(core, level, direction):
+    """Continue the window walk past the core histogram's edge on bins of the same width aligned with it, over the
+    observed values beyond the edge (smoothing continues across the edge). Returns the bound, or +-inf when the walk
+    reaches the most extreme observed value (nothing lies beyond the window on that side)."""
+    width, centres, x = core["width"], core["centres"], core["values"]
+    edge = centres[-1] + 0.5 * width if direction > 0 else centres[0] - 0.5 * width
+    tail = x[x > edge] if direction > 0 else x[x < edge]
+    if tail.size == 0:
+        return direction * np.inf
+    reach = float(tail.max() - edge) if direction > 0 else float(edge - tail.min())
+    n_bins = int(np.ceil(reach / width))
+    capped = n_bins > _WALK_MAXIMUM_BINS
+    n_bins = max(min(n_bins, _WALK_MAXIMUM_BINS), 1)
+    span = (edge, edge + n_bins * width) if direction > 0 else (edge - n_bins * width, edge)
+    counts, _ = np.histogram(tail, bins=n_bins, range=span)
+    if direction < 0:
+        counts = counts[::-1]  # outward order
+    kernel = core["kernel"]
+    inner = core["counts"][-len(kernel) :] if direction > 0 else core["counts"][: len(kernel)][::-1]
+    joined = np.concatenate([inner, counts]).astype(float)
+    start = (len(kernel) - 1) // 2  # the core's smoothing ("same" alignment) continued across the edge
+    smooth = np.convolve(joined, kernel, mode="full")[start : start + len(joined)][len(inner) :]
+    outward = edge + direction * (np.arange(n_bins) + 0.5) * width
+    posterior = _core_posterior(core, outward, smooth)
+    below = np.flatnonzero(posterior < level)
+    if below.size:
+        return float(edge + direction * below[0] * width)
+    return float(edge + direction * n_bins * width) if capped else direction * np.inf
+
+
+def _bounds(core, level):
+    """Window around the mode inside which the core's local posterior is >= level.
+
+    The walk runs on the core histogram; when it reaches an edge of that histogram's percentile range it continues
+    over the observed values beyond the edge (4.22 B4: a tail lighter than the range's 0.5 % lay entirely beyond the
+    core histogram, the walk reached its edge and the rule flagged nothing). Wherever the walk stops inside the core
+    range the bound is unchanged."""
+    if core["sd_left"] == 0.0 and core["sd_right"] == 0.0:
+        return (-np.inf, np.inf)
+    c = core["centres"]
+    posterior = _core_posterior(core, c, core["smooth"])
     p = int(np.argmin(np.abs(c - core["mode"])))
     i = p
     while i > 0 and posterior[i - 1] >= level:
@@ -468,8 +516,8 @@ def _bounds(core, level):
     j = p
     while j < len(c) - 1 and posterior[j + 1] >= level:
         j += 1
-    lo = -np.inf if i == 0 else c[i] - 0.5 * core["width"]
-    hi = np.inf if j == len(c) - 1 else c[j] + 0.5 * core["width"]
+    lo = _walk_beyond(core, level, -1) if i == 0 else c[i] - 0.5 * core["width"]
+    hi = _walk_beyond(core, level, +1) if j == len(c) - 1 else c[j] + 0.5 * core["width"]
     return (float(lo), float(hi))
 
 
@@ -1247,16 +1295,34 @@ def _quality_flags(n_sites, n_samples, read_tile, config, *, team, map_work=map,
     return (dict(r1=r1, r2=r2, r3=r3, r4=r4, r5=r5), parameters)
 
 
-def _fitted_quality(values) -> SiteQualityFit:
+def _reflect_balance_parameters(start):
+    weight, clean, clean_dispersion, artefact, artefact_dispersion = start
+    return (weight, 1.0 - clean, clean_dispersion, 1.0 - artefact, artefact_dispersion)
+
+
+def _fitted_quality(values, *, reflect_balance=False) -> SiteQualityFit:
     """Bind the transient fitted dictionaries to typed boundary records."""
     error = dict(values["error"])
     if "m_steps" in error:
         error["m_steps"] = ErrorMSteps(**error["m_steps"])
     balance = dict(values["balance"])
-    balance["starts"] = tuple(
+    starts = tuple(
         BalanceStart(**{**row, "start": tuple(row["start"]), "parameters": tuple(row["parameters"])})
         for row in balance.get("starts", ())
     )
+    if reflect_balance:
+        balance["h0"] = 1.0 - balance["h0"]
+        if balance.get("artefact_mean") is not None:
+            balance["artefact_mean"] = 1.0 - balance["artefact_mean"]
+        starts = tuple(
+            replace(
+                row,
+                start=_reflect_balance_parameters(row.start),
+                parameters=_reflect_balance_parameters(row.parameters),
+            )
+            for row in starts
+        )
+    balance["starts"] = starts
     return SiteQualityFit(
         records=values["records"],
         samples=values["samples"],
@@ -1291,6 +1357,7 @@ def filter_sites(
     map_work=map,
     reverse: bool = False,
     contig: str = "",
+    search_alleles_reversed: bool = False,
 ) -> tuple[SiteQualityDecision, SampleQualityDecision | None, ReadSharing]:
     """Decide the site filter (and, with it, the contamination QC) on one contig's SNPs; with them the contig's
     read-sharing curve, measured on the r1-r4-passing SNPs that the sample QC reads (all SNPs when the filter does not
@@ -1313,6 +1380,11 @@ def filter_sites(
             kept=np.ones(n_sites, bool),
             reason=f"fewer than {config.minimum_calibration_sites} biallelic SNPs",
         ), None, _sharing(counts, positions, None, contig)
+    # Fit the r3/r4 inputs and sample QC in one coding so the same physical read totals,
+    # mixture starts and arithmetic order determine flags, ties and reported carriers after a swap.
+    if search_alleles_reversed:
+        counts = counts[..., ::-1]
+        config = replace(config, classification_heterozygote_alt=1.0 - config.classification_heterozygote_alt)
     flags, parameters = _quality_flags(
         n_sites,
         counts.shape[0],
@@ -1353,6 +1425,8 @@ def filter_sites(
                 map_work=map_work,
             )
             flags["r5"] = covered * (1 - F.max(1)) < config.minimum_expected_carriers
+    if search_alleles_reversed and samples is not None:
+        samples = sample_quality.reflect_alt_balance(samples)
     applied = RULES if config.drop_uninformative_sites else QUALITY_RULES
     remove = np.zeros(n_sites, bool)
     for rule in applied:
@@ -1373,7 +1447,7 @@ def filter_sites(
         applied_rules=tuple(applied),
         flagged={rule: int(flags[rule].sum()) for rule in RULES},
         removed_only_by=only,
-        parameters=_fitted_quality(parameters),
+        parameters=_fitted_quality(parameters, reflect_balance=search_alleles_reversed),
         r5_excluded_samples=0 if samples is None else int(np.sum(samples.flagged)),
     ), samples, sharing
 

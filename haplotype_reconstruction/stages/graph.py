@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from ..core.errors import SettingsError
@@ -111,6 +112,7 @@ def build_graph(
     output_nodes: Sequence[Node] = (),
     analysis: AnalysisContigs | None = None,
     adopt_rate: bool = False,
+    divisor_fit: TaskKey | None = None,
 ) -> RunGraph:
     """Carry ENG-03/05 as model edges; context assemblies share contig affinity.
 
@@ -159,8 +161,10 @@ def build_graph(
                 # 4.21 A7 (N0run): the contig's gain histogram, then its moves under the run's class priors
                 Node(_key("refit_histogram", c), (painting, ev)),
                 Node(refit, (painting, ev, _key("refit_priors"))),
+                # 4.22 QC A: the contig's contamination statistics; the repaint reads the run's decision
+                Node(_key("contamination_cells", c), (painting, ev)),
                 # 4.21 P (B1): the reference decode on the refit founders, read by the pedigree
-                Node(_key("repaint", c), (refit, painting, ev, _key("calibration")), maps),
+                Node(_key("repaint", c), (refit, painting, ev, _key("calibration"), _key("contamination")), maps),
             )
         )
     # The run-level painting calibration is pooled over the analysed contigs (the reconstruction axis), like the
@@ -175,12 +179,18 @@ def build_graph(
         nodes.append(Node(_key("calibration_refine", c), robustness))
     nodes.append(Node(_key("calibration_outlier"), tuple(_key("calibration_refine", c) for c in calibrated)))
     for c in calibrated:
-        nodes.append(Node(_key("calibration_divisor", c), (_key("calibration_outlier"), _key("assembly", c))))
+        dependencies = (_key("calibration_outlier"), _key("assembly", c))
+        if divisor_fit is not None and divisor_fit.scope == c:
+            nodes.append(Node(divisor_fit, dependencies))
+        # The calibrate gather and the full-run expansion share this publication.
+        nodes.append(Node(_key("calibration_divisor", c), dependencies))
     nodes.append(
         Node(_key("calibration"), (_key("calibration_outlier"),) + tuple(_key("calibration_divisor", c) for c in calibrated))
     )
     # the founder refit's class priors pool every analysed contig's gain histogram (ADVICE2 16.2, N0run frozen by G7')
     nodes.append(Node(_key("refit_priors"), tuple(_key("refit_histogram", c) for c in calibrated)))
+    # the run's contamination decision pools every analysed contig's statistics (4.22 QC A)
+    nodes.append(Node(_key("contamination"), tuple(_key("contamination_cells", c) for c in calibrated)))
     pedigree = _key("pedigree")
     nodes.append(
         Node(
@@ -231,6 +241,8 @@ def workflow_cut(
     max_contigs: int | None = None,
     painted: Sequence[str] = (),
     calibrated: bool = False,
+    calibration_stage: str | None = None,
+    divisor_fit: TaskKey | None = None,
 ) -> Cut:
     """Select model nodes; ``painted`` must come from expected record identities.
 
@@ -260,6 +272,7 @@ def workflow_cut(
     if stop_after is not None and (step != "run" or stop_after not in {"relatedness", "discovery", "painting"}):
         raise SettingsError(f"unsupported stop point: {stop_after}")
     keys = {n.key for n in graph.nodes}
+    calibration_round = step == "calibrate" and (calibration_stage is not None or contig is not None)
     if step == "run":
         if stop_after == "relatedness":
             targets = [_key("relatedness")]
@@ -284,7 +297,8 @@ def workflow_cut(
         }
         # early relatedness and refits whose inputs are in the cut, to a fixed point: a contig's refit needs the run's
         # priors, which need every analysed contig's histogram (4.21 A7)
-        early = {"relatedness", "refit", "refit_histogram", "refit_priors", "repaint"}
+        early = {"relatedness", "refit", "refit_histogram", "refit_priors", "contamination_cells", "contamination",
+                 "repaint"}
         while True:
             added = {
                 node.key for node in graph.nodes
@@ -294,6 +308,21 @@ def workflow_cut(
             if not added:
                 break
             selected |= added
+    elif calibration_round:
+        stage = "calibration_" + (calibration_stage or "robustness")
+        if stage not in STAGES or step not in STAGES[stage].steps:
+            raise SettingsError(f"unknown calibration stage: {calibration_stage}")
+        if stage == "calibration_outlier":
+            if contig is not None:
+                raise SettingsError("calibration stage outlier is run-wide and does not accept --contig")
+            target = _key(stage)
+        else:
+            if contig is None:
+                raise SettingsError(f"calibration stage {calibration_stage} requires --contig")
+            target = divisor_fit if divisor_fit is not None else _key(stage, contig)
+            if target not in keys:
+                raise SettingsError(f"{contig}: excluded from the final analysis")
+        selected = {target}
     else:
         stages = {name for name, stage in STAGES.items() if step in stage.steps}
         if not stages:
@@ -302,8 +331,12 @@ def workflow_cut(
             raise SettingsError(f"{step} requires one contig")
         selected = {k for k in keys if k.stage in stages and (k.scope == "run" or k.scope in scatter)}
     if step == "reconstruct" and not calibrated:
-        selected = {k for k in selected if k.stage not in {"painting", "refit", "refit_histogram", "repaint"}}
+        selected = {k for k in selected
+                    if k.stage not in {"painting", "refit", "refit_histogram", "contamination_cells", "repaint"}}
     prerequisites = {p for n in graph.nodes if n.key in selected for p in n.dependencies} - selected
+    if calibration_round:
+        # Every calibration record's identity binds all final assemblies, even in rounds that read earlier fits.
+        prerequisites.update(k for k in graph.closure(tuple(selected)) if k.stage == "assembly" and not k.round)
     return Cut(
         step,
         tuple(n.key for n in graph.nodes if n.key in selected),
@@ -313,12 +346,10 @@ def workflow_cut(
     )
 
 
-# Contig-scoped stages whose tasks are not pinned to their contig's lane. A lane admits one contig at a time and
-# there are about cores // 16 lanes; these stages need no contig locality. The run calibration's per-contig fits
-# (calibration_robustness, calibration_divisor) run while nothing else does (the calibration is a barrier): pinned,
-# only 4 contigs on a 76-core node fitted at once and the outlier-rate step kept 24 of 76 CPUs busy.
-UNPINNED_STAGES = frozenset({"report", "recombination", "export", "calibration_robustness", "calibration_divisor"})
-
+# The calibration fits are independent across contigs and do not need a resident worker.
+UNPINNED_STAGES = frozenset({
+    "report", "recombination", "export", "calibration_robustness", "calibration_divisor", "calibration_divisor_fit",
+})
 
 def bind_tasks(
     graph: RunGraph, cut: Cut, actions: Mapping[TaskKey, Task], *, completed: Mapping[TaskKey, Any] | None = None
@@ -435,7 +466,8 @@ def execution_options(
             4 * scale
             if key.stage in ("observation_fits", "observation")
             else 3 * scale
-            if key.stage in ("refit", "refit_histogram", "refit_priors", "repaint")
+            if key.stage in ("refit", "refit_histogram", "refit_priors", "contamination_cells", "contamination",
+                             "repaint")
             else 2 * scale
             if key.stage == "relatedness"
             else scale
@@ -447,7 +479,7 @@ def execution_options(
         for key in cut.nodes
     }
     chain_stages = {name for name, stage in STAGES.items() if "reconstruct" in stage.steps} - {
-        "painting", "refit", "refit_histogram"
+        "painting", "refit", "refit_histogram", "contamination_cells"
     }
     chains = tuple(
         ChainPlan(c, costs[c], tuple(key for key in cut.nodes if key.scope == c and key.stage in chain_stages))
@@ -591,17 +623,60 @@ def stage_kernel_modules(task: Task) -> tuple[str, ...]:
     )
 
 
+def _needs_kernel_warmup(task: Task) -> bool:
+    """A checkpoint's presence is a warm-up hint. The stage still verifies its full derivation."""
+    from ..store.store import CheckpointStore
+
+    stage, scope, round_name = task.key.stage, task.key.scope, task.key.round
+    if not task.args or not task.function.__module__.startswith("haplotype_reconstruction.stages."):
+        return True
+    root = task.args[0]
+    if not isinstance(root, (str, Path)):
+        return True
+    outputs = task.outputs
+    if not outputs:
+        # These expanding stages declare their dynamic writer in the expansion.
+        if stage == "discovery":
+            name = "complete/discovery"
+        elif stage == "selection":
+            name = f"selection/selected/{scope}/{round_name}"
+        elif stage == "assembly":
+            name = f"local_selection/{round_name.removeprefix('context.')}/assembly/completion" if round_name else "assembly/final"
+        elif stage == "pedigree":
+            name = "pedigree"
+        else:
+            return True
+        outputs = (RecordKey(scope, name),)
+    store = CheckpointStore(root)
+    return any(
+        not (store.run if output.container == "run" else store.contig(output.container)).has(output.key)
+        for output in outputs
+    )
+
+
 def with_kernel_tasks(
     tasks: tuple[Task, ...], scheduling: dict[str, Any], state: Any
 ) -> tuple[tuple[Task, ...], dict[str, Any]]:
     """Gate each scientific root on its own missing compiles, leaving unrelated work runnable.
 
-    A root's dependency also protects its dynamic expansions: no child can use a tail signature before its module
-    has been warmed in the shared run cache. Only state.missing emits tasks or edges. Compilation retains the
-    earliest-consumer/learned-cost order; independent stages keep their existing priority over spare warm-up work.
+    With pending work every missing kernel is warmed and each root gated on its own modules, as before: a stage's
+    declared modules need not list every kernel it dispatches, and a plan narrowed to them compiled kernels late in
+    a cold run (4.22). A graph whose every task finds its publication (a finishing or repeated run that only checks
+    records) warms nothing: a present publication is a scheduling hint, the owning stage still performs its usual
+    checks, and a cache miss on that path compiles lazily under the same locks.
+    Compilation retains the earliest-consumer/learned-cost order.
     """
-    from ..engine.kernels import compile_tasks
+    from ..engine.kernels import compile_tasks, restrict_warmup
 
+    if not state.missing:
+        return tasks, scheduling
+    # Report and export tasks render from published records; a report re-rendered by a finishing run compiles its
+    # few kernels lazily. Whether work is pending is decided by the scientific stages.
+    if any(_needs_kernel_warmup(task) for task in tasks if task.key.stage not in {"report", "export"}):
+        task_modules = {task.key: stage_kernel_modules(task) for task in tasks}
+    else:
+        restrict_warmup(state, set())
+        task_modules = {}
     compiles: dict[tuple[str, str], list[Task]] = {}
     for task in compile_tasks(state):  # one per missing overload, grouped by function
         compiles.setdefault(task.args[0], []).append(task)
@@ -622,7 +697,7 @@ def with_kernel_tasks(
     gated = []
     for task in tasks:
         dependencies = list(task.depends_on)
-        for module in stage_kernel_modules(task):
+        for module in task_modules.get(task.key, ()):
             for name in by_module.get(module, ()):
                 first_use[name] = min(first_use.get(name, level(task.key)), level(task.key))
                 dependencies.extend(compile.key for compile in compiles[name])
@@ -641,3 +716,36 @@ def with_kernel_tasks(
     floor = min(priorities.values(), default=0.0) - 1.0
     priorities.update({compile.key: floor - rank for rank, name in enumerate(order) for compile in compiles[name]})
     return (*gated, *(compile for name in order for compile in compiles[name])), dict(scheduling, priorities=priorities)
+
+
+def pedigree_scatter_cut(graph, step, contig):
+    """Add only the requested pedigree cut's nodes to the common workflow graph (orchestration: kept out of the
+    pedigree stage modules so their code identity does not hold the graph, 4.20 closures)."""
+    from .pedigree.tasks import CONTIG_STEPS, RUN_STEPS
+
+    if step in CONTIG_STEPS:
+        if contig not in graph.analysis.included:
+            raise SettingsError(f"pedigree --stage {step} requires --contig from the included analysis")
+    elif step not in RUN_STEPS or contig is not None:
+        raise SettingsError(f"pedigree stage {step} is run-wide and does not accept --contig")
+
+    if step == "prepare":
+        refit = TaskKey("refit", "contig", contig)
+        repaint = TaskKey("repaint", "contig", contig)
+        prepared = TaskKey("pedigree", step, contig)
+        graph = replace(graph, nodes=(*graph.nodes, Node(prepared, (repaint,))))
+        selected = (refit, repaint, prepared)
+    elif step in ("map-inputs", "map-pairs", "map-frames"):
+        key = TaskKey("pedigree", step, contig or "run")
+        dependencies = (TaskKey("relatedness", "run"),)
+        if step == "map-inputs":
+            dependencies += (TaskKey("repaint", "contig", contig),)
+        graph = replace(graph, nodes=(*graph.nodes, Node(key, dependencies)))
+        selected = (key,)
+    else:
+        stage = "pedigree" if step == "gather" else step.replace("-", "_")
+        selected = (TaskKey(stage, "run"),)
+    prerequisites = {key for node in selected for key in graph.node(node).dependencies} - set(selected)
+    return graph, Cut(
+        "pedigree." + step, selected, tuple(node.key for node in graph.nodes if node.key in prerequisites)
+    )

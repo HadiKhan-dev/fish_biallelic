@@ -162,6 +162,7 @@ def run(
                     component.bin_sizes,
                     reverse=parameters.reverse_conventions,
                     label_error=component.label_error,
+                    search_alleles_reversed=getattr(prepared, "search_alleles_reversed", False),
                 )
             )
         result = score_schedules(

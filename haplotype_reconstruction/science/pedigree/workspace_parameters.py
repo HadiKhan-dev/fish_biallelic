@@ -29,7 +29,7 @@ class PedigreeWorkspace:
         metadata={
             "provenance": (
                 "LR phase 2 Tier 2; 1073741824 bytes bound one child batch's class-transfer cache of the read state "
-                "(read_transfer.class_transfers: bins x 2 views x S^2 x C^2 float64 per child); a child whose cache "
+                "(read_transfer.class_transfers: bins x S^2 x C^2 float64 per child); a child whose cache "
                 "exceeds it is scored per site (the same values)."
             ),
         },
@@ -49,44 +49,11 @@ class PedigreeWorkspace:
             "provenance": "PS15; at most 4000000 pair-bound workspace rows per batch.",
         },
     )
-    exclusion_pattern_limit: int = field(
-        default=1024,
-        metadata={
-            "provenance": (
-                "PS20; cache at most 1024 distinct genotype-likelihood patterns per sample before direct "
-                "fallback."
-            ),
-        },
-    )
 
     emission_sample_block: int = field(
         default=16,
         metadata={
             "provenance": "PS01; batches of 16 samples bound live recomputed-emission and genotype-likelihood storage.",
-        },
-    )
-
-    family_lanes_per_thread: int = field(
-        default=8,
-        metadata={
-            "provenance": (
-                "PD09; 8 interleaved independent-item lanes per supplied thread count distribute unequal family "
-                "row counts."
-            ),
-        },
-    )
-
-    family_claim_work: int = field(
-        default=20_000_000,
-        metadata={
-            "provenance": "PD09; target 20000000 row-scan work terms per cavity iteration chunk.",
-        },
-    )
-
-    family_transpose_block: int = field(
-        default=64,
-        metadata={
-            "provenance": "PD09; transpose cavity messages in blocks of 64 samples for contiguous child reads.",
         },
     )
 
@@ -98,9 +65,15 @@ class PedigreeWorkspace:
     )
 
     exclusion_dyad_batch: int = field(
-        default=256,
+        default=4096,
         metadata={
-            "provenance": "PS20; batches of 256 dyads bound exclusion scanner workspaces.",
+            "provenance": (
+                "PS20; batches of 4096 dyads bound exclusion scanner outputs (each dyad's window workspace is its "
+                "own). 4.22 A11: the observation-model scan has no likelihood-pattern cache and certificates stop "
+                "dyads at very different sites, so a batch must give every thread many dyads; kernel core use "
+                "0.52 -> 0.76 (f3 roots) and 0.78 -> 0.86-0.91 (famhs) against 256 with the round-robin dealing of "
+                "exclusion_bound.score_contig (lab422/r4a); execution grain only, results do not depend on it."
+            ),
         },
     )
 PEDIGREE_WORKSPACE = PedigreeWorkspace()
@@ -108,10 +81,6 @@ COMMON_EMISSION_CACHE_BYTES = PEDIGREE_WORKSPACE.common_emission_cache_bytes
 CLASS_TRANSFER_CACHE_BYTES = PEDIGREE_WORKSPACE.class_transfer_cache_bytes
 BOUND_WORKSPACE_BYTES = PEDIGREE_WORKSPACE.bound_workspace_bytes
 BOUND_BATCH_ROWS = PEDIGREE_WORKSPACE.bound_batch_rows
-EXCLUSION_PATTERN_LIMIT = PEDIGREE_WORKSPACE.exclusion_pattern_limit
 EMISSION_SAMPLE_BLOCK = PEDIGREE_WORKSPACE.emission_sample_block
-FAMILY_LANES_PER_THREAD = PEDIGREE_WORKSPACE.family_lanes_per_thread
-FAMILY_CLAIM_WORK = PEDIGREE_WORKSPACE.family_claim_work
-FAMILY_TRANSPOSE_BLOCK = PEDIGREE_WORKSPACE.family_transpose_block
 SELECTIVE_BOUND_GROUP_BINS = PEDIGREE_WORKSPACE.selective_bound_group_bins
 EXCLUSION_DYAD_BATCH = PEDIGREE_WORKSPACE.exclusion_dyad_batch

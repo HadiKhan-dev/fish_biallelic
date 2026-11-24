@@ -59,19 +59,21 @@ class ExposureParameters:
 
 @dataclass(frozen=True)
 class DirectionParameters:
-    """Joint-transmission orientation and the reciprocal / short-ancestry family factors."""
+    """Joint-transmission orientation and its pair-level failure mixture (the birth-order layer reads both)."""
 
     mismatch_probability: float = field(
         default=0.01,
         metadata={
             "provenance": (
                 "PS19/PD06; the FLOOR (4.21, ADVICE2 11.1) of the per-bin probability that a meiotic copy has a "
-                "different painted local class: the direction kernels use min(1/2, max(0.01, v_child + v_parent)) "
-                "and the family transmission vote min(1/2, max(0.01, v)) per label, v the reference painting's "
-                "per-track label error, so an over-confident posterior is never more decisive than 4.20. Decision "
-                "replays at 0.001, 0.01 and 0.1 agreed at Tier B for a real multi-generation cross, the TroMau "
-                "cross and large known-truth simulations; 0.1 added false full-fit edges in a "
-                "30-founder known-truth simulation."
+                "different painted local class: the direction kernels use min(1/2, max(0.01, v_child + v_parent)), "
+                "v the reference painting's per-track label error; the family transmission vote (4.22 R4b) bounds "
+                "each error pattern of a member's two labels below by its independence value at this floor (one "
+                "wrong label 0.01 (1 - 0.01), both 0.01^2) and gives a wrong label's whole mass to whichever class a "
+                "hypothesis needs, so an over-confident posterior is never more decisive than 4.20 in either. "
+                "Decision replays at 0.001, 0.01 and 0.1, all with the 4.21 vote algebra (before R4b), agreed at "
+                "Tier B for a real multi-generation cross, the TroMau cross and large known-truth simulations; 0.1 "
+                "added false full-fit edges in a 30-founder known-truth simulation."
             ),
         },
     )
@@ -114,77 +116,8 @@ class DirectionParameters:
         default=0.02,
         metadata={
             "provenance": (
-                "PD06/PD08/PD09/PD10; pair-level failure probability 0.02 bounds the orientation correction, and "
-                "the orientation prior that the run's direction model reads from the direction-free solve "
-                "(within [0.01, 0.99])."
-            ),
-        },
-    )
-    # Synchronous cavity-message passes preparing the frozen short-ancestry path factor.
-    message_passes: int = field(
-        default=4,
-        metadata={
-            "provenance": "PD06/PD08/PD09/PD10; 4 synchronous cavity passes prepare the frozen short-ancestry factor.",
-        },
-    )
-    # Final reciprocal solve: undamped, then a damped retry; residual measured before damping.
-    final_max_iterations: int = field(
-        default=8192,
-        metadata={
-            "provenance": "PD06/PD08/PD09/PD10; budget of 8192 iterations for the undamped reciprocal solve.",
-        },
-    )
-    # Undamped progress window: after two windows, an undamped solve that made no progress over the last window,
-    # or whose geometric residual rate there needs more than final_pause_budgets x final_max_iterations
-    # iterations in all to reach final_tolerance, pauses for the damped retry, and resumes where it paused if
-    # the retry fails (so no fit that the full undamped budget would converge is lost). The forecast is a
-    # heuristic: slow modes that speed up later can still pause; resumption is the safeguard.
-    final_progress_window: int = field(
-        default=512,
-        metadata={
-            "provenance": (
-                "PD06/PD08/PD09/PD10; 512 residual observations per progress window before forecasting a damped "
-                "retry."
-            ),
-        },
-    )
-    final_pause_budgets: int = field(
-        default=4,
-        metadata={
-            "provenance": (
-                "PD06/PD08/PD09/PD10; dimensionless multiplier 4 of the final iteration budget for the pause "
-                "forecast."
-            ),
-        },
-    )
-    final_tolerance: float = field(
-        default=1e-08,
-        metadata={
-            "provenance": (
-                "PD06/PD08/PD09/PD10; maximum cavity-message change tolerance 1e-8 nats, measured before "
-                "damping."
-            ),
-        },
-    )
-    retry_iterations: int = field(
-        default=4096,
-        metadata={
-            "provenance": "PD06/PD08/PD09/PD10; at most 4096 iterations in the damped reciprocal retry.",
-        },
-    )
-    retry_damping: float = field(
-        default=0.5,
-        metadata={
-            "provenance": "PD06/PD08/PD09/PD10; dimensionless mixing weight 0.5 in the reciprocal retry.",
-        },
-    )
-    # Top joint configurations per sample in the reverse two-edge path factor.
-    ancestry_path_budget: int = field(
-        default=16,
-        metadata={
-            "provenance": (
-                "PD06/PD08/PD09/PD10; retain at most 16 joint configurations per sample in the reverse two-edge "
-                "ancestry factor."
+                "PD06; pair-level failure probability 0.02 bounds the orientation correction, and the orientation "
+                "prior that the run's direction model reads from the direction-free fit (within [0.01, 0.99])."
             ),
         },
     )
@@ -192,7 +125,7 @@ class DirectionParameters:
 
 @dataclass(frozen=True)
 class SelectionParameters:
-    """Marginal parent-state priors, M0 contamination and acyclic graph search."""
+    """Marginal parent-state priors and M0 contamination."""
 
     state_priors: tuple[float, float, float] = field(
         default=(1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0),
@@ -219,12 +152,6 @@ class SelectionParameters:
             "provenance": (
                 "PD04/PD12/PD13/PD14; probability weight 0.02 mixes child M0 into aggregated M1/M2 likelihoods."
             ),
-        },
-    )
-    graph_local_search_passes: int = field(
-        default=3,
-        metadata={
-            "provenance": "PD04/PD12/PD13/PD14; at most 3 coordinate passes of acyclic graph repair.",
         },
     )
 

@@ -304,7 +304,7 @@ def state_logliks(emission, shares, gaps, rate, ranges, out):
     N = emission.shape[0]
     for n in numba.prange(N):
         z = shares[n]
-        p = np.empty(3)
+        p = np.zeros(3)  # read at a range's first site as 0 * p: uninitialised memory there gave NaN (4.22 FLAKY-NAN)
         for r in range(ranges.shape[0]):
             total = 0.0
             for i in range(ranges[r, 0], ranges[r, 1]):

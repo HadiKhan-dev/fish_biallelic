@@ -178,7 +178,7 @@ Cost and scope: O(sum R_b L_b). These terms describe the unit’s work/storage d
 <a id="u16"></a>
 ## u16 Founder release at export (continuity cuts, content withholding, continuation records)
 
-Apply carrier withholding before assembly-family release. Resolve correspondence, distinguish diagnostic count verification from unresolved continuation, and use complete alternative families to cut unsupported continuity and withhold disagreeing alleles. Overflow follows the declared smaller-count/minimum-switch prior and anchor rules. Reorder cut/withheld segments by content, block r5 fill on withheld rows, and retain source mappings.
+Apply carrier withholding before assembly-family release. Resolve correspondence, distinguish diagnostic count verification from unresolved continuation, and use complete alternative families to cut unsupported continuity and withhold disagreeing alleles. Overflow follows the declared smaller-count/minimum-switch prior and anchor rules. Reorder cut/withheld segments by content in the contig’s canonical search coding. Block r5 fill on withheld rows and retain source mappings.
 
 Implementation: [science/assembly/release.py](../../haplotype_reconstruction/science/assembly/release.py).
 

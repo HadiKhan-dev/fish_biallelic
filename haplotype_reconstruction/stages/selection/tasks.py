@@ -116,6 +116,7 @@ def _run_block(
                 cohort=evidence.cohort_frequencies,
                 outlier_rate=outlier_rate,
                 reverse=reverse,
+                search_alleles_reversed=getattr(evidence, "search_alleles_reversed", False),
                 census_sink=census_sink,
                 threads=share_reader(SHARE_REREAD_SECONDS),
                 progress=progress,
@@ -356,7 +357,12 @@ def _run_refit(
             scope.save_refit(result)
             return result
     # The component's mixed likelihoods (the run's outlier rate against the cohort law, science.shared.observation).
-    gl = mix_likelihoods(gather_likelihoods(likelihoods, task.columns), cohort[task.columns], outlier_rate)
+    gl = gather_likelihoods(likelihoods, task.columns)
+    local_cohort = cohort[task.columns]
+    if task.search_alleles_reversed:
+        gl = gl[..., ::-1]
+        local_cohort = local_cohort[:, ::-1]
+    gl = mix_likelihoods(gl, local_cohort, outlier_rate)
     seen = np.ascontiguousarray(observed[:, task.columns])
     with thread_team(default=threads):
         output = refit_component(
@@ -464,6 +470,7 @@ def context_expansion(
         genetic_map,
         parameters,
         census_key=f"{contig}/{round_name}/refit",
+        search_alleles_reversed=getattr(evidence, "search_alleles_reversed", False),
     )
     tasks = tuple(
         Task(

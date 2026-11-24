@@ -123,7 +123,9 @@ class GenomeScores:
         "report", axes=("C",), units="Morgans", dtype="float64", default=None, kw_only=True)
     contig_markers: np.ndarray | None = record_field("report", axes=("C",), dtype="int64", default=None, kw_only=True)
 
-    chromosome_summary: tuple[ChromosomeSummaryView, ...] = record_field("obs", dtype="tuple[ChromosomeSummaryView, ...]", default=(), kw_only=True)
+    chromosome_summary: tuple[ChromosomeSummaryView, ...] = record_field(
+        "obs", dtype="tuple[ChromosomeSummaryView, ...]", default=(), kw_only=True
+    )
 
     @property
     def regime_basis_morgans(self) -> float:
@@ -147,9 +149,9 @@ class ExclusionEvidence:
     log_e:          float64 [D] exact log E, or a certified lower endpoint.
     log_e_upper:    optional float64 [D] upper endpoint; None means exact evidence without a separate upper endpoint.
     observed_sites: int64 [D] sites observed in both samples.
-    certifiable:    bool [D], true when neither sample belongs to a fitted sharing library.
-    markers:        markers of the contig; pattern_fallback_samples: samples scored without the
-                    exact repeated-pattern cache (more than its cap of distinct GL triples).
+    certifiable:    bool [D], true when neither sample belongs to a fitted sharing library and neither sample's
+                    outlier rate sits at the top of the calibration grid (4.22 A11: an unresolved rate).
+    markers:        markers of the contig.
     """
 
     contig: str = record_field("state", axes=(), units="1", dtype="str")
@@ -157,13 +159,12 @@ class ExclusionEvidence:
     log_e: np.ndarray = record_field("state", axes=("D",), units="nats", dtype="float64")
     observed_sites: np.ndarray = record_field("obs", axes=("D",), units="1", dtype="int64")
     markers: int = record_field("obs", axes=(), units="1", dtype="int")
-    pattern_fallback_samples: int = record_field("diagnostic", axes=(), units="1", dtype="int")
     log_e_upper: np.ndarray | None = record_field("state", axes=("D",), units="nats", dtype="float64", default=None)
     # The contig's fixed weight in the genome e-value (DESIGN_417 D9): its configured working-map Morgans over the
     # run's; the genome e-value is sum_k w_k E_k and a certificate proves log E_k >= threshold - log w_k.
     log_weight: float = record_field("state", axes=(), units="1", dtype="float", default=float("nan"), kw_only=True)
     certifiable: np.ndarray | None = record_field("state", axes=("D",), dtype="bool", default=None, kw_only=True)
-    schema: int = schema_field(3)
+    schema: int = schema_field(4)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -375,6 +376,9 @@ class DecisionInputs:
     junctions: JunctionEvidence = record_field("evidence", axes=(), units="1", dtype="JunctionEvidence")
     regime: str = record_field("state", dtype="str", default="standard")
     omission_totals: OmissionTotals | None = record_field("evidence", dtype="OmissionTotals | None", default=None)
+    # sample indices in sorted-identifier order: the birth-order chain draws its permutations over them
+    # (order.chain_draws)
+    sample_order: np.ndarray = record_field("state", axes=("N",), units="1", dtype="int64", kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -385,7 +389,8 @@ class Selection:
     decision_scores: float64 [A] state score + identity score - the state's best identity score.
     priors: float64 [N, 3] fixed state priors used.
     local_state int8 [N], local_row int64 [N]: marginal winners (UNRESOLVED / -1 = none).
-    graph_row int64 [N]: acyclic selection (-1 = none); tie_conflict / direction_resolved bool [N];
+    graph_row int64 [N]: the joint (acyclic) read (-1 = none); order_restricted bool [N]: children on a cycle of the
+    local choices, whose joint read is restricted to the consensus birth order; direction_resolved bool [N];
     role_probability float64 [N] (NaN without a graph row).
     state_margin, identity_margin float64 [N] (identity NaN unless the state was resolved).
     unresolved_reason: per sample None or the reason no local configuration was chosen.
@@ -399,7 +404,7 @@ class Selection:
     local_state: np.ndarray = record_field("state", axes=("N",), units="1", dtype="int8")
     local_row: np.ndarray = record_field("state", axes=("N",), units="1", dtype="int64")
     graph_row: np.ndarray = record_field("state", axes=("N",), units="1", dtype="int64")
-    tie_conflict: np.ndarray = record_field("state", axes=("N",), units="1", dtype="bool")
+    order_restricted: np.ndarray = record_field("state", axes=("N",), units="1", dtype="bool")
     direction_resolved: np.ndarray = record_field("state", axes=("N",), units="1", dtype="bool")
     role_probability: np.ndarray = record_field("state", axes=("N",), units="1", dtype="float64")
     state_margin: np.ndarray = record_field("state", axes=("N",), units="nats", dtype="float64")
@@ -407,18 +412,6 @@ class Selection:
     unresolved_reason: tuple[str | None, ...] = record_field(
         "state", axes=(), units="1", dtype="tuple[str | None, ...]"
     )
-
-    graph_passes_used: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
-    graph_pass_budget_exhausted: bool = record_field("diagnostic", dtype="bool", default=False, kw_only=True)
-
-
-@dataclass(frozen=True)
-class LocalGraphChoices:
-    """Local marginal winners and their confidence, before acyclic graph selection (PD13)."""
-
-    rows: dict[int, int] = record_field("state", axes=("selected_child",), dtype="int64")
-    state_margins: np.ndarray = record_field("state", axes=("N",), units="nats", dtype="float64")
-    identity_margins: np.ndarray = record_field("state", axes=("N",), units="nats", dtype="float64")
 
 
 @dataclass(frozen=True)
@@ -431,9 +424,6 @@ class GraphSelection:
     role_probability: dict[int, float] = record_field(
         "state", axes=("selected_child",), units="probability", dtype="float64"
     )
-
-    graph_passes_used: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
-    graph_pass_budget_exhausted: bool = record_field("diagnostic", dtype="bool", default=False, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -459,7 +449,7 @@ class SupportCounts:
     local_configuration / graph_configuration int64 [A]: fits whose local / graph row is the row.
     local_state int64 [N, 3]: fits calling each marginal state.
     local_parent / graph_parent EdgeCounts: fits whose local / graph row names [child, parent].
-    fits: number of fits (the denominator); nonconverged: fits that abstained.
+    fits: number of fits (the denominator).
     """
 
     local_configuration: np.ndarray = record_field("call", axes=("A",), units="1", dtype="int64")
@@ -468,7 +458,6 @@ class SupportCounts:
     local_parent: EdgeCounts = record_field("call", axes=(), units="1", dtype="EdgeCounts")
     graph_parent: EdgeCounts = record_field("call", axes=(), units="1", dtype="EdgeCounts")
     fits: int = record_field("call", axes=(), units="1", dtype="int")
-    nonconverged: int = record_field("call", axes=(), units="1", dtype="int")
 
     @classmethod
     def zeros(cls, n_alternatives: int, n_samples: int, edges: np.ndarray) -> SupportCounts:
@@ -478,7 +467,6 @@ class SupportCounts:
             np.zeros((n_samples, 3), np.int64),
             EdgeCounts(edges, np.zeros(len(edges), np.int64), n_samples),
             EdgeCounts(edges, np.zeros(len(edges), np.int64), n_samples),
-            0,
             0,
         )
 
@@ -493,9 +481,10 @@ class Resampling:
     loco: SupportCounts = record_field("call", axes=(), units="1", dtype="SupportCounts")
     multiplicities: np.ndarray = record_field("call", axes=("R", "C"), units="1", dtype="float64")
     worker_count: int = record_field("diagnostic", axes=(), units="1", dtype="int")
-    bootstrap_graph_budget_exhausted: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
-    loco_graph_budget_exhausted: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
-    maximum_graph_passes_used: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
+    # resampled fits (counted with their draws) whose local choices formed a cycle: the joint read restricted the
+    # children on cycles to the fit's consensus birth order
+    bootstrap_order_restricted: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
+    loco_order_restricted: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -503,7 +492,7 @@ class ChildEvidence:
     """Per-child quantities the release rules read (N samples; NaN where undefined).
 
     local_parents / graph_parents: int64 [N, 2] parents of the local / graph row (NO_PARENT).
-    graph_state: int8 [N]; graph_conflict: bool [N] (tie conflict or graph row != local row).
+    graph_state: int8 [N]; graph_conflict: bool [N] (the joint read's row differs from the local row).
     informative_units: float64 [N] map units of the chromosomes whose own evidence picks a unique state.
     state_bootstrap / state_loco: support of the local state.
     configuration_*: support of the local row as local / graph configuration.
@@ -692,7 +681,7 @@ class Decision:
     partial_b: PartialEdges = record_field("state", axes=(), units="1", dtype="PartialEdges")
     candidates: CandidateSets = record_field("state", axes=(), units="1", dtype="CandidateSets")
     reach: TierReach = record_field("state", axes=(), units="1", dtype="TierReach")
-    family_solve: FamilySolveRecord = record_field("state", axes=(), units="1", dtype="FamilySolveRecord")
+    birth_order: BirthOrderRecord = record_field("state", axes=(), units="1", dtype="BirthOrderRecord")
     tie_events: TieCounts = record_field("diagnostic", dtype="TieCounts")
     informative_units: np.ndarray = record_field("state", axes=("N",), units="units", dtype="float64")
     informative_morgans: np.ndarray = record_field("report", axes=("N",), units="Morgans", dtype="float64")
@@ -769,8 +758,9 @@ class GuardRelatedness:
 
 @dataclass(frozen=True)
 class Pedigree:
-    """Complete released pedigree and retained numerical state, published atomically as schema 9 (4.18: material units) with working-map
-    diagnostics, joint transmission direction likelihoods and columnar exclusion evidence."""
+    """Complete released pedigree and retained numerical state, published atomically as schema 10 (4.18: material
+    units; 4.22: the birth-order layer) with working-map diagnostics, joint transmission direction likelihoods and
+    columnar exclusion evidence."""
 
     sample_ids: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
     contigs: tuple[str, ...] = record_field("obs", axes=(), units="1", dtype="tuple[str, ...]")
@@ -786,7 +776,7 @@ class Pedigree:
     support: SupportRecord | None = record_field("call", axes=(), units="1", dtype="SupportRecord | None")
     sibling_guard: GuardRecord | None = record_field("call", axes=(), units="1", dtype="GuardRecord | None")
     views: PedigreeViews = record_field("report", dtype="PedigreeViews", kw_only=True)
-    family_solve: FamilySolveRecord | None = record_field("state", dtype="FamilySolveRecord | None", kw_only=True)
+    birth_order: BirthOrderRecord | None = record_field("state", dtype="BirthOrderRecord | None", kw_only=True)
     guard_summary: GuardSummary | None = record_field("report", dtype="GuardSummary | None", kw_only=True)
     exclusion: ExclusionSummary = record_field("state", dtype="ExclusionSummary", kw_only=True)
     retained: PedigreeRetained | None = record_field("state", dtype="PedigreeRetained | None", kw_only=True)
@@ -796,7 +786,7 @@ class Pedigree:
     map_scale: MapScaleEstimate | None = record_field(
         "report", dtype="MapScaleEstimate | None", default=None, kw_only=True
     )
-    schema: int = schema_field(9)
+    schema: int = schema_field(10)
 
 
 @dataclass(frozen=True)
@@ -909,19 +899,21 @@ class SummaryMapping(Mapping[str, object]):
 
 
 @dataclass(frozen=True)
-class FamilySolveRecord(SummaryMapping):
-    """The full solve and abstaining-resample diagnostics (PD10/PD16)."""
+class BirthOrderRecord(SummaryMapping):
+    """The birth-order layer's sampler settings, the full fit's chain diagnostics and the joint read's use
+    (PD08/PD13/PD16): burn-in and kept sweeps of the full fit and of every resampled fit; the full fit's children whose
+    weight reference was raised (a row more than max_weight_span above the child's best always-allowed row) and its
+    guarded exact recomputes; resampled fits (counted with their draws) whose local choices formed a cycle, restricted
+    to the fit's consensus birth order."""
 
-    iterations: int = record_field("state", axes=(), units="1", dtype="int")
-    residual: float = record_field("state", axes=(), units="nats", dtype="float")
-    tolerance: float = record_field("state", axes=(), units="1", dtype="float")
-    maximum_iterations: int = record_field("state", axes=(), units="1", dtype="int")
-    retry_iterations: int = record_field("state", axes=(), units="1", dtype="int")
-    retry_limit: int = record_field("state", axes=(), units="1", dtype="int")
-    retry_damping: float = record_field("state", axes=(), units="1", dtype="float")
-    frozen_path_preparation_passes: int = record_field("state", axes=(), units="1", dtype="int")
-    nonconverged_bootstrap_replicates: int = record_field("state", axes=(), units="1", dtype="int")
-    nonconverged_loco_replicates: int = record_field("state", axes=(), units="1", dtype="int")
+    burn_in_sweeps: int = record_field("state", axes=(), units="1", dtype="int")
+    full_sweeps: int = record_field("state", axes=(), units="1", dtype="int")
+    resampled_sweeps: int = record_field("state", axes=(), units="1", dtype="int")
+    full_order_restricted: int = record_field("state", axes=(), units="1", dtype="int")
+    bootstrap_order_restricted: int = record_field("state", axes=(), units="1", dtype="int")
+    loco_order_restricted: int = record_field("state", axes=(), units="1", dtype="int")
+    full_raised_references: int = record_field("diagnostic", axes=(), units="1", dtype="int")
+    full_guarded_recomputes: int = record_field("diagnostic", axes=(), units="1", dtype="int")
 
 
 @dataclass(frozen=True)
@@ -947,7 +939,7 @@ class ExclusionSummary(SummaryMapping):
 
     model: str = record_field("report", axes=(), units="1", dtype="str")
     alpha: float = record_field("report", axes=(), units="1", dtype="float")
-    genotype_replacement_probability: float = record_field("report", axes=(), units="1", dtype="float")
+    unresolved_rate_samples: int = record_field("report", axes=(), units="1", dtype="int")
     conditional_on_supported_edge_directions: bool = record_field("report", axes=(), units="1", dtype="bool")
     candidate_dyads: int = record_field("report", axes=(), units="1", dtype="int")
     contigs: int = record_field("obs", axes=(), units="1", dtype="int")
@@ -974,19 +966,16 @@ class RelativeContrasts:
 
 @dataclass(frozen=True)
 class DecisionTrace(SummaryMapping):
-    """Full-fit factors and the actual final reciprocal solve (PD05/PD08-PD10)."""
+    """Full-fit factors and the birth-order layer (PD05/PD06/PD08)."""
 
     genetic: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
     structural_state: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
     structural_identity: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
     testable: np.ndarray = record_field("state", axes=("A",), dtype="bool")
     direction: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
-    ancestry_paths: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
-    reciprocal_family: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
+    birth_order: np.ndarray = record_field("state", axes=("A",), units="nats", dtype="float64")
     orientation_log_odds: np.ndarray = record_field("state", axes=("N", "N"), units="nats", dtype="float64")
-    final_family_iterations: int = record_field("state", dtype="int")
-    final_family_retry_iterations: int = record_field("state", dtype="int")
-    final_family_residual: float = record_field("state", units="nats", dtype="float64")
+    birth_order_sweeps: int = record_field("state", dtype="int")
 
 
 @dataclass(frozen=True)
@@ -1117,7 +1106,7 @@ class DiagnosticView:
     identifiable: bool = record_field("report", units="1", dtype="bool")
     dag_displaced: bool = record_field("report", units="1", dtype="bool")
     graph_conflict: bool = record_field("report", units="1", dtype="bool")
-    graph_tie_conflict: bool = record_field("report", units="1", dtype="bool")
+    order_restricted: bool = record_field("report", units="1", dtype="bool")
     graph_direction_resolved_alternative: bool = record_field("report", units="1", dtype="bool")
     local_parent_role_probability: float = record_field("report", units="1", dtype="float64")
     selected_parent_role_probability: float = record_field("report", units="1", dtype="float64")
@@ -1195,7 +1184,7 @@ class ParentStateView:
     inference_status: str = record_field("report", units="1", dtype="str")
     dag_displaced: bool = record_field("report", units="1", dtype="bool")
     graph_conflict: bool = record_field("report", units="1", dtype="bool")
-    graph_tie_conflict: bool = record_field("report", units="1", dtype="bool")
+    order_restricted: bool = record_field("report", units="1", dtype="bool")
     graph_direction_resolved_alternative: bool = record_field("report", units="1", dtype="bool")
     selected_parent_role_probability: float = record_field("report", units="1", dtype="float64")
     tier_a_state_call: bool = record_field("report", units="1", dtype="bool")
@@ -1257,8 +1246,7 @@ class AlternativeExplanationView:
     structural_state_log_evidence: float = record_field("report", units="nats", dtype="float64")
     structural_identity_eligible: bool = record_field("report", units="1", dtype="bool")
     direction_log_contribution: float = record_field("report", units="nats", dtype="float64")
-    reciprocal_family_log_contribution: float = record_field("report", units="nats", dtype="float64")
-    ancestry_path_log_contribution: float = record_field("report", units="nats", dtype="float64")
+    birth_order_log_contribution: float = record_field("report", units="nats", dtype="float64")
     adjusted_state_log_evidence: float = record_field("report", units="nats", dtype="float64")
     adjusted_identity_log_evidence: float = record_field("report", units="nats", dtype="float64")
     parent_state_log_prior: float = record_field("report", units="nats", dtype="float64")
@@ -1400,7 +1388,9 @@ class PedigreeViews:
     sibling_guard: GuardView | None = record_field("report", dtype="GuardView | None")
     exclusion_intervals: bool = record_field("report", dtype="bool", default=False)
     regime: str = record_field("report", dtype="str", default="standard")
-    block_summary: tuple[BlockSummaryView, ...] = record_field("report", dtype="tuple[BlockSummaryView, ...]", default=())
+    block_summary: tuple[BlockSummaryView, ...] = record_field(
+        "report", dtype="tuple[BlockSummaryView, ...]", default=()
+    )
 
 
 @dataclass(frozen=True)
@@ -1713,7 +1703,6 @@ class PreparedComponent:
     observed:          bool [N, M] read depth > 0 at the selected markers.
     state_classes:     int16 [N, B, 2] painting MAP state class per sample, bin and track; -1 = unknown
                        (abstention, BACKGROUND or unanchored trajectory). Junction-count input.
-    information_exponent: float64 [N, B] tempered-view emission exponent of each child and bin.
     selector_fallback_bp: float64 [B-1] the part of each boundary's bin-centre interval (bp) that the working map
                        measures at its fallback rate (all of it on a map-free contig, the stretches beyond a map
                        file's knots otherwise): the material under an estimated fallback rate (DESIGN_RELEASE).
@@ -1735,7 +1724,6 @@ class PreparedComponent:
     genotype_likelihoods: np.ndarray = record_field("state", axes=("N", "M", "3"), units="probability", dtype="float64")
     observed: np.ndarray = record_field("state", axes=("N", "M"), units="1", dtype="bool")
     state_classes: np.ndarray = record_field("state", axes=("N", "B", "2"), units="1", dtype="int16")
-    information_exponent: np.ndarray = record_field("state", axes=("N", "B"), units="1", dtype="float64")
     selector_fallback_bp: np.ndarray | None = record_field(
         "state", axes=("B-1",), units="bp", dtype="float64", default=None, kw_only=True
     )
@@ -1780,17 +1768,13 @@ class PreparedChromosome:
     )
     omitted_reason: str | None = record_field("state", axes=(), units="1", dtype="str | None", default=None)
     configured_morgans: float = record_field("state", axes=(), units="Morgans", dtype="float64", default=float("nan"))
-    # 4.21 B2: sum over the chromosome's information groups of n_g / (1 + (n_g - 1) r_T), n_g its selected markers,
-    # r_T the transferred working temperature of B1; NaN under the 4.20 rule (information_temperature = fixed)
-    effective_units: float = record_field(
-        "state", axes=(), units="1", dtype="float64", default=float("nan"), kw_only=True
-    )
+    search_alleles_reversed: bool = record_field("obs", axes=(), units="1", dtype="bool", default=False, kw_only=True)
 
     @property
     def informative_markers(self) -> int:
         return sum(component.informative_markers for component in self.components)
 
-    schema: int = schema_field(6)
+    schema: int = schema_field(7)
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -1883,9 +1867,8 @@ class CompactM1:
     floors: np.ndarray = record_field("state", axes=("C", "N"), units="nats", dtype="float64")
     markers: np.ndarray = record_field("obs", axes=("C",), dtype="float64")
     eligible_counts: np.ndarray = record_field("state", axes=("N",), dtype="int64")
-    # 4.21 B2: per chromosome the effective information units of the retention temperature (m1.temperature); None
-    # under the 4.20 rule (information_temperature = fixed)
-    units: np.ndarray | None = record_field("state", axes=("C",), dtype="float64", default=None, kw_only=True)
+    # per chromosome the retention band's units (m1.retention_units: every selected marker, an empty bin as one)
+    units: np.ndarray = record_field("state", axes=("C",), dtype="float64", kw_only=True)
 
     @property
     def n_samples(self) -> int:
@@ -2041,9 +2024,8 @@ class SupportRecord:
     loco: SupportCounts = record_field("call", dtype="SupportCounts")
     multiplicities: np.ndarray = record_field("call", axes=("R", "C"), dtype="float64")
     worker_count: int = record_field("diagnostic", dtype="int")
-    bootstrap_graph_budget_exhausted: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
-    loco_graph_budget_exhausted: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
-    maximum_graph_passes_used: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
+    bootstrap_order_restricted: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
+    loco_order_restricted: int = record_field("diagnostic", dtype="int", default=0, kw_only=True)
     bootstrap_fractions: SupportFractions = record_field("call", dtype="SupportFractions")
     loco_fractions: SupportFractions = record_field("call", dtype="SupportFractions")
 

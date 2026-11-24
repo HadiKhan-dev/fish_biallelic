@@ -57,9 +57,11 @@ EXCLUSION = exclusion.KEY
 RELATIONSHIP = relationship.KEY
 REQUEST = "pedigree/exclusion_request"
 
-# Prepared data depends on one contig; all other pedigree records depend on the analysed genome.
-SHARED_KEYS = (PREPARED,)
-ANALYSIS_KEYS = (PRODUCT, SCREEN, PANEL, screen.BOUNDS, FLOORED_SCORES, EXCLUSION, RELATIONSHIP, REQUEST, map_scale.KEY)
+# Prepared inputs depend on the selected analysis through painting and the working map.
+ANALYSIS_KEYS = (
+    PRODUCT, PREPARED, SCREEN, PANEL, screen.BOUNDS, FLOORED_SCORES, EXCLUSION, RELATIONSHIP, REQUEST, map_scale.KEY,
+    map_scale.INPUTS, map_scale.PAIRS, map_scale.FRAMES,
+)
 
 
 @dataclass(frozen=True)
@@ -76,11 +78,13 @@ class PedigreeDependencies:
     evidence: tuple[tuple[str, str], ...] = ()
     relationship: tuple[tuple[str, str], ...] = ()
     regime: str = "standard"
-    sample_rates: tuple[float, ...] = ()  # A11: the calibration's per-sample outlier rates (empty: 4.20's constant)
+    sample_rates: tuple[float, ...] = ()  # A11 (4.22): every sample's outlier rate, the exclusion's allowances
     map_scale: str = ""  # identity of pedigree/map_scale (regimes.material_choice reads it)
     veto: str = ""  # the regime whose released calls a call must also be in (both-maps route), or ""
     reference: str = ""  # the working regime, run only to count the product against it (regimes.reference_regime)
     exclusion_sharing: tuple[bool, ...] = ()
+    exclusion_rate_at_top: tuple[bool, ...] = ()  # samples whose rate sits at the calibration grid's top: withheld
+    contamination: str = ""  # identity of the run's contamination decision (4.22 QC A; the exclusion reads it)
 
 
 def expected(
@@ -93,7 +97,7 @@ def expected(
     numerical_policy: NumericalPolicy | None = None,
     code: CodeIdentity | None = None,
 ) -> str:
-    """Build the real schema-9 derivation; workers/storage routes and output switches are absent.
+    """Build the real schema-10 derivation; workers/storage routes and output switches are absent.
 
     Prepared records cover configured C, while floored records cover informative C.
     Exclusion is empty only for an empty request; otherwise it covers the configured contigs with material
@@ -215,7 +219,8 @@ def run_parameters(manifest: Mapping[str, Any]) -> PedigreeParameters:
                    reverse_conventions=bool(manifest["ties"]["reverse"]))
 
 
-def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundInputs:
+def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any], *,
+                 causes: tuple[dict[str, tuple[str, str, str]], str] | None = None) -> BoundInputs:
     """Rebuild pedigree preparation–pedigree scoring causes from the bound manifest, validating every publication.
 
     Read omission/summary headers and the run panel. Mixed read-library status
@@ -229,22 +234,16 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     sample_ids = tuple(manifest["sample_ids"])
     contigs = AnalysisContigs.from_manifest(manifest).included
     eligibility = ParentEligibility.unrestricted(sample_ids)
-    from ..relatedness.working_map import map_identity
+    contig_inputs, contamination = map_scale.contig_causes(store, manifest) if causes is None else causes
 
-    def bind(c: str) -> tuple[str, tuple[str, str, str], Mapping[str, Any]]:
+    def bind(c: str) -> tuple[str, Mapping[str, Any]]:
         file = store.contig(c)
-        evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=c)
-        painting = painting_records.result_reader(
-            store, manifest, product="refit_reference", contig=c, panels=False, emissions=False
-        )
-        if evidence is None or painting is None:
-            raise InvariantError(f"pedigree requires evidence and painting for {c}")
-        _header(file, evidence.key, evidence.identity, schemas=evidence_records.SCHEMA)
-        _header(file, painting.key, painting.identity)
-        working_map = map_identity(store, manifest, c)
+        painting, evidence, working_map = contig_inputs[c]
+        _header(file, evidence_records.EVIDENCE, evidence, schemas=evidence_records.SCHEMA)
+        _header(file, painting_records.REFIT_REFERENCE, painting, schemas=painting_records.SCHEMA)
         prepared_identity = prepare.derivation(
             parameters.preparation,
-            dict(painting=painting.identity, evidence=evidence.identity, genetic_map=working_map),
+            dict(painting=painting, evidence=evidence, genetic_map=working_map),
             reverse=parameters.reverse_conventions,
             numerical_policy=policy,
         )
@@ -252,16 +251,15 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
                          schemas=prepare.PreparedAdapter.schema)
         if header["contig"] != c:
             raise InputError("prepared header contig differs from its configured axis")
-        return prepared_identity, (painting.identity, evidence.identity, working_map), header
+        return prepared_identity, header
 
     # each contig's upstream chain (evidence, painting and through it assembly, selection and discovery
     # readers: header reads and decodes) is independent of the others; contig after contig, this binding took most of
     # an export check and of the run's completion step (chr3's export manifest check: 55 s on one CPU).
     bound = threaded_each(bind, contigs)
-    prepared_ids = [(c, prepared) for c, (prepared, _, _) in zip(contigs, bound, strict=True)]
-    contig_inputs = {c: inputs for c, (_, inputs, _) in zip(contigs, bound, strict=True)}
+    prepared_ids = [(c, prepared) for c, (prepared, _) in zip(contigs, bound, strict=True)]
     evidence_ids = [(c, evidence) for c, (_, evidence, _) in contig_inputs.items()]
-    prepared_headers = [header for _, _, header in bound]
+    prepared_headers = [header for _, header in bound]
     informative = tuple(
         pair for pair, h in zip(prepared_ids, prepared_headers, strict=True) if h["omitted_reason"] is None
     )
@@ -340,7 +338,7 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
     if family_reader is None:
         raise InvariantError("pedigree requires relatedness/families")
     _header(store.run, family_reader.key, family_reader.identity, schemas=families_records.SCHEMA)
-    rates, sharing = _exclusion_calibration(store, manifest, sample_ids, evidence_ids)
+    rates, at_top, sharing = _exclusion_calibration(store, manifest, sample_ids, evidence_ids)
     dependencies = PedigreeDependencies(
         eligibility.identity(),
         panel_identity,
@@ -350,28 +348,40 @@ def bound_inputs(store: CheckpointStore, manifest: Mapping[str, Any]) -> BoundIn
         evidence=tuple(evidence_ids),
         sample_rates=rates,
         exclusion_sharing=sharing,
+        exclusion_rate_at_top=at_top,
         regime=classification.name,
         map_scale=scale_identity,
         veto=choice.veto_regime,
         reference=regimes.reference_regime(choice),
+        contamination=contamination,
     )
     return BoundInputs(parameters, policy, sample_ids, contigs, eligibility, panel, tuple(summary), dependencies,
                        classification, axis, choice, estimate, regime_morgans, veto_morgans)
 
 
 def _exclusion_calibration(store, manifest, sample_ids, evidence_ids):
-    """Read A11 allowances and fitted sharing libraries from the same calibration."""
+    """Read the exclusion's allowances (4.22 A11) and fitted sharing libraries from the same calibration: each
+    sample's outlier rate and whether it sits at the top of the rate grid (unresolved: its dyads never certify).
+    A calibration with one candidate rate estimates no per-sample rates: every sample then takes the run's rate
+    (robustness_epsilon), none flagged."""
     from ..painting import calibration_records
 
     reader = calibration_records.result_reader(store, manifest, product="calibration")
-    saved = None if reader is None else read_items(
-        store.run, reader.key, reader.identity, ("sample_rates", "read_libraries")
-    )
-    calibration = {} if saved is None else saved.payload
+    if reader is None:
+        raise InvariantError("pedigree exclusion requires the painting calibration's outlier rates")
+    saved = read_items(store.run, reader.key, reader.identity,
+                       ("sample_rates", "sample_rate_at_top", "robustness_epsilon", "read_libraries"))
+    if saved is None:
+        raise InvariantError("pedigree exclusion requires the painting calibration's outlier rates")
+    calibration = saved.payload
     rates = tuple(float(x) for x in calibration.get("sample_rates", ()))
-    if rates and len(rates) != len(sample_ids):
+    at_top = tuple(bool(x) for x in calibration.get("sample_rate_at_top", ()))
+    if not rates:
+        rates, at_top = (float(calibration["robustness_epsilon"]),) * len(sample_ids), (False,) * len(sample_ids)
+    if len(rates) != len(sample_ids) or len(at_top) != len(sample_ids):
         raise InputError("the calibration's per-sample rates do not cover the pedigree's samples")
-    return rates, exclusion.sharing_samples(store, manifest, evidence_ids, calibration.get("read_libraries", ()))
+    sharing = exclusion.sharing_samples(store, manifest, evidence_ids, calibration.get("read_libraries", ()))
+    return rates, at_top, sharing
 
 
 def material_morgans(choice: Any, axis: Any, applied_morgans: float) -> tuple[float | None, float | None]:
@@ -406,7 +416,9 @@ def request_dependencies(
                     weights[c],
                     numerical_policy=policy,
                     sample_rates=inputs.sample_rates,
+                    rate_at_top=inputs.exclusion_rate_at_top,
                     sharing=inputs.exclusion_sharing,
+                    contamination=inputs.contamination,
                 ),
             )
             for c, identity in inputs.evidence
@@ -441,7 +453,9 @@ class Reader:
 
     def decode(self, payload: Mapping[str, Any]) -> Pedigree | TieCounts:
         result = PedigreeAdapter().decode(payload)
-        return (TieCounts(()) if result.retained is None else result.retained.decision.tie_events) if self.product == "pedigree_ties" else result
+        if self.product != "pedigree_ties":
+            return result
+        return TieCounts(()) if result.retained is None else result.retained.decision.tie_events
 
 
 # Pedigree readers this process derived, by run container (path, inode), manifest digest, product and record-reuse
@@ -459,6 +473,7 @@ def result_reader(
     *,
     product: str,
     contig: str | None = None,
+    causes=None,
 ) -> Reader | None:
     """Validate all independent causes before requesting the whole immutable product.
 
@@ -473,15 +488,15 @@ def result_reader(
     derived = (store.run.path, os.stat(store.run.path).st_ino, json_digest(manifest), product, pin_generation())
     reader = _DERIVED.get(derived)
     if reader is None:
-        reader = _DERIVED[derived] = _derive_reader(store, manifest, product)
+        reader = _DERIVED[derived] = _derive_reader(store, manifest, product, causes=causes)
     return reader
 
 
-def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product: str) -> Reader:
+def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product: str, *, causes=None) -> Reader:
     # Report output needs the bound product and its ordered release request. The remaining contig header
     # reads run independently. Cold matched reports took 12.7 wall / 15.3 CPU s on famhs and 17.0 / 22.7
     # on TroMau after sharing refit and map inputs, down from 39.9 / 51.0 and 158.0 / 233.8.
-    bound = bound_inputs(store, manifest)
+    bound = bound_inputs(store, manifest, causes=causes)
     request_id = expected(
         bound.parameters,
         bound.sample_ids,
@@ -511,6 +526,15 @@ def _derive_reader(store: CheckpointStore, manifest: Mapping[str, Any], product:
         numerical_policy=bound.policy,
     )
     return Reader(identity, product)
+
+
+def published_identity(store: CheckpointStore, manifest: Mapping[str, Any], *, causes=None) -> str | None:
+    """Return the current product's identity without decoding scores or the released product."""
+    reader = result_reader(store, manifest, product="pedigree", causes=causes)
+    if reader is None:
+        return None
+    _header(store.run, reader.key, reader.identity, schemas=reader.schema)
+    return reader.identity
 
 
 class RequestAdapter:

@@ -26,6 +26,7 @@ from .exclusion_parameters import ExclusionParameters
 from .family_transmission_parameters import FamilyTransmissionParameters
 from .map_scale_parameters import MapScaleParameters
 from .material_parameters import MaterialParameters
+from .order_parameters import OrderParameters
 from .relationship_parameters import RelationshipParameters
 from .scoring_parameters import PanelParameters, PreparationParameters, ScoringParameters
 
@@ -45,8 +46,7 @@ class PedigreeParameters:
         default_factory=PreparationParameters,
         metadata={
             "provenance": (
-                "PD27; internal marker-selection and tempering parameter group; units are declared by its "
-                "fields."
+                "PD27; internal marker-selection parameter group; units are declared by its fields."
             ),
         },
     )
@@ -72,17 +72,23 @@ class PedigreeParameters:
         default_factory=DirectionParameters,
         metadata={
             "provenance": (
-                "PD27; internal orientation and family-factor parameter group; units are declared by its fields."
+                "PD27; internal orientation parameter group; units are declared by its fields."
+            ),
+        },
+    )
+    order: OrderParameters = field(
+        default_factory=OrderParameters,
+        metadata={
+            "provenance": (
+                "PD27; internal birth-order sampler parameter group (sweeps, burn-in, numerical guards); units are "
+                "declared by its fields."
             ),
         },
     )
     selection: SelectionParameters = field(
         default_factory=SelectionParameters,
         metadata={
-            "provenance": (
-                "PD27; internal state-prior and acyclic-search parameter group; units are declared by its "
-                "fields."
-            ),
+            "provenance": "PD27; internal state-prior parameter group; units are declared by its fields.",
         },
     )
     resampling: ResamplingParameters = field(

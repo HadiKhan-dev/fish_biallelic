@@ -62,7 +62,7 @@ Cost and scope: O(K F L); O(F² · IDENTITY_WINDOW_MARKERS); O(windows · F² ·
 <a id="ou36"></a>
 ## ou36 Released-phase metrics: sites, switch events, long switches, sets, N50 and parent groups
 
-Score phase only at genotype-correct, called true heterozygotes released phased within a set. Count site-aligned errors by the minority orientation within each set, switch events between consecutive scored sites, and long switches between retained long orientation runs. Unscored sites do not split sets. Separately count truth-free released sets, including wrongly called phased heterozygotes. Pool spans for N50 and group samples by released post-guard parent edges. Site errors and switch events have different denominators.
+Score phase only at genotype-correct, called true heterozygotes released phased within a set. Count site-aligned errors by the minority orientation within each set, switch events between consecutive scored sites, and long switches between retained long orientation runs. Unscored sites do not split sets. Separately count truth-free released sets, including wrongly called phased heterozygotes. Pool spans for N50 and group samples by released post-guard parent edges. Site errors and switch events have different denominators. When site QC ran on the simulation (the realistic presets), phase is released on the kept sites only: the truth is restricted to them, genotype and phase counts cover those sites, and `site_qc_removed_sites` reports how many the filter removed (never scored as uncalled).
 
 Implementation: [evaluation/metrics.py](../../haplotype_reconstruction/evaluation/metrics.py).
 

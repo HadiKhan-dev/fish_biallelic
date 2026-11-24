@@ -14,7 +14,7 @@ from ...engine.graph import ResourceRequest, ResultRef, Task, TaskKey
 from .painting import contig_painting, write_painting, write_calibration
 from .pair_sharing import contig_pair_sharing, write_pair_sharing
 from .pedigree import write_pedigree
-from .quality import contig_quality, write_quality
+from .quality import contig_quality, write_contamination, write_quality
 from .recombination import contig_recombination, write_recombination
 from .relatedness import write_relatedness
 from .tables import write_family_phase, write_founder_refit, write_truth_pedigree
@@ -56,11 +56,20 @@ def _relatedness(output: Path, results: Results):
 
 def _pedigree(output: Path, results: Results, *, map_work=None):
     product = results.pedigree()
-    return [] if product is None else write_pedigree(output, product, results.input_sample_ids, map_work=map_work)
+    if product is None:
+        return []
+    decision = results.contamination()
+    tiers = None
+    if decision is not None:
+        from .quality import contamination_rows
+
+        tiers = {row[0]: row[-1] for row in contamination_rows(decision)}
+    return write_pedigree(output, product, results.input_sample_ids, map_work=map_work, contamination=tiers)
 
 
 def _refit(output: Path, results: Results):
-    return write_founder_refit(output, results.refit_summaries())
+    summary = write_founder_refit(output, results.refit_summaries())
+    return [summary, summary.with_name("excluded_samples.csv")]
 
 
 def _phase(output: Path, results: Results):
@@ -116,7 +125,10 @@ def run_tasks(
                 family,
                 writer,
                 (output, tuple(ResultRef(task.key) for task in readers)),
-                depends_on=tuple(task.key for task in readers),
+                kwargs={"results": results} if family == "painting" else {},
+                # the painting writer marks each library's contamination tier (4.22 QC A): after the run's decision
+                depends_on=tuple(task.key for task in readers)
+                + (tuple(dependencies.get("contamination", ())) if family == "painting" else ()),
                 working_set_bytes=recombination_bytes if family == "recombination" else 0,
             )
         )
@@ -143,6 +155,7 @@ def run_tasks(
         )
     for name, writer in (
         ("calibration", write_calibration),
+        ("contamination", write_contamination),
         ("truth", _truth),
         ("relatedness", _relatedness),
         ("pedigree", _pedigree),
@@ -154,6 +167,8 @@ def run_tasks(
             continue
         kwargs = {}
         after = tuple(dependencies[name])
+        if name == "pedigree":
+            after += tuple(dependencies.get("contamination", ()))
         if name == "complete":
             # A contig's tie sources run through painting and founder refit (results.tie_sources reads both, and
             # skips a stage not yet published). Refit depends on painting, so waiting for painting alone could

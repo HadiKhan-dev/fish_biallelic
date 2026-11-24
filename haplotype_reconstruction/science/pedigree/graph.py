@@ -1,12 +1,7 @@
-"""Acyclic pedigree selection from per-child local winners.
+"""The pedigree graph of one fit's choices: the acyclicity check, the cycle members the joint read restricts
+(selection.select) and the reported selection of an acyclic set of rows.
 
-A graph constraint must not create parent evidence: a locally preferred configuration is kept
-whenever it fits the DAG; otherwise the child takes the unique finite winner of its local state or a
-lower one (M2 -> M1 -> M0), never a higher parent count. Children are visited by descending
-orientation support of their local configuration, then confidence, then index; a coordinate local
-search repeats the pass. Cycles among numerically tied local rows are left unresolved.
-
-Method: docs/methods/pedigree.md#acyclic-graph-selection.
+Method: docs/methods/pedigree.md#joint-read.
 """
 
 from __future__ import annotations
@@ -15,16 +10,15 @@ from collections.abc import Mapping
 
 import numpy as np
 
-from ...contracts.pedigree import M0, Alternatives, GraphSelection, LocalGraphChoices
+from ...contracts.pedigree import GraphSelection
 from ...core import ties as tie_rules
-from ...core.errors import InvariantError
 from ...core.kernels import kernel
 from .kernels.decision import OVERLOADS
 from .numerical_parameters import WINNER_NUMERICS
 from .orientation import Orientation, parent_role_probability
-from .ties import contrast_tolerance, unique_finite_winner, winner_tolerance
+from .ties import winner_tolerance
 
-__all__ = ["is_acyclic", "select_local", "select_acyclic", "tie_conflict_children"]
+__all__ = ["is_acyclic", "select_local", "cycle_members"]
 
 
 @kernel(overloads=OVERLOADS["graph._is_acyclic"], cache=True, nogil=True)
@@ -143,106 +137,6 @@ def select_local(
     return GraphSelection(selected, frozenset(), role_probability)
 
 
-def select_acyclic(
-    alternatives: Alternatives,
-    decision_scores: np.ndarray,
-    local: LocalGraphChoices,
-    local_search_passes: int,
-    orientation: Orientation,
-    *,
-    reverse=False,
-) -> GraphSelection:
-    """Greedy acyclic selection with downward fallback and coordinate local search."""
-    rows, states, child_rows = alternatives.rows, alternatives.states, alternatives.child_rows
-    local_rows, state_margins, identity_margins = local.rows, local.state_margins, local.identity_margins
-    n_samples = alternatives.n_samples
-    order = _visit_order(local_rows, rows, state_margins, identity_margins, orientation, reverse=reverse)
-    adjacency: list[set[int]] = [set() for _ in range(n_samples)]
-    selected: dict[int, int] = {}
-    direction_resolved: set[int] = set()
-    role_probability: dict[int, float] = {}
-
-    def add(row: int, displaced: bool) -> None:
-        child = int(rows[row, 0])
-        for parent in _parents(rows, row):
-            adjacency[parent].add(child)
-        selected[child] = row
-        role_probability[child] = parent_role_probability(row, rows, orientation)
-        if displaced and int(states[row]) != M0:
-            direction_resolved.add(child)
-        else:
-            direction_resolved.discard(child)
-
-    def remove(child: int) -> int | None:
-        row = selected.pop(child, None)
-        role_probability.pop(child, None)
-        direction_resolved.discard(child)
-        if row is not None:
-            for parent in _parents(rows, row):
-                adjacency[parent].discard(child)
-        return row
-
-    def reachable(child: int) -> np.ndarray:
-        """bool [N]: the child and every sample reachable from it, i.e. every x with a path child -> x (one
-        search per child visit instead of one per candidate row and parent)."""
-        reach = np.zeros(n_samples, dtype=np.bool_)
-        reach[child] = True
-        stack = [child]
-        while stack:
-            node = stack.pop()
-            for neighbour in adjacency[node]:
-                if not reach[neighbour]:
-                    reach[neighbour] = True
-                    stack.append(neighbour)
-        return reach
-
-    def best_feasible(child: int) -> tuple[int | None, bool]:
-        """The local row if it fits, else the unique finite winner of the highest feasible state
-        at or below the local state; (row, displaced). A row fits when none of its parents is reachable
-        from the child; the graph does not change within one call, so the reachable set is searched once."""
-        local = int(local_rows[child])
-        reach = reachable(child)
-        if not any(reach[parent] for parent in _parents(rows, local)):
-            return local, False
-        candidates = np.asarray(child_rows[child], dtype=np.int64)
-        first, second = rows[candidates, 1], rows[candidates, 2]
-        blocked = ((first >= 0) & reach[np.maximum(first, 0)]) | ((second >= 0) & reach[np.maximum(second, 0)])
-        open_rows = candidates[~blocked & np.isfinite(decision_scores[candidates])]
-        open_states = states[open_rows]
-        for target_state in range(int(states[local]), -1, -1):
-            feasible = open_rows[open_states == target_state]
-            winner, _ = unique_finite_winner(feasible, decision_scores)
-            if winner is not None:
-                return winner, winner != local
-        return None, False
-
-    for child in order:
-        row, displaced = best_feasible(child)
-        if row is not None:
-            add(row, displaced)
-    passes_used = 0
-    changed = False
-    for _ in range(local_search_passes):
-        passes_used += 1
-        changed = False
-        for child in order:
-            previous = remove(child)
-            replacement, displaced = best_feasible(child)
-            if replacement is not None:
-                add(replacement, displaced)
-            changed |= replacement != previous
-        if not changed:
-            break
-    # Receipt only: never run an extra pass to decide whether the fixed budget was enough.
-    return GraphSelection(
-        selected,
-        frozenset(direction_resolved),
-        role_probability,
-        graph_passes_used=passes_used,
-        graph_pass_budget_exhausted=bool(local_search_passes > 0 and changed),
-    )
-
-
 def _cyclic_components(adjacency, reverse) -> list[frozenset[int]]:
     """Iterative Kosaraju, O(vertices + edges); components in minimum-vertex order.
 
@@ -294,77 +188,13 @@ def _cyclic_components(adjacency, reverse) -> list[frozenset[int]]:
     return result
 
 
-def tie_conflict_children(
-    rows: np.ndarray,
-    local_rows: Mapping[int, int],
-    state_margins: np.ndarray,
-    identity_margins: np.ndarray,
-    score_scales: np.ndarray,
-    n_samples: int,
-) -> frozenset[int]:
-    """Children whose cyclic local rows are numerically tied at the weakest link.
-
-    Cycles are peeled at their least-supported child (confidence: the smaller of its state and
-    identity margins); a unique weakest row is left for the optimizer to displace, while two or
-    more tied weakest rows are all marked unresolved (choosing one by sample order would
-    manufacture confidence from a graph constraint).
-
-    Confidences tie when they differ by at most 512 ULP of the largest magnitude among the
-    implicated children's ``score_scales`` (float64 [N]: per child, the largest |score| its
-    margins were computed from) and their confidences. A margin is a difference of composite log
-    likelihoods of 1e4-1e5 nats, so its rounding is set by those scores, not by the margin's own
-    size (measured: up to ~136 ULP of the scores when the chromosome sums are reassociated, so ~272
-    for a difference of two margins): evaluation order must not decide a mathematically exact tie.
-    (Base took 512 ULP of the margins, below their rounding resolution; T7 question 6.)
-    """
-    active = {int(child): int(row) for child, row in local_rows.items()}
-    ambiguous: set[int] = set()
-
-    def cyclic_components() -> list[frozenset[int]]:
-        adjacency: list[set[int]] = [set() for _ in range(n_samples)]
-        reverse: list[set[int]] = [set() for _ in range(n_samples)]
-        for child, row in active.items():
-            for parent in _parents(rows, row):
-                adjacency[parent].add(child)
-                reverse[child].add(parent)
-
-        return _cyclic_components(adjacency, reverse)
-
-    while True:
-        components = cyclic_components()
-        if not components:
-            break
-        removed = set()
-        for component in components:
-            implicated = [
-                child
-                for child, row in active.items()
-                if child in component and any(parent in component for parent in _parents(rows, row))
-            ]
-            if not implicated:
-                continue
-            values = np.asarray(
-                [_confidence(child, state_margins, identity_margins) for child in implicated], dtype=np.float64
-            )
-            minimum = float(np.min(values))
-            if np.isfinite(minimum):
-                finite = np.isfinite(values)
-                scales = np.asarray(score_scales, dtype=np.float64)[implicated]
-                tolerance = max(contrast_tolerance(np.r_[values[finite], scales[finite]]), winner_tolerance(1.0))
-                tied = [
-                    child
-                    for child, value in zip(implicated, values, strict=False)
-                    if np.isfinite(value) and abs(float(value) - minimum) <= tolerance
-                ]
-            else:
-                tied = [child for child, value in zip(implicated, values, strict=False) if float(value) == minimum]
-            if len(tied) > 1:
-                ambiguous.update(tied)
-                removed.update(tied)
-            else:
-                removed.add(tied[0])
-        if not removed:
-            raise InvariantError("failed to peel a cyclic local pedigree")
-        for child in removed:
-            active.pop(child, None)
-    return frozenset(ambiguous)
+def cycle_members(selected_rows: Mapping[int, int], rows: np.ndarray, n_samples: int) -> frozenset[int]:
+    """The children on a directed cycle of the selected rows' parent -> child edges (the strongly connected components
+    with more than one sample; eligibility names no child as its own parent)."""
+    adjacency: list[list[int]] = [[] for _ in range(n_samples)]
+    reverse: list[list[int]] = [[] for _ in range(n_samples)]
+    for child, row in selected_rows.items():
+        for parent in _parents(rows, int(row)):
+            adjacency[parent].append(int(child))
+            reverse[int(child)].append(parent)
+    return frozenset(member for component in _cyclic_components(adjacency, reverse) for member in component)

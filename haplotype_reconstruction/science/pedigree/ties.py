@@ -4,7 +4,9 @@ Two scores closer than the tolerance (the larger of 512 ULP of the largest magni
 the absolute floor NOISE_FLOOR = 2^-15 nats) are tied: floating evaluation order must not decide a
 parent state, an identity or a rank.
 Margins (differences of scores) are compared on the same scale: the magnitude of the scores they
-came from, not their own (graph.tie_conflict_children).
+came from, not their own. The pedigree fits' configuration scores are the birth-order layer's sampled posteriors
+(order.py), whose Monte Carlo error is far above this tolerance: configurations tied exactly in the evidence reach
+these winners already split by the chain's realisation (docs/methods/pedigree.md#pd11).
 
 Method: docs/methods/ties.md.
 """

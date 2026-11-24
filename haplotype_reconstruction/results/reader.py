@@ -153,6 +153,15 @@ class Results(ProductInputs):
         request = self.request(adapter, product, contig, **options)
         return None if request is None else self.read(request, contig)
 
+    def contamination(self) -> dict[str, Any] | None:
+        """The run's per-library contamination decision (4.22 QC A: alpha, own error, robust z, flag, donor and the
+        tier), None before it is published."""
+        from ..stages.painting import contamination_records as records
+
+        if not self._has(None, records.CONTAMINATION):
+            return None
+        return self._read(records, "contamination")
+
     def evidence_summary(self, contig: str) -> EvidenceDecisions | None:
         """Read the evidence adapter's typed quality and calibration summary without its large arrays."""
         if not self._has(contig, "evidence"):

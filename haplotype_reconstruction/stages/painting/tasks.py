@@ -33,7 +33,12 @@ from ...core.ties import TieCensus, TieSettings
 from ...science.painting.diagnostics import ModelTrajectory, PaintingDiagnostics, summarise
 from ...science.painting.emissions import ArraySource, contig_columns, gather_sites, mix_window, tempered_into
 from ...science.painting.fidelity import ChainModel
-from ...science.painting.parameters import EMISSION_CACHE_MAX_BYTES, WINDOW_BYTES, PaintingParameters
+from ...science.painting.parameters import (
+    EMISSION_CACHE_MAX_BYTES,
+    LABEL_ERROR_CORRELATION,
+    WINDOW_BYTES,
+    PaintingParameters,
+)
 from .compute import paint_chromosome
 from .read_state import stage_builder
 from ...store.container import CheckpointFile
@@ -251,6 +256,9 @@ def run_contig(
             builders["builder"] = stage_builder(
                 base, file, evidence_identity, source.cohort_frequencies, confidence_correlation, parameters,
                 unit_batches=True,
+                # the reference painting reads the label-error statistic at its own strength (deferred matrices: the
+                # fine painting never builds them)
+                label_correlation=LABEL_ERROR_CORRELATION,
             )
         return builders["builder"]
     with claim(file, records.PAINTING, expected, blocking=False) as needed:

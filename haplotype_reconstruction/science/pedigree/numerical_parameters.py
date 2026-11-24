@@ -99,12 +99,6 @@ class ScoringNumerics:
             ),
         },
     )
-    family_exp_underflow: float = field(
-        default=750.0,
-        metadata={
-            "provenance": "PD09; magnitude cutoff 750 nats skips exponentials whose float64 contributions vanish.",
-        },
-    )
     order_minimum_unit_weight: float = field(
         default=2.0,
         metadata={
@@ -281,7 +275,6 @@ SITE_POLYNOMIAL_THRESHOLD = SCORING_NUMERICS.site_polynomial_threshold
 LOG_FLOOR = SCORING_NUMERICS.log_floor
 
 TINY = SCORING_NUMERICS.tiny
-FAMILY_EXP_UNDERFLOW = SCORING_NUMERICS.family_exp_underflow
 ORDER_MINIMUM_UNIT_WEIGHT = SCORING_NUMERICS.order_minimum_unit_weight
 ORDER_VARIANCE_OFFSET = SCORING_NUMERICS.order_variance_offset
 DIRECTION_RELIABILITY_GRID = SCORING_NUMERICS.direction_reliability_grid

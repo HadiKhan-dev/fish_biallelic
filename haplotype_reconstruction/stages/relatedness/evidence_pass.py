@@ -58,6 +58,7 @@ class EvidenceArrays:
     read_sharing_range: int  # bp: the contig's read-sharing range (science.evidence.read_sharing)
     read_sharing_status: str = "resolved_within"  # none_detected, resolved_within or unresolved
     read_sharing_reach: int = 0  # bp: the reach of the curve the consumers read (the widest measured when unresolved)
+    search_alleles_reversed: bool = False
 
     def __post_init__(self) -> None:
         freeze_record_arrays(self)
@@ -78,7 +79,8 @@ def upstream_identities(inputs: tuple[EvidenceInput, ...]) -> dict[str, str]:
 def _read(store: CheckpointStore, item: EvidenceInput, sample_ids: tuple[str, ...]) -> EvidenceArrays:
     file = store.contig(item.contig)
     record = read_items(
-        file, _EVIDENCE_KEY, item.evidence_identity, ("schema", "sample_ids", "positions", "cohort_frequencies")
+        file, _EVIDENCE_KEY, item.evidence_identity,
+        ("schema", "sample_ids", "positions", "cohort_frequencies", "search_alleles_reversed"),
     )
     if record is None:
         raise InputError(f"relatedness needs evidence for {item.contig}")
@@ -101,6 +103,7 @@ def _read(store: CheckpointStore, item: EvidenceInput, sample_ids: tuple[str, ..
         names, record.payload["positions"], gl, observed, np.asarray(record.payload["cohort_frequencies"]),
         int(sharing.range_bp) if sharing.resolved() else 0,
         str(sharing.status), int(sharing.consumer_curve()[2]),
+        bool(record.payload.get("search_alleles_reversed", False)),
     )
 
 

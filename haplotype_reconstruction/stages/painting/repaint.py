@@ -20,12 +20,15 @@ from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 from ...contracts.evidence import ContigEvidence
 from ...contracts.painting import Painting
 from ...contracts.roles import require_schema
 from ...core.errors import InputError, InvariantError
 from ...core.ties import TieSettings
 from ...science.painting.diagnostics import summarise
+from ...science.painting.parameters import LABEL_ERROR_CORRELATION
 from ...store.identity import code_dependency_identity
 from ...store.protocol import Derivation, NumericalPolicy, claim, mark_complete, resume
 from ...store.store import CheckpointStore
@@ -46,12 +49,14 @@ SCHEMA = records.SCHEMA
 __all__ = ["REFIT_REFERENCE", "SCHEMA", "derivation", "expected", "result_reader", "run", "task"]
 
 
-def derivation(reference_identity: str, refit_identity: str, *, numerical_policy: NumericalPolicy | None = None) -> str:
-    """The second reference decode's identity: the reference painting's and the founder refit's."""
+def derivation(reference_identity: str, refit_identity: str, contamination_identity: str, *,
+               numerical_policy: NumericalPolicy | None = None) -> str:
+    """The second reference decode's identity: the reference painting's, the founder refit's and the run's
+    contamination decision (4.22 QC A: flagged libraries are decoded on corrected likelihoods)."""
     return Derivation(
         code_dependency_identity(("stages.painting.repaint",)),
         dict(product=REFIT_REFERENCE), numerical_policy or NumericalPolicy.current(),
-        dict(reference=reference_identity, refit=refit_identity),
+        dict(reference=reference_identity, refit=refit_identity, contamination=contamination_identity),
     ).identity
 
 
@@ -61,6 +66,7 @@ def expected(
     """Rebuild the identity from the checked reference painting and refit requests; never read it from this
     product's own envelope."""
     from ..refit import records as refit_records
+    from . import contamination_records
 
     if product != "refit_reference":
         raise InputError(f"unsupported refit painting reader product {product!r}")
@@ -68,8 +74,10 @@ def expected(
     refit = refit_records.expected(store, manifest, product="refit", contig=contig)
     if reference is None or refit is None:
         raise InvariantError("the refit painting requires the reference painting and the founder refit")
+    contamination = contamination_records.expected(store, manifest, product="contamination")
     identity = derivation(
-        reference.identity, refit.identity, numerical_policy=NumericalPolicy(**manifest["numerical_policy"])
+        reference.identity, refit.identity, contamination.identity,
+        numerical_policy=NumericalPolicy(**manifest["numerical_policy"]),
     )
     return records.Reader(identity, product, key=REFIT_REFERENCE)
 
@@ -158,7 +166,7 @@ def run(
                             batch,
                         ),
                         file, evidence_identity, source.cohort_frequencies, calibration["confidence_correlation"],
-                        parameters, unit_batches=True,
+                        parameters, unit_batches=True, label_correlation=LABEL_ERROR_CORRELATION,
                     ),
                     progress=_Progress(file, identity), label_continuity=continuity,
                     label_errors=True,  # as the reference painting: the pedigree's painting carries the label errors
@@ -167,8 +175,20 @@ def run(
                     confidence_correlation=calibration["confidence_correlation"],
                 )
 
-            with read_evidence(file, evidence_identity) as source:
+            from . import contamination as contamination_stage
+
+            _, decided = contamination_stage.decision(store, reader.manifest)
+            if np.any(decided["flagged"]):
+                # 4.22 QC A: the flagged libraries' rows corrected; a dense projection replaces the windows
+                # (the uncorrected projection is not kept alive beside the corrected one during the decode)
+                source = contamination_stage.corrected_evidence(
+                    store, reader.manifest, contig, evidence_records.load_dense(file, expected_identity=evidence_identity),
+                    evidence_identity=evidence_identity)
                 result = compute(source)
+                del source
+            else:
+                with read_evidence(file, evidence_identity) as source:
+                    result = compute(source)
             records.write(file, identity, result, summarise(result), evidence_identity=evidence_identity,
                           key=REFIT_REFERENCE)
     mark_complete(file, "repaint", complete)

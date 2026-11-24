@@ -53,6 +53,44 @@ READ_TABLE_CACHE_BYTES = 1 << 30
 # factors below it are logged directly, so bin aggregation never underflows.
 EMISSION_RESCALE_BELOW = 1e-150
 
+# Site correlation (dimensionless; divisor 1 + r (reference_snps_per_bin - 1) = 1) of the chain the label-error
+# statistic h = (u, v_0, v_1) is read from (fidelity.label_errors; the pedigree's A9, A10 and PD29 allowances). h is
+# the posterior probability that a released label is wrong, so it is read from the untempered chain: the copying
+# model fitted at r = 0 (fidelity.estimate_chain) and its label-pair masses. The run's two strengths keep
+# their roles (the path strength decodes the labels, the confidence strength gates their release). Held-out read
+# prediction ignores label identity. It chooses confidence strength and, without the read state, path strength.
+# With the read state, the path divisor is fixed at 4. Known-truth simulations (release 4.22): with h at
+# the confidence strength, an independent-site design at half depth chose divisor 4 instead of 32 and its label
+# posterior sharpened on thinner data (mean u fell x0.3 while the true label error rose x3.8); at r = 0 h rises with
+# the true error on every design tested (independent-site, short-read backcross, medium- and long-read designs at
+# depth 5 and 2.5), its top tenth holds 5.3 to 9.0 times the mean error, and the independent-site design's
+# observed/stated error falls from 8.6 / 84 to 4.1 / 7.9. Divisors 4, 8 and 32 each failed a check on some design.
+# h stays a working score (2.7 to 22 times overconfident on those designs), not a calibrated probability.
+LABEL_ERROR_CORRELATION = 0.0
+# Per-library contamination (4.22 QC A, science/painting/contamination.py). A library is corrected when its
+# population-law alpha (read fraction of foreign DNA) is at least CONTAMINATION_ALPHA_FLOOR above the cohort's median
+# alpha (the clean level) AND its robust z of alpha over the cohort is at least CONTAMINATION_Z_FLOOR. Both are needed:
+# clean libraries carry a misfit floor (alpha 0.004-0.009 in known-truth designs, highest in a systematic subgroup --
+# the F1s of TroMau-like crosses -- so a robust z alone flags clean F1s, z up to 6.7), and a fixed floor alone ignores a
+# noisier cohort. The floor is on the excess over the median because the clean level moves with the data: under the
+# realistic simulator's artefacts a clean half-sib cohort sat at alpha 0.010-0.017 (median 0.015) and a fixed 0.01
+# floor let its founder subgroup (0.020, z 7-8) be flagged and corrected (4.22 release validation). 0.008 is the fixed
+# 0.01 floor at the clean level of the runs it was validated on (median 0.0014-0.0018): on the saved reports of every
+# known-truth run and of TroMau, the excess floor changes no decision except those three founders (TroMau's smallest
+# corrected library, alpha 0.0101 with a named donor, keeps its correction; at an excess of 0.01 it would lose it).
+# The relative floor was not re-run end to end (owner's ruling, 23 Nov). On five known-truth
+# runs (~560 clean, 15 contaminated libraries at 2-30 %) the rule flagged no clean library and 14 of 15 contaminated
+# ones (the miss: a nominal 2 % library whose realized share was ~1 %, which changed no pedigree call). The best
+# sequenced donor is named when its same-homozygote residual (foreign minor reads where library and donor are the
+# same homozygote, per unit of donor alpha) is at most CONTAMINATION_DONOR_RESIDUAL: true donors gave 0.001-0.016 and
+# stand-ins for an unsequenced source (founders standing in for an outside fish) 0.079-0.213 on known truth; a
+# stand-in's donor law lost edges (96 vs 105 with the population plug-in), so a stand-in is never used. Libraries
+# above CONTAMINATION_CARE_ALPHA are corrected and reported "interpret with care" (the owner's line, 3-5 %: 5 %).
+CONTAMINATION_ALPHA_FLOOR = 0.008
+CONTAMINATION_Z_FLOOR = 4.0
+CONTAMINATION_DONOR_RESIDUAL = 0.04
+CONTAMINATION_CARE_ALPHA = 0.05
+
 
 @dataclass(frozen=True)
 class ReadStateParameters:
@@ -93,8 +131,8 @@ class ReadStateParameters:
         tests must be counted (std chr18: a noise split at z 4.14 passes z* = 4.0 of the all-sample bins alone).
     detection_z: z*, resolved per run by the calibration (stages/painting/read_state.py run_detection) and carried on
         the paintings' parameters; None in the configuration. Without sharing the read state
-        carries nothing, while the tempered class factor R ** w (w < 1) would penalise heterozygous label pairs
-        (sum_s pi_s R_s ** w < 1, about 8 nats per bin; painting/read_inputs.py ReadEmissionBuilder).
+        carries nothing (with read_factor's bin-level correction exactly; the bypass is a shortcut to the same result;
+        painting/read_inputs.py ReadEmissionBuilder).
     maximum_loss: largest intermittent loss (probability) the model uses.
     loss_contrast_gap_bp, loss_quartet_span_bp, loss_cluster_bp: short-gap geometry and spatial block size for the
         repeated-depth moment check of a covariance fit at zero loss. The check uses the run's read-sharing multiplier

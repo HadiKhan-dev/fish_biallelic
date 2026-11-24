@@ -14,6 +14,25 @@ science.shared.observation: an outlier site's reads do not follow the read model
 sum_s pi_l(s) R_l(s) = 1, and R = 1 at an unobserved site and wherever the pair's alleles agree. Each site's factor is
 tempered with its bin's weight w: today's tempered scalar emission carries G ** w, the read matrix R ** w.
 
+By Jensen's inequality, sum_s pi_l(s) R_l(s) ** w < 1 when 0 < w < 1 and R_l varies among the classes with
+positive probability under pi_l. The deficit arises at heterozygous allele configurations, which can also occur
+for a repeated BACKGROUND label. The painting's copying-model fits and decodes, reference repaint, calibration,
+family phase, and the pedigree's source chain and map-scale frames take the bin-level correction
+(``bin_corrected``, 4.22 D5 and D5P). Label continuity scores scalar part emissions in its search and final
+verification and sees the correction through the fitted copying model. Each label pair's bin factor keeps the
+tempered matrix's shape (its class dynamics) and its total becomes the bin's untempered read likelihood to the
+power w. Both totals use the class law alpha_b carried into the bin through the preceding tempered matrices for the
+fixed label pair, starting from the class law at the first bin's entry site. Two passes keep the bin-chunk
+parallelism. _matrices also returns each bin's untempered row sums M_u 1 (a backward vector chain), and
+_carry_correction walks each (sample, pair) through its bins in order. At w = 1 the multiplier is exactly one in
+exact arithmetic, with rounding on the order of 1e-8 nats. The correction makes a bin without read sharing exactly
+neutral. Without it short paired-end reads at low per-sample depth (weak read evidence) lost the pedigree's true
+parents to the penalty (zero_stress 41 of 68 Tier B edges, bc8 at 2.5x 0 of 120, rising to 68 and 120 with the
+correction, lab422/d5). The correction removes about a quarter of the long-read genotype errors in famhs 2.5x
+(1.92 M to 1.43 M, lab422/d5p).
+Calibration's held-out blocks (read_calibration) add the visible build's shift to their visible-plus-hidden log
+scales (_hidden_matrices is uncorrected; the hidden sites stay at weight one).
+
 The bin's read matrix is M_b = prod over its sites l (in order) of T_l diag(f_l), T_l the class operator from the
 previous selected site (composed over skipped evidence sites; the first site's operator links the bin to the previous
 bin, the identity at the component's first site). The painting chain multiplies today's tempered scalar bin emission
@@ -56,13 +75,19 @@ _I2 = types.Array(types.int64, 2, "C")
 _I1R = types.Array(types.int64, 1, "C", readonly=True)
 _B2R = types.Array(types.boolean, 2, "C", readonly=True)
 _F3R = types.Array(types.float64, 3, "C", readonly=True)
-# Bins per work item of the read-matrix kernels (dimension-only scheduling: no effect on any value).
+# Bins per work item of the read-matrix kernels (dimension-only scheduling: no effect on any value; the bin
+# correction's carry is a separate pass over (sample, pair), _carry_correction).
 MATRIX_CHUNK_BINS = 64
 _OVERLOADS = {
     "_matrices": (
-        (_F4, _F3, _F4, _B2, _F2, _F1, _F3, _F2, types.float64, _I1, _I1, _I1, _I1, _F2, _I2, _M5, _F3),
-        (_F4, _F3, _F4, _B2R, _F2, _F1, _F3R, _F2, types.float64, _I1, _I1, _I1, _I1, _F2, _I2, _M5, _F3),
+        (_F4, _F3, _F4, _B2, _F2, _F1, _F3, _F2, types.float64, _I1, _I1, _I1, _I1, _F2, types.boolean, _I2, _M5,
+         _F3, _F4, _F3),
+        (_F4, _F3, _F4, _B2R, _F2, _F1, _F3R, _F2, types.float64, _I1, _I1, _I1, _I1, _F2, types.boolean, _I2, _M5,
+         _F3, _F4, _F3),
     ),
+    "_untempered_ratios": ((_F2, types.float64, types.float64, types.float64, types.float64, types.float64,
+                            types.float64, types.float64, types.float64, types.float64, _F1),),
+    "_carry_correction": ((_M5, _F3, _F4, _F3, _F2, _F3, _I1, _F3),),
     "_pair_representatives": (
         (_F2, _I1, _I1, _I1, _I1, _I2),
         (_F2, _I1R, _I1R, _I1, _I1, _I2),
@@ -76,7 +101,7 @@ def _pair_representatives(alt, bin_starts, bin_stops, first_label, second_label,
     ALT probabilities of its first label and of its second label at every site of the bin, and the same 'one named
     class' flag (x1 == x2, not BACKGROUND). A pair's factors depend on the labels only through these, so pairs with
     one representative have identical matrices and log scales at every sample (unobserved sites contribute one
-    whatever the pair)."""
+    whatever the pair); with bin_corrected each pair's log scale is still its own (its own carried class law)."""
     n_labels = alt.shape[0]
     n_pairs = len(first_label)
     for b in prange(len(bin_starts)):
@@ -117,19 +142,43 @@ def pair_representatives(alt, bin_starts, bin_stops, first, second):
     return out
 
 
+@kernel(overloads=_OVERLOADS["_untempered_ratios"], cache=True, inline="always", nogil=True)
+def _untempered_ratios(kappa, g0, g1, g2, b_cohort, epsilon, w00, w01, w10, w11, out):
+    """out[C] = the site's untempered GL-anchored read factor R(s) of a pair with configuration law (w00, w01, w10,
+    w11) (module docstring; the arithmetic of _matrices before its tempering)."""
+    n_classes = out.shape[0]
+    p_pair = w00 * g0 + (w01 + w10) * g1 + w11 * g2
+    mixed = (1.0 - epsilon) * p_pair + epsilon * b_cohort
+    for s in range(n_classes):
+        out[s] = 0.0
+    for config in range(4):
+        wa = w00 if config == 0 else (w01 if config == 1 else (w10 if config == 2 else w11))
+        if wa == 0.0:
+            continue
+        la = g0 if config == 0 else (g2 if config == 3 else g1)
+        for s in range(n_classes):
+            out[s] += wa * la * kappa[config, s]
+    for s in range(n_classes):
+        out[s] = ((1.0 - epsilon) * out[s] + epsilon * b_cohort) / mixed if mixed > 0.0 else 1.0
+
+
 @kernel(overloads=_OVERLOADS["_matrices"], cache=True, parallel=True, nogil=True)
 def _matrices(class_lik, site_law, operators, observed, alt, background, gl, cohort, epsilon, bin_starts, bin_stops,
-              first_label, second_label, weight, representative, out, out_log):
+              first_label, second_label, weight, bin_corrected, representative, out, out_log, rows_u, log_u):
     """out[S, U, B, C, C] float32. class_lik [S, L, 4, C]; site_law [L, S, C]; operators [L, S, C, C] between
     consecutive selected sites; observed [S, L]; alt [X, L] label ALT probabilities (BACKGROUND last); background
     [L]; gl [S, L, 3] the (unmixed) genotype likelihoods; cohort [L, 3] cohort genotype frequencies; first_label /
     second_label [U] the unordered pairs (first <= second); weight [S, B] the bins' tempering weights;
     representative [U, B] (_pair_representatives): a pair-bin whose representative is another pair is not computed
-    but copied from it (the same arithmetic on the same values: identical).
+    but copied from it (the same arithmetic on the same values: identical). With ``bin_corrected`` also rows_u
+    [S, U, B, C] and log_u [S, U, B]: the UNtempered bin matrix's row sums M_u 1 (rescaled) and their log scale, from a
+    backward vector chain over the bin's sites (v <- T_l diag(R_l) v from the last site, the product of the forward
+    chain; all the correction needs of M_u: _carry_correction), else unused.
 
-    Work items are (sample, run of MATRIX_CHUNK_BINS bins), each walking its sites once: the pair-independent parts of
-    a site (kappa_s(a), the cohort and pair-free terms) are formed once and every representative pair's running
-    matrix is advanced with them, in the order and arithmetic of a pair-by-pair walk."""
+    Work items are (sample, run of MATRIX_CHUNK_BINS bins), each walking its sites once forward (and once backward
+    with ``bin_corrected``): the pair-independent parts of a site (kappa_s(a), the cohort and pair-free terms) are
+    formed once and every representative pair's running matrix (and vector) is advanced with them, in the order and
+    arithmetic of a pair-by-pair walk."""
     n_samples, n_sites = observed.shape
     n_pairs = len(first_label)
     n_bins = len(bin_starts)
@@ -144,6 +193,9 @@ def _matrices(class_lik, site_law, operators, observed, alt, background, gl, coh
         work = np.empty((n_classes, n_classes))
         factor = np.empty(n_classes)
         kappa = np.empty((4, n_classes))
+        vec = np.empty((n_pairs, n_classes))
+        vec_log = np.empty(n_pairs)
+        moved = np.empty(n_classes)
         for b in range(chunk * MATRIX_CHUNK_BINS, min(n_bins, (chunk + 1) * MATRIX_CHUNK_BINS)):
             for pair in range(n_pairs):
                 if representative[pair, b] != pair:
@@ -225,21 +277,121 @@ def _matrices(class_lik, site_law, operators, observed, alt, background, gl, coh
                     for i in range(n_classes):
                         for j in range(n_classes):
                             matrix[pair, i, j] = work[i, j] * scale
+            if bin_corrected:
+                # the untempered matrix's row sums: v <- T_l diag(R_l) v over the bin's sites from the last (rescaled)
+                for pair in range(n_pairs):
+                    if representative[pair, b] != pair:
+                        continue
+                    vec_log[pair] = 0.0
+                    for i in range(n_classes):
+                        vec[pair, i] = 1.0
+                for site in range(bin_stops[b] - 1, bin_starts[b] - 1, -1):
+                    seen = observed[sample, site]
+                    g0 = gl[sample, site, 0]
+                    g1 = gl[sample, site, 1]
+                    g2 = gl[sample, site, 2]
+                    b_cohort = 0.0
+                    if seen:
+                        b_cohort = cohort[site, 0] * g0 + cohort[site, 1] * g1 + cohort[site, 2] * g2
+                        for config in range(4):
+                            mean = 0.0
+                            for s in range(n_classes):
+                                mean += site_law[site, sample, s] * class_lik[sample, site, config, s]
+                            for s in range(n_classes):
+                                kappa[config, s] = class_lik[sample, site, config, s] / mean if mean > 0.0 else 1.0
+                    for pair in range(n_pairs):
+                        if representative[pair, b] != pair:
+                            continue
+                        if seen:
+                            x1 = first_label[pair]
+                            x2 = second_label[pair]
+                            q1 = alt[x1, site]
+                            q2 = alt[x2, site]
+                            if x1 == x2 and x1 < n_labels - 1:
+                                w00, w01, w10, w11 = 1.0 - q1, 0.0, 0.0, q1
+                            else:
+                                w00, w01, w10, w11 = ((1.0 - q1) * (1.0 - q2), (1.0 - q1) * q2, q1 * (1.0 - q2),
+                                                      q1 * q2)
+                            _untempered_ratios(kappa, g0, g1, g2, b_cohort, epsilon, w00, w01, w10, w11, factor)
+                        else:
+                            for s in range(n_classes):
+                                factor[s] = 1.0
+                        top = 0.0
+                        for i in range(n_classes):
+                            acc = 0.0
+                            for j in range(n_classes):
+                                acc += operators[site, sample, i, j] * factor[j] * vec[pair, j]
+                            moved[i] = acc
+                            if acc > top:
+                                top = acc
+                        scale = 1.0 / top if top > 0.0 else 1.0
+                        if top > 0.0:
+                            vec_log[pair] += np.log(top)
+                        for i in range(n_classes):
+                            vec[pair, i] = moved[i] * scale
             for pair in range(n_pairs):
                 r = representative[pair, b]
                 for i in range(n_classes):
                     for j in range(n_classes):
                         out[sample, pair, b, i, j] = matrix[r, i, j]
                 out_log[sample, pair, b] = log_scale[r]
+                if bin_corrected:
+                    for i in range(n_classes):
+                        rows_u[sample, pair, b, i] = vec[r, i]
+                    log_u[sample, pair, b] = vec_log[r]
+
+
+@kernel(overloads=_OVERLOADS["_carry_correction"], cache=True, parallel=True, nogil=True)
+def _carry_correction(out, out_log, rows_u, log_u, weight, site_law, bin_starts, shift):
+    """The bin-level tempering correction (module docstring), in place: each (sample, pair) work item carries the
+    pair's class law alpha through its bins in order (alpha_(b+1) = alpha_b M_b normalised, M_b the stored tempered
+    matrix out[s, p, b]; the class law of the first bin's entry site at the first bin) and sets
+    out_log[s, p, b] = w_b (log(alpha_b . rows_u) + log_u) - log(alpha_b M_b 1): the pair's bin total from alpha_b
+    becomes the untempered total to the power w_b. shift[s, p, b] = the corrected minus the plain log scale."""
+    n_samples, n_pairs, n_bins, n_classes = rows_u.shape
+    entry = bin_starts[0] - 1 if bin_starts[0] > 0 else bin_starts[0]
+    for task in prange(n_samples * n_pairs):
+        sample = task // n_pairs
+        pair = task % n_pairs
+        alpha = np.empty(n_classes)
+        carried = np.empty(n_classes)
+        for i in range(n_classes):
+            alpha[i] = site_law[entry, sample, i]
+        for b in range(n_bins):
+            st = 0.0
+            su = 0.0
+            total = 0.0
+            for j in range(n_classes):
+                carried[j] = 0.0
+            for i in range(n_classes):
+                row = 0.0
+                for j in range(n_classes):
+                    m = alpha[i] * out[sample, pair, b, i, j]
+                    row += m
+                    carried[j] += m
+                st += row
+                su += alpha[i] * rows_u[sample, pair, b, i]
+            plain = out_log[sample, pair, b]
+            corrected = weight[sample, b] * (np.log(su) + log_u[sample, pair, b]) - np.log(st) if (
+                st > 0.0 and su > 0.0) else plain
+            shift[sample, pair, b] = corrected - plain
+            out_log[sample, pair, b] = corrected
+            for j in range(n_classes):
+                total += carried[j]
+            if total > 0.0:
+                for j in range(n_classes):
+                    alpha[j] = carried[j] / total
 
 
 def read_matrices(class_lik, site_law, operators, observed, alt, background, gl, cohort, epsilon, bin_starts,
-                  bin_stops, weight=None):
+                  bin_stops, weight=None, *, bin_corrected: bool = False, shift=None):
     """(matrices float32[S, U, B, C, C], log_scale float64[S, U, B], first, second): the read matrices of every
     unordered label pair (U = X (X + 1) / 2, row-major upper triangle) and bin, each rescaled along its product, and
     the log of the removed scale: the bin's read factor is exp(log_scale) x matrix, so log_scale is added to the
     pair's bin log emission (it differs between pairs and must not be dropped). ``weight`` [S, B]: the bins'
-    tempering weights (None: one, no tempering)."""
+    tempering weights (None: one, no tempering). ``bin_corrected``: the bin-level correction of the tempering (module
+    docstring; the bins are a component's in order, the first at its start); ``shift`` (float64[S, U, B], optional)
+    then receives the correction (the corrected minus the plain log scale)."""
     n_labels = alt.shape[0]
     first, second = np.triu_indices(n_labels)
     n_samples, n_sites = observed.shape
@@ -249,12 +401,21 @@ def read_matrices(class_lik, site_law, operators, observed, alt, background, gl,
     if weight is None:
         weight = np.ones((n_samples, len(bin_starts)))
     representative = pair_representatives(alt, bin_starts, bin_stops, first, second)
+    # the untempered row sums and their log scales (pass 1 -> _carry_correction); unused without the correction
+    shape = (n_samples, len(first), len(bin_starts))
+    rows_u = np.empty(shape + (n_classes,)) if bin_corrected else np.empty((0, 0, 0, 0))
+    log_u = np.empty(shape) if bin_corrected else np.empty((0, 0, 0))
     _matrices(np.ascontiguousarray(class_lik), np.ascontiguousarray(site_law), np.ascontiguousarray(operators),
               np.ascontiguousarray(observed), np.ascontiguousarray(alt), np.array(background, dtype=np.float64),
               np.ascontiguousarray(gl), np.ascontiguousarray(cohort), float(epsilon),
               np.array(bin_starts, dtype=np.int64), np.array(bin_stops, dtype=np.int64),
               first.astype(np.int64), second.astype(np.int64), np.ascontiguousarray(weight, dtype=np.float64),
-              representative, out, out_log)
+              bool(bin_corrected), representative, out, out_log, rows_u, log_u)
+    if bin_corrected:
+        if shift is None:
+            shift = np.empty(out_log.shape)
+        _carry_correction(out, out_log, rows_u, log_u, np.ascontiguousarray(weight, dtype=np.float64),
+                          np.ascontiguousarray(site_law), np.array(bin_starts, dtype=np.int64), shift)
     return out, out_log, first, second
 
 

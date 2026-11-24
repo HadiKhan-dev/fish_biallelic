@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from ...core.errors import SettingsError
@@ -14,7 +15,9 @@ if TYPE_CHECKING:
     from ...outputs.export.records import ExportConfig
 
 
-def expected(reader: Results, contig: str, config: ExportConfig) -> str:
+def expected(
+    reader: Results, contig: str, config: ExportConfig, *, checked: Mapping[str, str] | None = None
+) -> str:
     """Bind formatting to its checked source products and exact selected options."""
     from ...outputs.export.records import output_identity
     from ...store.identity import code_dependency_identity
@@ -34,7 +37,7 @@ def expected(reader: Results, contig: str, config: ExportConfig) -> str:
     if "samples" in products:
         names.append("phase")
     for name in names:
-        identity = reader.product_identity(name, contig)
+        identity = reader.product_identity(name, contig) if checked is None else checked[name]
         if identity is None:
             raise SettingsError(f"{contig}: export requires published {name}")
         upstream[name] = identity

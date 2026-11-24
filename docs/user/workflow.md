@@ -2,7 +2,7 @@
 
 Each workflow command executes a cut of the same dependency graph used by `run`.
 All jobs use the same configuration and shared checkpoint directory. Resource
-options may differ by job; scientific settings and input order must match the
+options may differ by job. Scientific settings and input order must match the
 initialised run.
 
 | Step | Form | Required published inputs |
@@ -13,7 +13,14 @@ initialised run.
 | Assemble per contig | `haplotypes reconstruct cross.toml --contig chr1` | That contig's evidence and the observation pilot published by `relatedness` |
 | Calibration gather | `haplotypes calibrate cross.toml` | The final assembly of every analysed contig |
 | Paint per contig | `haplotypes reconstruct cross.toml --contig chr1` (again) | The calibration. Publishes the painting and gain histogram for founder refit. |
-| Pedigree gather | `haplotypes pedigree cross.toml` | Relatedness, paintings and refit histograms for all analysed contigs. Completes refit and repaints before inferring the pedigree. |
+| Pedigree on one node | `haplotypes pedigree cross.toml` | Relatedness, paintings, refit histograms and contamination statistics for all analysed contigs |
+| Contamination decision | `haplotypes pedigree cross.toml --stage contamination` | Contamination statistics for every analysed contig |
+| Founder refit priors | `haplotypes pedigree cross.toml --stage refit-priors` | Refit histograms for every analysed contig |
+| Pedigree preparation per contig | `haplotypes pedigree cross.toml --stage prepare --contig chr1` | The two run-wide products above and that contig's painting and evidence. Publishes refit, repaint and preparation. |
+| Map-scale inputs per contig | `haplotypes pedigree cross.toml --stage map-inputs --contig chr1` | Relatedness and that contig's repaint |
+| Map-scale pair guard | `haplotypes pedigree cross.toml --stage map-pairs` | All map-scale contig inputs |
+| Map-scale frames per contig | `haplotypes pedigree cross.toml --stage map-frames --contig chr1` | Pair guard and that contig's map-scale inputs |
+| Pedigree gather | `haplotypes pedigree cross.toml --stage gather` | All pedigree preparations and map-scale frames |
 | Phase per contig | `haplotypes phase cross.toml --contig chr1` | Pedigree and that contig's prerequisites; includes mapping and export |
 | Reports gather | `haplotypes report cross.toml` | Available final records; after phase in the complete workflow |
 
@@ -42,7 +49,8 @@ Workflow markers live in **CHECKPOINTS/markers**. With the default checkpoint
 location this is `run/checkpoints/markers`, not `run/markers`. Global steps use
 `init.done`, `relatedness.done`, `calibrate.done` and `pedigree.done`; contig steps use
 `evidence.CONTIG.done`, `assembly.CONTIG.done` (a `reconstruct` before the calibration),
-`reconstruct.CONTIG.done` (painting and refit histogram) and `phase.CONTIG.done`. The command
+`reconstruct.CONTIG.done` (painting and refit histogram) and `phase.CONTIG.done`.
+Pedigree scatter steps use `pedigree.STAGE.done` or `pedigree.STAGE.CONTIG.done`. The command
 writes a marker only after validating the relevant products. If it dies between
 publication and the marker, rerunning verifies the products and recreates the
 marker. Never fabricate markers with `touch` as a substitute for running a step.
@@ -145,17 +153,64 @@ haplotypes run cross.toml --cores 8
 It reuses completed chromosome publications, calibrates the painting, paints
 and refits every analysed chromosome, and finishes pedigree, phase,
 recombination, export and reports. The scattered jobs above stop at each
-chromosome's final assembly so that calibration can use all assemblies. A failed
-scatter can be rerun on its chromosome or left for the finishing command to resume.
+chromosome's final assembly so that calibration can use all assemblies. After a
+scatter job fails, let the started writers reach a terminal result and withdraw
+unstarted jobs before restarting the scatter or resuming with the finishing
+command.
 
-Family phase runs per chromosome. To scatter it as well, run
-`haplotypes calibrate cross.toml` after every first reconstruction finishes. Run
-`haplotypes reconstruct cross.toml --contig chrN` again to paint and publish the
-refit histogram for each chromosome. Once those jobs finish, run
-`haplotypes pedigree cross.toml` to pool the histograms, refit, repaint and infer
-the pedigree. Run
-one `haplotypes phase cross.toml --contig chrN` job per chromosome on separate nodes, and let the finishing `run`
-complete recombination, export and reports.
+To scatter the painting calibration, wait for every analysed chromosome's
+final assembly, then run the following rounds in order. Use the same
+`run.exclude_contigs` in the relatedness, reconstruction and calibration
+commands. Evidence is produced for every configured contig. Wait for all jobs
+in a round before starting the next.
+
+1. For each analysed chromosome, run `haplotypes calibrate cross.toml --contig chrN`
+   to fit the robustness grid.
+2. For each analysed chromosome, run
+   `haplotypes calibrate cross.toml --contig chrN --stage refine`
+   to fit the rates chosen from the pooled robustness grid.
+3. Run `haplotypes calibrate cross.toml --stage outlier` once to publish the
+   run-wide outlier estimate.
+4. List the fit jobs with `haplotypes calibrate cross.toml --stage divisor --list-fits`.
+   Run `haplotypes calibrate cross.toml --contig chrN --stage divisor --fold F --divisor D`
+   for each listed chromosome, zero-based fold and candidate. The list includes
+   the core count for each fit. For a read-state fit you can omit `--divisor`
+   to fit every candidate in the fold with one shared emission builder.
+   With read-aware confidence calibration, fits use the chromosome prefix
+   reaching `calibration_morgans` in configured order.
+5. For every analysed chromosome, run
+   `haplotypes calibrate cross.toml --contig chrN --stage divisor`.
+   This gathers finished divisor fits and publishes an empty record for
+   chromosomes outside the read-aware calibration prefix.
+6. Run `haplotypes calibrate cross.toml` once to publish the pooled calibration.
+   This command can also schedule the entire calibration on one node after assembly.
+
+Run `haplotypes reconstruct cross.toml --contig chrN` again to paint and
+publish the refit histogram and contamination statistics for each chromosome.
+Then run these steps on the same checkpoint root.
+
+1. Run `haplotypes pedigree cross.toml --stage contamination` and
+   `haplotypes pedigree cross.toml --stage refit-priors` once each. These two
+   reductions can run concurrently.
+2. Submit `haplotypes pedigree cross.toml --stage prepare --contig chrN` for every
+   analysed chromosome. Each job refits its founders, repaints them with the
+   contamination decision, and publishes the chromosome's pedigree preparation.
+3. Submit `haplotypes pedigree cross.toml --stage map-inputs --contig chrN` for
+   every analysed chromosome, once its preparation job has finished.
+4. Run `haplotypes pedigree cross.toml --stage map-pairs` after all map inputs are
+   published. This freezes the initial set of families and targets for the map
+   scale estimate.
+5. Submit `haplotypes pedigree cross.toml --stage map-frames --contig chrN`
+   for every analysed chromosome. Each job builds the first round of frames
+   from the pair guard.
+6. Run `haplotypes pedigree cross.toml --stage gather` once. This checks and
+   gathers the published inputs and frames, computes the map-scale estimate,
+   and infers the genome-wide pedigree. If a target guard removes family
+   members, the gather schedules another round for those families.
+7. Submit `haplotypes phase cross.toml --contig chrN` for every analysed
+   chromosome. After all phase jobs finish, run `haplotypes run cross.toml` on
+   one allocated node to check the publications and finish the run-wide reports.
+
 
 Safety conditions:
 
@@ -184,13 +239,15 @@ scheduler changes placement and timing, not scientific decisions.
 After `relatedness`, run `haplotypes reconstruct CONFIG --contig CONTIG` for each
 analysed contig to publish its final assembly, then run
 `haplotypes calibrate CONFIG --cores CORES` once. This command schedules per-contig
-outlier fits, their run reduction, per-contig hidden-window divisor fits, and the
-final run reduction. Completed products resume by their input identities.
+outlier fits, their run reduction, hidden-window divisor fits, and the final run
+reduction. The single-node read-state graph groups candidates per contig and
+fold to share the emission builder. Completed products resume by their input identities.
 After calibration, run `reconstruct --contig` again for every analysed contig to
 reuse the assembly and publish its fine/reference painting and founder-refit
-gain histogram. Continue with `pedigree`, which pools the histograms, completes
-the refits and repaints on the refit founders for inference, then per-contig `phase` and
-`report`. The combined `run` command schedules
-this barrier automatically, with every configured final assembly required before
-calibration and any painting. A fixed singleton grid still publishes the barrier,
-without performing its calibration fits.
+gain histogram and its contamination statistics. Continue with `pedigree`,
+which pools the histograms and contamination statistics, completes the refits,
+and repaints on the refit founders for inference. Then run per-contig `phase`
+and `report`. The combined `run` command schedules
+this barrier automatically, with every analysed final assembly required before
+calibration and any painting. A fixed singleton robustness or scalar divisor
+grid skips that fit round and still publishes its record.

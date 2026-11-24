@@ -144,7 +144,11 @@ is active.
 Changing a scientific setting, map, contig order or numerical environment can
 invalidate the binding; use a fresh run/checkpoint root for a different analysis.
 Commands require a checkpoint root with the current layout. Resume is at published-product
-boundaries, not at an unrecorded intermediate family-phase iteration.
+boundaries. Family phase can resume from its last published boundary.
+
+Pedigree validates published upstream identities before scheduling preparation, screening or fitting.
+To publish refit, repaint, pedigree preparation and map-scale inputs on separate nodes, see
+[Several nodes, one checkpoint root](workflow.md#several-nodes-one-checkpoint-root).
 
 ### Which code a record depends on
 
@@ -237,12 +241,15 @@ You can change this on an existing run without initialising again:
 haplotypes run cross.toml --set 'run.exclude_contigs=["chr7"]' --cores 8
 ```
 
-Evidence and the relatedness barrier still use every `[input] contigs` entry.
+Evidence and the relatedness fit still use every `[input] contigs` entry.
+The observation pilot that supplies the outlier rate uses the included contigs,
+as do the painting calibration rounds and their final pool.
 A `run` never schedules discovery, selection rounds, assembly or its contexts,
 painting or refit for an excluded contig, including with `stop_after` or
 `max_contigs`. Existing reconstruction records stay available. An explicit
-`reconstruct --contig` command can work on an excluded contig; removing its
-exclusion resumes reconstruction from those records.
+`reconstruct --contig` command can work on an excluded contig under the current
+observation pilot. Returning to a previous selection reuses reconstruction
+records from that selection.
 
 Pedigree uses the included contigs; family phase, recombination, export,
 evaluation and per-contig reports run only for those contigs. Relatedness families
@@ -253,8 +260,10 @@ and all model rules are unchanged. Unknown contig names and an empty remaining
 set are errors. The pedigree's existing minimum-contig checks apply to the
 remaining contigs, including its informative-contig check after preparation.
 
-Each nonempty exclusion set has separate immutable downstream records. Its
-reports and exports are in `RUN/analyses/<included-set digest>/`; the directory's
+Each nonempty exclusion set has its own observation pilot and dependent records,
+including relatedness, reconstruction, painting calibration and contamination.
+The initialized inputs, evidence and evidence-only released sites are shared.
+Its reports and exports are in `RUN/analyses/<included-set digest>/`; the directory's
 `analysis_contigs.json`, export `manifest.json` and evaluation `summary.json`
 list the configured, included and excluded contigs. Earlier sets remain readable and changing back reuses their
 products. `status` lists the current set and that set's workflow markers.
@@ -264,8 +273,8 @@ commands using that recorded file, and the recorded-run commands, read the activ
 selection from JSON unless explicitly overridden. External configurations and
 Python Settings objects specify their own selection. Use the same `--set` on
 each shard when scattering a new selection. Do not change the active selection while
-submitting shards for another set. A `phase --contig` shard refuses an excluded
-contig; `reconstruct --contig` continues to accept it. `pedigree` and `report`
+submitting shards for another set. A `phase --contig` or `pedigree --contig` shard refuses an excluded
+contig. `reconstruct --contig` uses the configured contig list. `pedigree` and `report`
 use the same selection as `run`.
 
 The Python reader can select a stored analysis set explicitly:

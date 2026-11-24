@@ -38,28 +38,6 @@ def read_ratio(out, ratio, slot, a, b, gl):
         ) / total
 
 
-@kernel(overloads=OVERLOADS["read_transfer.tempered_factor"], cache=True, inline="always", nogil=True)
-def tempered_factor(out, ratio, powered, slot, a, b, gl, eta):
-    """out[C]: the tempered view's per-site read factor at information exponent ``eta``, R_c(a, b) ** eta: the
-    painting's tempered read factor (read_factor: R ** w per site), the one place the tempered view's read factor is
-    formed. The corners come from ``powered`` (child_reads.resident_terms); R itself at eta = 1, one at eta = 0. The
-    scalar part's G ** eta is applied to the bin product by the caller."""
-    classes = out.shape[0]
-    if eta == 0.0:
-        for c in range(classes):
-            out[c] = 1.0
-        return
-    if eta != 1.0 and (a == 0.0 or a == 1.0) and (b == 0.0 or b == 1.0):
-        config = 2 * int(a) + int(b)
-        for c in range(classes):
-            out[c] = float(powered[slot, config, c])
-        return
-    read_ratio(out, ratio, slot, a, b, gl)
-    if eta != 1.0:
-        for c in range(classes):
-            out[c] = out[c] ** eta
-
-
 @kernel(overloads=OVERLOADS["read_transfer.carry_bin"], cache=True, inline="always", nogil=True)
 def carry_bin(
     current,
@@ -79,18 +57,15 @@ def carry_bin(
     read_offset,
     read_reset, read_width, read_operator,
     read_ratio_table,
-    read_powered,
-    tempered,
-    eta,
     class_cache,
     local,
     moved,
 ):
-    """Use one native carry body for the signed indices and runtime view flag."""
+    """Use one native carry body for the signed indices."""
     _carry_bin(
         current, mix, factor, column, np.int64(child), block, np.int64(first_source), np.int64(second_source),
         candidate_alt, state_alt, gl, site_index, site_start, site_stop, read_offset, read_reset, read_width,
-        read_operator, read_ratio_table, read_powered, np.bool_(tempered), eta, class_cache, local, moved,
+        read_operator, read_ratio_table, class_cache, local, moved,
     )
 
 
@@ -113,16 +88,13 @@ def _carry_bin(
     read_offset,
     read_reset, read_width, read_operator,
     read_ratio_table,
-    read_powered,
-    tempered,
-    eta,
     class_cache,
     local,
     moved,
 ):
-    """In place on one view's forward state ``current`` [C, S, S]: the class part of the child's observed markers of
+    """In place on the chain's forward state ``current`` [C, S, S]: the class part of the child's observed markers of
     bin ``block`` (each marker's class operator from the child's previous observed marker, applied to every state pair,
-    then each pair's read factor: R_c(a, b) at full strength, tempered_factor at ``eta`` when ``tempered``). Slot 1's
+    then each pair's read factor R_c(a, b)). Slot 1's
     allele comes from candidate ``first_source``'s projection (candidate_alt), the panel's (state_alt) when it is
     negative; slot 2's likewise from ``second_source``. No change with one class or for a child without read slots.
     ``class_cache`` (class_transfers of the child's batch, ``local`` its index there; None: none) holds the bin's
@@ -145,12 +117,11 @@ def _carry_bin(
     base = start - site_start[child, 0]
     last = states - 1
     if class_cache is not None:
-        view = 0 if tempered else 1
         fixed_first = states if first_source < 0 else last
         fixed_second = states if second_source < 0 else last
         for first in range(fixed_first):
             for second in range(fixed_second):
-                transfer = class_cache[local, block, view, first, second]
+                transfer = class_cache[local, block, first, second]
                 if enter == 1 and leave == 1:
                     current[0, first, second] *= transfer[0, 0]
                 else:
@@ -185,10 +156,7 @@ def _carry_bin(
                     b = state_alt[second, site] if second_source < 0 else candidate_alt[second_source, site, second]
                     for c in range(classes):
                         column[c] = mix[c, first, second]
-                    if tempered:
-                        tempered_factor(factor, read_ratio_table, read_powered, k, a, b, gl[child, site], eta)
-                    else:
-                        read_ratio(factor, read_ratio_table, k, a, b, gl[child, site])
+                    read_ratio(factor, read_ratio_table, k, a, b, gl[child, site])
                     for c in range(classes):
                         current[c, first, second] = column[c] * factor[c]
         return
@@ -209,10 +177,7 @@ def _carry_bin(
                     site = site_index[slot]
                     a = state_alt[first, site] if first_source < 0 else candidate_alt[first_source, site, first]
                     b = state_alt[second, site] if second_source < 0 else candidate_alt[second_source, site, second]
-                    if tempered:
-                        tempered_factor(factor, read_ratio_table, read_powered, k, a, b, gl[child, site], eta)
-                    else:
-                        read_ratio(factor, read_ratio_table, k, a, b, gl[child, site])
+                    read_ratio(factor, read_ratio_table, k, a, b, gl[child, site])
                     if read_reset[k]:
                         # All rows of T are the same law. The pair's previous class mass is sufficient.
                         mass = column[0]
@@ -275,10 +240,7 @@ def _carry_bin(
                         ready = (cached & mask) != 0
                         cached |= mask
                 if not ready:
-                    if tempered:
-                        tempered_factor(ratio, read_ratio_table, read_powered, k, a, b, gl[child, site], eta)
-                    else:
-                        read_ratio(ratio, read_ratio_table, k, a, b, gl[child, site])
+                    read_ratio(ratio, read_ratio_table, k, a, b, gl[child, site])
                 if reset:
                     mass = current[0, first, second]
                     for i in range(1, width):
@@ -333,29 +295,28 @@ def multiply_classes(matrix, operator, factor, work, rows, reset):
 
 
 @kernel(overloads=OVERLOADS["read_transfer.class_transfers"], cache=True, parallel=True, nogil=True)
-def class_transfers(first_child, stop_child, state_alt, gl, site_index, site_start, site_stop, exponent, read_offset,
-                    read_reset, read_width, read_operator, read_ratio_table, read_powered):
-    """float64 [n, B, 2, S, S, C, C]: per child of [first_child, stop_child), bin, view (0 tempered, 1 full) and state
-    pair (x, y) with the panel's alleles (state_alt) in both slots, the bin's class transfer prod_k T_k diag(f_k(x, y))
-    over the child's observed markers (f the view's read factor; the identity without any, or for a child without
-    read state). States whose alleles agree at every observed marker of the bin (the same allele word) have the same
-    transfers: each pair of words is computed once and copied to its other state pairs. Only the leading
-    read_width[child, block] by read_width[child, block + 1] entries are used. A unit exit width sums
-    class mass; a unit entry width starts with the equal-row operator of the next observed marker."""
+def class_transfers(first_child, stop_child, state_alt, gl, site_index, site_start, site_stop, read_offset,
+                    read_reset, read_width, read_operator, read_ratio_table):
+    """float64 [n, B, S, S, C, C]: per child of [first_child, stop_child), bin and state pair (x, y) with the panel's
+    alleles (state_alt) in both slots, the bin's class transfer prod_k T_k diag(f_k(x, y)) over the child's observed
+    markers (f the read factor; the identity without any, or for a child without read state). States whose alleles
+    agree at every observed marker of the bin (the same allele word) have the same transfers: each pair of words is
+    computed once and copied to its other state pairs. Only the leading read_width[child, block] by
+    read_width[child, block + 1] entries are used. A unit exit width sums class mass; a unit entry width starts with
+    the equal-row operator of the next observed marker."""
     n = stop_child - first_child
     bins = site_start.shape[1]
     states = state_alt.shape[0]
     classes = read_operator.shape[1]
-    out = np.zeros((n, bins, 2, states, states, classes, classes))
+    out = np.zeros((n, bins, states, states, classes, classes))
     for task in prange(n * bins):
         local = task // bins
         block = task - local * bins
         child = first_child + local
-        for view in range(2):
-            for x in range(states):
-                for y in range(states):
-                    for c in range(classes):
-                        out[local, block, view, x, y, c, c] = 1.0
+        for x in range(states):
+            for y in range(states):
+                for c in range(classes):
+                    out[local, block, x, y, c, c] = 1.0
         start = read_offset[child]
         if read_offset[child + 1] == start:
             continue
@@ -378,38 +339,30 @@ def class_transfers(first_child, stop_child, state_alt, gl, site_index, site_sta
                     break
         factor = np.empty(classes)
         work = np.empty((classes, classes))
-        eta = exponent[child, block]
         for slot in range(first_slot, stop_slot):
             k = base + slot
             site = site_index[slot]
-            for view in range(2):
-                for x in range(states):
-                    if word[x] != x:
+            for x in range(states):
+                if word[x] != x:
+                    continue
+                a = state_alt[x, site]
+                for y in range(states):
+                    if word[y] != y:
                         continue
-                    a = state_alt[x, site]
-                    for y in range(states):
-                        if word[y] != y:
-                            continue
-                        b = state_alt[y, site]
-                        if view == 0:
-                            tempered_factor(factor, read_ratio_table, read_powered, k, a, b, gl[child, site], eta)
-                        else:
-                            read_ratio(factor, read_ratio_table, k, a, b, gl[child, site])
-                        matrix = out[local, block, view, x, y]
-                        multiply_classes(matrix, read_operator[k], factor, work, read_width[child, block],
-                                         read_reset[k])
+                    b = state_alt[y, site]
+                    read_ratio(factor, read_ratio_table, k, a, b, gl[child, site])
+                    matrix = out[local, block, x, y]
+                    multiply_classes(matrix, read_operator[k], factor, work, read_width[child, block], read_reset[k])
         if read_width[child, block + 1] == 1:
             # The next observed marker resets (or there is none). Cache the scalar exit, once per fixed pair.
-            for view in range(2):
-                for x in range(states):
-                    for y in range(states):
-                        if word[x] == x and word[y] == y:
-                            matrix = out[local, block, view, x, y]
-                            for i in range(read_width[child, block]):
-                                matrix[i, 0] = np.sum(matrix[i])
-        for view in range(2):
             for x in range(states):
                 for y in range(states):
-                    if word[x] != x or word[y] != y:
-                        out[local, block, view, x, y] = out[local, block, view, word[x], word[y]]
+                    if word[x] == x and word[y] == y:
+                        matrix = out[local, block, x, y]
+                        for i in range(read_width[child, block]):
+                            matrix[i, 0] = np.sum(matrix[i])
+        for x in range(states):
+            for y in range(states):
+                if word[x] != x or word[y] != y:
+                    out[local, block, x, y] = out[local, block, word[x], word[y]]
     return out

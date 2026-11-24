@@ -27,6 +27,7 @@ from ...core.progress import Progress
 from ...core.progress import frame as progress_frame
 from ...core.ties import BOUNDARY_GUARD, TieCounter, census, census_enabled, fixed_policy, improves, tie_classes
 from ..discovery.api import DiscoveryParameters, search_bytes
+from ..shared.alleles import complement_calls
 from ..shared.observation import mix_likelihoods
 from .bank import candidate_bank
 from .objective import ContextFounders, selection_objective
@@ -420,6 +421,16 @@ def block_task_bytes(task: BlockTask, samples: int) -> int:
     return TASK_WORKSPACE_BASE_BYTES + data + trajectories + release + bank + 2 * _memo_bytes(task.memo, sites, peak)
 
 
+def _reflect_outcome(outcome):
+    fit = outcome.fit
+    probability = fit.allele_probability
+    return replace(outcome, fit=replace(
+        fit,
+        panel=1 - fit.panel,
+        allele_probability=None if probability is None else 1.0 - probability,
+    ))
+
+
 def select_task(
     block: BlockTask,
     likelihoods: np.ndarray | CodedLikelihoods,
@@ -429,6 +440,7 @@ def select_task(
     cohort: np.ndarray | None,
     outlier_rate: float,
     reverse: bool,
+    search_alleles_reversed: bool = False,
     census_sink=None,
     threads: int | Callable[[], int] = 1,
     progress: Progress | None = None,
@@ -449,7 +461,22 @@ def select_task(
         local_gl = mix_likelihoods(local_gl, cohort[block.columns], outlier_rate)
     local_observed = np.asarray(observed[:, block.columns], dtype=bool, order="C")
     local_gl[~local_observed] = 1.0 / 3.0
-    return select_block(
+    # The candidate bank, GEM and consensus release see the same allele-byte
+    # order under REF/ALT exchange. The cross-round memo stays in this coding.
+    if search_alleles_reversed:
+        local_gl = np.ascontiguousarray(local_gl[..., ::-1])
+        block = replace(
+            block,
+            latent=1 - block.latent,
+            proposals=tuple(complement_calls(panel) for panel in block.proposals),
+            alternatives=tuple(1 - panel for panel in block.alternatives),
+            founders=None if block.founders is None else complement_calls(block.founders),
+            incumbent=None if block.incumbent is None else _reflect_outcome(block.incumbent),
+            incumbent_release=None if block.incumbent_release is None else replace(
+                block.incumbent_release, calls=complement_calls(block.incumbent_release.calls)
+            ),
+        )
+    result = select_block(
         block,
         local_gl,
         local_observed,
@@ -459,3 +486,15 @@ def select_task(
         threads=threads,
         progress=progress,
     )
+    if search_alleles_reversed:
+        result = replace(
+            result,
+            panel=replace(
+                result.panel,
+                calls=complement_calls(result.panel.calls),
+                alt_probability=1.0 - result.panel.alt_probability,
+            ),
+            outcome=_reflect_outcome(result.outcome),
+            release=replace(result.release, calls=complement_calls(result.release.calls)),
+        )
+    return result

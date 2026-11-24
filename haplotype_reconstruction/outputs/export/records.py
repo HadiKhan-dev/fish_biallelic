@@ -113,6 +113,7 @@ class ExportConfig:
 PRODUCTS = ("founders", "samples", "tracks")
 FORMATS = ("vcf", "bcf")
 SCHEMA = 4
+FOUNDER_IDENTITY_FILE = "founder_identity.csv"
 
 
 def project_sites(record: ReleasedSites, *, full_length: bool) -> SiteTable:
@@ -166,11 +167,16 @@ def output_identity(upstream: Mapping[str, str], settings: ExportConfig, code_id
 
 
 def complete(record: ExportRecord | None, identity: str, destination) -> bool:
-    """A matching output identity is complete only while every recorded file exists."""
+    """Require the matching identity and every file owned by this contig's writer."""
     from pathlib import Path
 
     return (
         record is not None
         and record.identity == identity
-        and all((Path(destination) / str(name)).is_file() for name in record.entry["files"])
+        and all((Path(destination) / str(name)).is_file() for name in contig_files(record.entry))
     )
+
+
+def contig_files(entry: Mapping[str, Any]) -> set[str]:
+    """The run-level identity CSV is listed in the manifest but owned by its gather."""
+    return set(entry["files"]) - {FOUNDER_IDENTITY_FILE}

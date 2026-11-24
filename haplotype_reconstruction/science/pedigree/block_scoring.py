@@ -55,7 +55,8 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, offset,
         parts["one_raw"].append(values[n:n + len(retained_pairs)].T)
         parts["two"].append(values[n + len(retained_pairs):].T)
         schedule = junctions.schedules(component.state_classes, component.named_alleles, component.bin_sizes,
-                                       reverse=reverse, label_error=component.label_error)
+                                       reverse=reverse, label_error=component.label_error,
+                                       search_alleles_reversed=prepared.search_alleles_reversed)
         straight = np.count_nonzero(schedule.pairs[:, :-1] != schedule.pairs[:, 1:], axis=2)
         crossed = np.count_nonzero(schedule.pairs[:, :-1] != schedule.pairs[:, 1:, ::-1], axis=2)
         costs = np.minimum(straight, crossed)

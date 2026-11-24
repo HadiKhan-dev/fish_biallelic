@@ -23,6 +23,7 @@ from ..core.files import atomic_path
 from ..results.paths import RunPaths, active_exclusions
 from ..stages.context import default_scratch
 from ..stages.export import records as export_records
+from .report_resume import bind_report_tasks
 from .settings.load import default_output
 from .settings.schema import Settings
 
@@ -477,10 +478,11 @@ def _analysis_reader(prepared, selection):
 
 def _report_rate(prepared: PreparedRun) -> None:
     """Print the relatedness stage's recombination-rate decision once in the run log (rl20), with its warning."""
+    from ..stages.analysis import location
     from ..stages.relatedness.families_records import load, result_reader
     from ..store.store import CheckpointStore
 
-    store = CheckpointStore(prepared.paths.checkpoints)
+    store = CheckpointStore(location(prepared.paths.checkpoints, prepared.analysis))
     manifest = store.manifest("run")
     reader = None if manifest is None else result_reader(store, manifest, product="families")
     product = None if reader is None else load(store.run, reader.identity)
@@ -515,12 +517,13 @@ def _report_map_scale(prepared: PreparedRun) -> None:
     """Print the pedigree's painting-based fallback-rate estimate once in the run log (pedigree map scale), with its
     route and warning, whatever rate_estimate is (with ignore nothing else reads it)."""
     from ..core.errors import InputError
+    from ..stages.analysis import location
     from ..stages.pedigree import map_scale
     from ..stages.pedigree.records import run_parameters
     from ..store.protocol import NumericalPolicy
     from ..store.store import CheckpointStore
 
-    store = CheckpointStore(prepared.paths.checkpoints)
+    store = CheckpointStore(location(prepared.paths.checkpoints, prepared.analysis))
     manifest = store.manifest("run")
     if manifest is None:
         return
@@ -559,6 +562,7 @@ def _report_material(prepared: PreparedRun, receipt: Any) -> None:
     """Print the pedigree's material decision once in the run log (MaterialChoice.statement): the regime under the
     working map alone and under the estimated map, the regime applied, and what the product withholds (and adds)
     relative to the working map alone. ``receipt``: a reply carrying the published product's key and identity."""
+    from ..stages.analysis import location
     from ..stages.pedigree.records import PRODUCT
     from ..store.protocol import read_items
     from ..store.store import CheckpointStore
@@ -566,7 +570,8 @@ def _report_material(prepared: PreparedRun, receipt: Any) -> None:
     identity = _pedigree_identity(receipt)
     if not identity:
         return
-    record = read_items(CheckpointStore(prepared.paths.checkpoints).run, PRODUCT, identity, ("material",))
+    store = CheckpointStore(location(prepared.paths.checkpoints, prepared.analysis))
+    record = read_items(store.run, PRODUCT, identity, ("material",))
     material = None if record is None else record.payload.get("material")
     if material and material.get("statement"):
         print(material["statement"], flush=True)
@@ -603,11 +608,12 @@ def _phase_costs(prepared: PreparedRun, resolved: ResolvedConfiguration) -> dict
     return costs
 
 
-def _model_actions(prepared, resolved, cut, *, outputs=None, ties=None):
+def _model_actions(prepared, resolved, cut, *, outputs=None, ties=None, divisor_gather=False, divisor_by_fold=None):
     """Bind the stage-owned factories for the selected graph cut."""
     import importlib
 
-    from ..stages.analysis import FINAL_STAGES, location, output_directory
+    from ..stages.analysis import location, output_directory
+    from ..stages.analysis.records import ANALYSIS_STAGES
     from ..stages.catalog import STAGES
     from ..stages.context import StageRun
 
@@ -622,23 +628,28 @@ def _model_actions(prepared, resolved, cut, *, outputs=None, ties=None):
         prepared.source,
         str(_scratch_base(prepared)),
     )
+    analysis = resolved.analysis
+    selected = context
+    if analysis.excluded:
+        selected = replace(
+            context,
+            root=location(prepared.paths.checkpoints, analysis),
+            manifest=dict(prepared.manifest, analysis=analysis.document()),
+            output=str(output_directory(prepared.paths.output, analysis)),
+        )
     actions = {} if outputs is None else {key: value for key, value in outputs.items() if key in cut.nodes}
     for key in cut.nodes:
         if key not in actions:
             module = importlib.import_module("haplotype_reconstruction." + STAGES[key.stage].tasks)
-            bound = context
-            if key.stage in FINAL_STAGES:
-                root = location(prepared.paths.checkpoints, resolved.analysis)
-                manifest = prepared.manifest
-                if resolved.analysis.excluded:
-                    manifest = dict(manifest, analysis=resolved.analysis.document())
-                bound = replace(
-                    context,
-                    root=root,
-                    manifest=manifest,
-                    output=str(output_directory(prepared.paths.output, resolved.analysis)),
-                )
-            actions[key] = module.task(key, bound)
+            bound = selected if key.stage in ANALYSIS_STAGES else context
+            if key.stage == "calibration_divisor":
+                # A zero_stress replay saved 5.7% calibration CPU by sharing the read-state builder within a fold.
+                by_fold = True if divisor_by_fold is None else divisor_by_fold
+                actions[key] = module.task(key, bound, gather_only=divisor_gather, by_fold=by_fold)
+            elif key.stage == "pedigree":
+                actions[key] = module.task(key, bound, gather_only=cut.step == "pedigree.gather")
+            else:
+                actions[key] = module.task(key, bound)
     return actions
 
 
@@ -666,7 +677,7 @@ def _complete_workflow(
         if task.key not in nodes:
             continue
         value = values[task.key]
-        if task.key.stage == "pedigree":
+        if task.key.stage == "pedigree" and task.key.unit == "run":
             # The stored decision replies with its publication receipt, never the product:
             # check it against the independently bound reader and the record on disk.
 
@@ -708,10 +719,18 @@ def _complete_workflow(
     step = cut.step
     if step == "reconstruct" and not any(key.stage == "painting" for key in nodes):
         # Before the run calibration a reconstruction stops at the contig's final assembly, and its marker says
-        # so: reconstruct.CONTIG.done always means painted, with the refit's gain histogram (the pedigree step then
-        # pools the run's class priors and refits every contig before the pedigree; 4.21 A7).
+        # so. reconstruct.CONTIG.done includes painting, the refit's gain histogram and contamination cells.
         step = "assembly"
-    name = step + ("." + scopes[0] if cut.step in {"evidence", "reconstruct", "phase"} and len(scopes) == 1 else "")
+    if step == "calibrate" and len(nodes) == 1:
+        step += "." + nodes[0].stage.removeprefix("calibration_")
+    name = step + (
+        "." + scopes[0]
+        if (cut.step in {"evidence", "reconstruct", "phase"} or step.startswith(("calibrate.", "pedigree."))) and len(scopes) == 1
+        else ""
+    )
+
+    if step == "calibrate.divisor_fit":
+        name += "." + nodes[0].round
 
     # the containers' envelope checks run concurrently (file reads and decodes after the graph).
     if not complete_cut(
@@ -805,6 +824,7 @@ def _output_actions(prepared: PreparedRun, resolved: ResolvedConfiguration) -> d
         "quality": tuple(key("evidence", c) for c in resolved.analysis.included),
         "painting": tuple(key("painting", c) for c in resolved.analysis.included),
         "calibration": (key("calibration"),),
+        "contamination": (key("contamination"),),
         "relatedness": (key("relatedness"),),
         "pedigree": (key("pedigree"),),
         "refit": tuple(key("refit", c) for c in resolved.analysis.included),
@@ -849,7 +869,9 @@ def _attach_reports(graph: RunGraph, cut: Cut) -> Cut:
 
     from ..engine.graph import TaskKey
 
-    if cut.step not in {"run", "evidence", "relatedness", "reconstruct", "calibrate", "pedigree", "phase", "recombination"}:
+    if cut.step not in {
+        "run", "evidence", "relatedness", "reconstruct", "calibrate", "pedigree", "pedigree.gather", "phase", "recombination",
+    }:
         return cut
     selected = set(cut.nodes)
     for node in graph.nodes:
@@ -873,7 +895,7 @@ def _prerequisites(prepared, resolved, cut):
     """Resolve the cut's prerequisites through stage-owned requests and one receipt check."""
     from ..outputs.export.records import SCHEMA, ExportConfig
     from ..results.reader import Results
-    from ..stages.analysis import FINAL_STAGES
+    from ..stages.analysis.records import ANALYSIS_STAGES
     from ..stages.init import records as init_records
     from ..stages.init.tasks import check
 
@@ -881,7 +903,7 @@ def _prerequisites(prepared, resolved, cut):
     upstream = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints, exclude_contigs=())
     values = {}
     for key in cut.prerequisites:
-        results = selected if key.stage in FINAL_STAGES else upstream
+        results = selected if key.stage in ANALYSIS_STAGES else upstream
         contig = None if key.scope == "run" else key.scope
         if key.stage == "init":
             values[key] = check(str(prepared.paths.checkpoints), init_records.expected(results.manifest, resolved))
@@ -895,7 +917,8 @@ def _prerequisites(prepared, resolved, cut):
                 raise SettingsError(f"{contig}: current export is not published")
             values[key] = identity
             continue
-        request = results.stage_request(key.stage, contig, round_name=key.round)
+        options = {"panels": False, "emissions": False} if key.stage == "repaint" else {}
+        request = results.stage_request(key.stage, contig, round_name=key.round, **options)
         if results.receipt(request, contig) is None:
             raise SettingsError(f"workflow prerequisite {key.stage} for {key.scope} is not published")
         values[key] = request.identity
@@ -908,12 +931,36 @@ def execute(
     command: str = "run",
     contig: str | None = None,
     contigs: tuple[str, ...] | None = None,
+    calibration_stage: str | None = None,
+    pedigree_stage: str | None = None,
+    calibration_fold: int | None = None,
+    calibration_divisor: float | None = None,
+    list_divisor_fits: bool = False,
+    divisor_by_fold: bool | None = None,
     tie_reverse: bool = False,
     tie_keep: tuple[str, ...] = (),
     tie_census: Path | None = None,
     in_process: bool = False,
 ) -> RunResult:
     """Execute one validated graph cut, returning a clean-stop result when requested."""
+    if command == "pedigree" and contig is not None and pedigree_stage is None:
+        pedigree_stage = "prepare"
+    if pedigree_stage is not None and command != "pedigree":
+        raise SettingsError("pedigree steps require the pedigree command")
+    divisor_fit = None
+    if calibration_fold is not None or calibration_divisor is not None:
+        if command != "calibrate" or calibration_stage != "divisor" or contig is None or calibration_fold is None:
+            raise SettingsError("use --fold with calibrate --contig CONTIG --stage divisor; --divisor is optional")
+        if calibration_fold < 0:
+            raise SettingsError("--fold must be nonnegative")
+        from ..engine.graph import TaskKey
+        from ..stages.painting.calibration_records import fit_round
+
+        divisor_fit = TaskKey(
+            "calibration_divisor_fit", "contig", contig, fit_round(calibration_fold, calibration_divisor),
+        )
+    if list_divisor_fits and (command != "calibrate" or calibration_stage != "divisor" or contig is not None):
+        raise SettingsError("--list-fits requires the run-wide calibrate --stage divisor")
     prepared = check_run(settings, command=command, tie_reverse=tie_reverse, contigs=contigs)
     if command == "run" and prepared.manifest is None:
         from ..engine.runtime import isolated
@@ -949,6 +996,14 @@ def execute(
     resolved = (
         None if command == "init" else _resume_configuration(prepared, tie_reverse=tie_reverse, tie_keep=tie_keep)
     )
+    if list_divisor_fits:
+        from ..stages.analysis import location
+        from ..stages.painting.calibration_tasks import divisor_fit_plan, divisor_plan
+
+        assert resolved is not None
+        plan = divisor_plan(location(prepared.paths.checkpoints, resolved.analysis), resolved, prepared.genetic_maps)
+        print(json.dumps(divisor_fit_plan(plan, resolved, default_by_fold=False)))
+        return RunResult("complete", "divisor", tuple(plan[2]))
     if resolved is not None:
         if command == "phase" and contig not in resolved.analysis.included:
             raise SettingsError(
@@ -961,7 +1016,6 @@ def execute(
     if command != "init":
         assert resolved is not None
         from ..engine.graph import run_graph
-        from ..results.reader import Results
         from ..stages.graph import (
             Node,
             bind_tasks,
@@ -979,23 +1033,30 @@ def execute(
             output_nodes=output_nodes,
             analysis=resolved.analysis,
             adopt_rate=resolved.parameters.relatedness.infers_rate,
+            divisor_fit=divisor_fit,
         )
+        reader = _analysis_reader(prepared, resolved.analysis)
         painted: tuple[str, ...] = ()
         if settings.execution.max_contigs:
-            reader = Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints, exclude_contigs=())
-            painted = tuple(c for c in settings.input.contigs if reader.stage_present(c, "painting"))
-        cut = workflow_cut(
-            graph,
-            command,
-            contig=contig,
-            contigs=contigs,
-            stop_after=(settings.run.stop_after or None) if command == "run" else None,
-            serial=settings.serial if command == "run" else False,
-            max_contigs=(settings.execution.max_contigs or None) if command == "run" else None,
-            painted=painted,
-            calibrated=bool(Results(prepared.paths.output, checkpoints=prepared.paths.checkpoints,
-                                    exclude_contigs=()).stage_request("calibration")),
-        )
+            painted = tuple(c for c in resolved.analysis.included if reader.stage_present(c, "painting"))
+        if pedigree_stage is not None:
+            from ..stages.graph import pedigree_scatter_cut
+
+            graph, cut = pedigree_scatter_cut(graph, pedigree_stage, contig)
+        else:
+            cut = workflow_cut(
+                graph,
+                command,
+                contig=contig,
+                contigs=contigs,
+                calibration_stage=calibration_stage,
+                divisor_fit=divisor_fit,
+                stop_after=(settings.run.stop_after or None) if command == "run" else None,
+                serial=settings.serial if command == "run" else False,
+                max_contigs=(settings.execution.max_contigs or None) if command == "run" else None,
+                painted=painted,
+                calibrated=bool(reader.stage_request("calibration")),
+            )
         cut = _attach_reports(graph, cut)
         completed = _prerequisites(prepared, resolved, cut)
         from ..core.ties import TieSettings
@@ -1006,17 +1067,20 @@ def execute(
             keep=tuple(prepared.manifest["ties"].get("keep", ())),
             census=None if tie_census is None else TieCensusSink(tie_census.expanduser().resolve()),
         )
-        tasks = bind_tasks(
-            graph, cut, _model_actions(prepared, resolved, cut, outputs=output_actions, ties=ties), completed=completed
+        actions = _model_actions(
+            prepared, resolved, cut, outputs=output_actions, ties=ties,
+            divisor_gather=command == "calibrate" and calibration_stage == "divisor",
+            divisor_by_fold=divisor_by_fold,
         )
+        tasks = bind_report_tasks(bind_tasks(graph, cut, actions, completed=completed))
         # the contigs' size estimates (sites x samples) also order and weight the chromosome chains:
         # the largest contigs claim lanes first and a chain at least twice the median keeps a proportional floor.
-        sizes = _phase_costs(prepared, resolved)
+        sizes = None if command == "calibrate" and calibration_stage == "divisor" else _phase_costs(prepared, resolved)
         scheduling = execution_options(graph, cut, contig_costs=sizes, phase_costs=sizes)
         preload = task_preloads(tasks)
         if command == "reconstruct":
-            # both passes of a reconstruction (to the final assembly, then painting and the refit histogram) share one
-            # kernel cache
+            # Both reconstruction passes share one kernel cache, through assembly and then painting,
+            # refit histograms and contamination cells.
             from ..stages.graph import step_preloads
 
             preload = tuple(dict.fromkeys((*preload, *step_preloads("reconstruct"))))
@@ -1064,7 +1128,9 @@ def execute(
             return RunResult("complete", "init", settings.input.contigs)
         assert resolved is not None
         _analysis_selection(prepared, resolved.analysis)
-        if command not in {"evidence", "reconstruct", "phase"}:
+        calibration_round = command == "calibrate" and (contig is not None or calibration_stage is not None)
+        if (command not in {"evidence", "reconstruct", "phase"} and not calibration_round
+                and pedigree_stage in (None, "gather")):
             _output_selection(prepared.paths.output, settings)
         assert cut is not None
         if defer:
@@ -1429,7 +1495,9 @@ def rerun_recombination(settings: Settings, run_directory: str | Path) -> RunRes
     )
     cut = _attach_reports(graph, workflow_cut(graph, "recombination"))
     completed = _prerequisites(prepared, resolved, cut)
-    tasks = bind_tasks(graph, cut, _model_actions(prepared, resolved, cut, outputs=outputs), completed=completed)
+    tasks = bind_report_tasks(
+        bind_tasks(graph, cut, _model_actions(prepared, resolved, cut, outputs=outputs), completed=completed)
+    )
     preload = task_preloads(tasks)
     _start_runtime(prepared, preload=preload)
     prepared.paths.logs.mkdir(parents=True, exist_ok=True)

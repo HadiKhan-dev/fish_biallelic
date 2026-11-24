@@ -1,13 +1,66 @@
-# Plausible short-read sensitivity scenario, not an empirical fit; see docs/user/quickstart.md.
-# The generating model is independent of inference calibration. Explicit read keys win.
+# Realistic short-read profile (4.22), calibrated against the pipeline's own estimates on the TroMau cross (116
+# samples, bcftools mpileup joint calls on fAstCal1.2, mean depth ~11x): the observation-pilot and painting outlier
+# rates (0.0045 / 0.0055 against 0.0048 / 0.0055; their per-sample rise with depth is the opposite of TroMau's fall),
+# site-QC removals, heterozygote balance before and after QC, read error and missingness. Targets, tolerances and
+# the calibration arms: docs/methods/simulation.md "Realistic profile". It sets no depth; designs set it (calibrated
+# at 11x). A read preset is merged as a whole under every explicit key, so this file also enables the call-set
+# artefacts, the structure model and site/sample QC; an explicit `[quality] site_filter = "auto"` in a
+# configuration turns QC back off.
 [simulation.reads]
 read_length_bp = 150
 fragment_mean_bp = 375.0
 fragment_sd_bp = 150.0
+# Clean reads: TroMau's fitted read error is ~1.4e-5; discordance comes from site-specific errors (below).
+error_rate = 2e-5
+# Library-size spread of TroMau's bulk (6-15x around 8.4x); its four ~50x samples are a design choice.
 depth_cv = 0.3
-site_depth_cv = 0.5
+# Low-mappability depth loss shared by all samples, at two scales; site QC (r1) removes most of these sites.
+site_depth_cv = 0.05
 site_depth_window_bp = 1000
-count_dispersion = 0.1
-heterozygote_alt_probability = 0.48
-error_rate = 0.01
-dropout_fraction = 0.0
+site_loss_fraction = 0.30
+site_loss_fine_fraction = 0.05
+site_loss_fine_window_bp = 300
+# Mild per-sample regional depth variation (without it the read-sharing range rule runs out to kilobases: EVQ).
+region_depth_cv = 0.08
+region_depth_window_bp = 4000
+# Read-level reference mapping bias: a mate is lost with probability 1 - exp(-0.02 k^2), k its homologue's ALT
+# alleles under the mate (kept-site heterozygote ALT share 0.487, TroMau 0.492).
+reference_bias = 0.02
+reference_bias_power = 2.0
+
+# Site-specific low-rate errors shared by all samples (context errors, low-level mismapping): REF reads at an
+# error-prone site turn into the ALT base; they set the kept-site statistics (r3, read error, kept excess-het) but
+# supply only about a third of TroMau's outlier rate. Missed calls (below) supply the rest; their per-sample rate
+# rises with depth where TroMau's falls, so the outlier level is matched, not its kind. No read is erased anywhere (TroMau is a bcftools mpileup call set:
+# its AD keeps every high-quality base, stray ALT reads in reference-homozygous cells included); the per-cell balance
+# redraw is refused with reads. Missed variant calls (a caller effect: a missed heterozygote or homozygous-ALT cell
+# is reported as a reference block, the only cells whose counts are rewritten) at 0.2 times the layer's defaults
+# (hard sites, low-sensitivity stretches and the per-sample rate; the other miss settings at their defaults) bring
+# the observation pilot and painting outlier rates to TroMau's with the kept-site statistics unchanged:
+# docs/methods/simulation.md "Realistic profile".
+[simulation.artefacts]
+enabled = true
+hard_sites = 0.002
+stretch_cover = 0.006
+miss = 0.0024
+balance_dispersion = 0.0
+systematic_sites = 0.06
+systematic_lo = 0.03
+systematic_hi = 0.15
+
+# Deletions, duplications, inversions and reference misorder at the cichlid preset's rates (schema defaults), and
+# collapsed paralogs calibrated to TroMau's paralog-like sites, kept-site share first (5.5% of the genome in 5 kb
+# segments, 2% of their written sites paralogous sequence variants, each source haplotype carrying a copy with
+# probability 0.8, inherited: fixed copies make site QC's sample-depth rule r2 stop separating):
+# docs/methods/simulation.md "Collapsed paralogs".
+
+[simulation.structure]
+enabled = true
+collapsed_fraction = 0.055
+collapsed_mean_bp = 5000.0
+collapsed_psv_share = 0.02
+collapsed_carrier_frequency = 0.8
+
+[quality]
+site_filter = "on"
+sample_filter = "on"

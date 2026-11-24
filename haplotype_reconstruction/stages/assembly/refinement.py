@@ -92,6 +92,7 @@ def refine_component(
             map_probability_floor=settings.config.map_probability_floor,
             windows_factory=windows_factory,
             message_step=storage.message_step,
+            search_alleles_reversed=settings.search_alleles_reversed,
         )
         component, result = science_refine_component(
             number,
@@ -135,6 +136,7 @@ def refine(
         session.inputs.genetic_map,
         session.ties.reverse,
         session.ties.census,
+        search_alleles_reversed=session.inputs.search_alleles_reversed,
     )
     records = None if session.records is None else session.records.scoped(refined_key(state.level))
     tasks = []

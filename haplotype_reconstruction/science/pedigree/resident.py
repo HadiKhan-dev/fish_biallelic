@@ -1,5 +1,5 @@
 """Resident source masses, transmitted projection and child terms, in dependency order.
-Method: docs/methods/pedigree.md#preparation-markers-source-factors-and-information-blocks
+Method: docs/methods/pedigree.md#preparation-markers-and-source-factors
 """
 
 from __future__ import annotations
@@ -50,7 +50,6 @@ def resident(
         projected,
         component.genotype_likelihoods,
         component.observed,
-        component.information_exponent,
         component.selector_switch_probability,
         transition.same,
         transition.one_change,

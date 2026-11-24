@@ -7,6 +7,7 @@ payload. Method: docs/methods/evidence.md#stage.4.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from ...contracts.source import ContigReads
@@ -23,6 +24,16 @@ from . import records
 __all__ = ["run_contig", "task"]
 
 
+def _search_alleles_reversed(ref: Iterable[str], alt: Iterable[str]) -> bool:
+    # The first distinct nucleotide pair chooses one frame for the contig. A
+    # global REF/ALT exchange toggles this bit, even for self-complementary panels.
+    for ref_base, alt_base in zip(ref, alt, strict=True):
+        first, second = ref_base.upper(), alt_base.upper()
+        if first != second:
+            return first > second
+    return False
+
+
 def run_contig(
     root: str | Path, source: CanonicalOrderSource, contig: str, parameters: EvidenceParameters, *, team: int = 1
 ) -> str:
@@ -33,15 +44,14 @@ def run_contig(
     """
     store = CheckpointStore(root, nthreads=team)
     file = store.scatter_view(contig).contig
-    decoded: list[ContigReads] = []
+    decoded: list[tuple[ContigReads, bool]] = []
+
+    def read_vcf() -> str:
+        reads, payload = source.read_with_payload(contig, team)
+        decoded.append((reads, _search_alleles_reversed(payload.ref, payload.alt)))
+        return payload_identity(payload)
     if source.kind == "vcf":
-
-        def compute_identity() -> str:
-            reads, payload = source.read_with_payload(contig, team)
-            decoded.append(reads)
-            return payload_identity(payload)
-
-        consumed = cached_payload_identity(file, source.path, compute_identity)
+        consumed = cached_payload_identity(file, source.path, read_vcf)
     else:
         consumed = bind_payload_identity(file, source.payload_identity(contig))
     from ...contracts.payload import to_payload
@@ -53,16 +63,19 @@ def run_contig(
     derivation = records.expected(store, manifest, product="evidence", contig=contig).identity
     if records.complete(file, derivation):
         return derivation
-    if decoded:
-        reads = decoded.pop()
-    elif source.kind == "vcf":
-        reads, payload = source.read_with_payload(contig, team)
-        bind_payload_identity(file, payload_identity(payload))
-        del payload
+    if source.kind == "vcf":
+        if not decoded:
+            bind_payload_identity(file, read_vcf())
+        reads, reversed_alleles = decoded.pop()
     else:
         reads = source.reads(contig, team)
+        ref, alt, _ = source.site_alleles(contig, reads.positions[:1])
+        reversed_alleles = _search_alleles_reversed(ref, alt)
     with thread_team(default=team):
-        prepared = prepare_contig(reads, parameters, team, map_work=threaded_each, reverse=source.reverse)
+        prepared = prepare_contig(
+            reads, parameters, team, map_work=threaded_each, reverse=source.reverse,
+            search_alleles_reversed=reversed_alleles,
+        )
     # Pair-backed output no longer owns coded raw count rows. Release the input
     # before publication; dense fallback rows remain alive through prepared.
     del reads

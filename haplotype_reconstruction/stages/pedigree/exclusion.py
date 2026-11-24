@@ -28,6 +28,7 @@ from ...science.pedigree import exclusion_bound
 from ...science.pedigree.exclusion_parameters import ExclusionParameters
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
+from ...store.namespace import StoreLocation
 from ...store.protocol import Derivation, NumericalPolicy
 from ..evidence import records as evidence_records
 from ..framework import RecordKey, ResourceRequest, Task, TaskKey, load_product, publish_product
@@ -75,7 +76,7 @@ def sharing_samples(store, manifest, evidence_ids, read_libraries) -> tuple[bool
 class ExclusionAdapter:
     """Persist the scalar endpoints, contig weight and dyad certification eligibility."""
 
-    schema = 3
+    schema = 4
 
     def encode(self, value: ExclusionEvidence) -> Mapping[str, Any]:
         if value.log_e_upper is None or value.certifiable is None:
@@ -101,16 +102,21 @@ def derivation(
     *,
     numerical_policy: NumericalPolicy | None = None,
     sample_rates: tuple[float, ...] = (),
+    rate_at_top: tuple[bool, ...] = (),
     sharing: tuple[bool, ...] = (),
+    contamination: str = "",
 ) -> str:
-    """Bind full evidence, ordered dyads, the configured contig axis, this contig's log weight, the samples and their
-    per-sample outlier rates (A11; empty: the 4.20 constant allowance)."""
+    """Bind full evidence, ordered dyads, the configured contig axis, this contig's log weight, the samples, their
+    per-sample outlier rates (4.22 A11: the observation model's allowances), the samples whose rate sits at the top of
+    the calibration grid, the samples in fitted sharing libraries (both withhold certification) and the run's
+    contamination decision (4.22 QC A: flagged libraries are read on corrected likelihoods)."""
     return Derivation(
         code_dependency_identity((__name__,)),
         dict(exclusion=parameters, model=exclusion_bound.MODEL, samples=sample_ids, contigs=configured_contigs,
-             log_weight=float(log_weight), sample_rates=tuple(float(x) for x in sample_rates), sharing=sharing),
+             log_weight=float(log_weight), sample_rates=tuple(float(x) for x in sample_rates),
+             rate_at_top=tuple(bool(x) for x in rate_at_top), sharing=sharing),
         numerical_policy or NumericalPolicy.current(),
-        dict(evidence=evidence_identity, dyads=array_digest(dyads)),
+        dict(evidence=evidence_identity, dyads=array_digest(dyads), contamination=contamination),
     ).identity
 
 
@@ -126,12 +132,17 @@ def run(
     file: CheckpointFile | None = None,
     identity: str | None = None,
     sample_rates: tuple[float, ...] = (),
+    rate_at_top: tuple[bool, ...] = (),
     sharing: tuple[bool, ...] = (),
 ) -> ExclusionEvidence:
-    """Return scalar scores and certification eligibility in request order. ``sample_rates``: A11's per-sample
-    outlier rates (empty: the 4.20 constant allowance)."""
+    """Return scalar scores and certification eligibility in request order. ``sample_rates``: every sample's outlier
+    rate (4.22 A11); ``rate_at_top`` and ``sharing``: samples whose dyads keep a working score but never certify."""
     if (file is None) != (identity is None):
         raise InputError("publication requires both file and identity")
+    if len(sample_rates) != sample_count:
+        raise InputError("exclusion requires one outlier rate per sample")
+    if evidence.cohort_frequencies is None:
+        raise InputError("exclusion requires the evidence's cohort genotype frequencies")
     rows = np.ascontiguousarray(dyads, dtype=np.int64)
     if rows.ndim != 2 or rows.shape[1] != 2:
         raise InputError("exclusion dyads must have shape [D,2]")
@@ -141,10 +152,11 @@ def run(
         previous = load_product(file, KEY, identity, adapter)
         if previous is not None:
             return previous
-    certifiable = None
-    if sharing:
-        fitted = np.asarray(sharing, dtype=np.bool_)
-        certifiable = ~(fitted[rows[:, 0]] | fitted[rows[:, 1]])
+    certifiable = np.ones(len(rows), dtype=np.bool_)
+    for flags in (sharing, rate_at_top):  # a fitted sharing library or an unresolved (top-of-grid) rate: withheld
+        if flags:
+            flagged = np.asarray(flags, dtype=np.bool_)
+            certifiable &= ~(flagged[rows[:, 0]] | flagged[rows[:, 1]])
     with thread_team(default=threads):
         product, _ = exclusion_bound.score_contig(
             contig,
@@ -156,7 +168,8 @@ def run(
             log_weight,
             sample_count,
             claim_threads,  # the science's kernel boundaries re-read this task's share
-            sample_rates=np.asarray(sample_rates, dtype=np.float64) if len(sample_rates) else None,
+            cohort=evidence.cohort_frequencies,
+            sample_rates=np.asarray(sample_rates, dtype=np.float64),
             certifiable=certifiable,
         )
     if file is not None:
@@ -169,9 +182,11 @@ def run_stored(
     contig: str, source: CheckpointFile, evidence_identity: str, dyads: np.ndarray,
     parameters: ExclusionParameters, log_weight: float, sample_count: int, *,
     threads: int = 1, file: CheckpointFile | None = None, identity: str | None = None,
-    sample_rates: tuple[float, ...] = (), sharing: tuple[bool, ...] = (),
+    sample_rates: tuple[float, ...] = (), rate_at_top: tuple[bool, ...] = (), sharing: tuple[bool, ...] = (),
+    correction: tuple[str | StoreLocation, Mapping[str, Any]] | None = None,
 ) -> ExclusionEvidence:
-    """Read the scalar likelihoods and observations for the requested contig."""
+    """Read the scalar likelihoods and observations for the requested contig; ``correction`` (root, manifest): the
+    flagged libraries read on contamination-corrected likelihoods (4.22 QC A)."""
     if (file is None) != (identity is None):
         raise InputError("publication requires both file and identity")
     if file is not None and identity is not None:
@@ -179,8 +194,16 @@ def run_stored(
         if previous is not None:
             return previous
     evidence = evidence_records.load_dense(source, expected_identity=evidence_identity)
+    if correction is not None:
+        from ...store.store import CheckpointStore
+        from ..painting import contamination as contamination_stage
+
+        root, manifest = correction
+        evidence = contamination_stage.corrected_evidence(
+            CheckpointStore(root), manifest, contig, evidence, evidence_identity=evidence_identity
+        )
     return run(contig, evidence, dyads, parameters, log_weight, sample_count, threads=threads, file=file,
-               identity=identity, sample_rates=sample_rates, sharing=sharing)
+               identity=identity, sample_rates=sample_rates, rate_at_top=rate_at_top, sharing=sharing)
 
 
 def task(
@@ -196,6 +219,7 @@ def task(
     cores: int = 1,
     depends_on: tuple[TaskKey, ...] = (),
     sample_rates: tuple[float, ...] = (),
+    rate_at_top: tuple[bool, ...] = (),
     sharing: tuple[bool, ...] = (),
 ) -> Task:
     """Declare a requested contig; callers omit this task when D is zero."""
@@ -205,7 +229,8 @@ def task(
         TaskKey("pedigree", "exclusion", contig),
         run,
         args=(contig, evidence, dyads, parameters, log_weight, sample_count),
-        kwargs=dict(file=file, identity=identity, sample_rates=tuple(sample_rates), sharing=sharing),
+        kwargs=dict(file=file, identity=identity, sample_rates=tuple(sample_rates), rate_at_top=tuple(rate_at_top),
+                    sharing=sharing),
         depends_on=depends_on,
         inputs=(RecordKey(contig, "evidence"),),
         outputs=(RecordKey(contig, KEY),),

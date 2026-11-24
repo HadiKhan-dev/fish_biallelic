@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from ...engine.graph import RecordKey, ResourceRequest, Task, TaskKey
-from .records import ExportConfig, ExportRecord, complete
+from .records import ExportConfig, ExportRecord, complete, contig_files
 from .run import export_records
 
 if TYPE_CHECKING:
@@ -55,6 +55,13 @@ def write(
     if previous is not None and complete(previous, identity, destination):
         return previous
     products = set(settings.products)
+    sample_header = ""
+    if "samples" in products:
+        from .samples import contamination_header
+
+        reader = getattr(results, "contamination", None)
+        decision = reader() if reader is not None else None
+        sample_header = "" if decision is None else contamination_header(decision)
     entry = export_records(
         destination,
         contig,
@@ -65,10 +72,11 @@ def write(
         input_sample_ids=results.input_sample_ids,
         synthetic=results.manifest["source"]["kind"] == "simulation",
         map_work=map_work,
+        sample_header=sample_header,
     )
     if previous is not None:
         kept = set(entry["files"])
-        for name in set(previous.entry["files"]) - kept:
+        for name in contig_files(previous.entry) - kept:
             # The other index of a data file this render kept was retired by its placement, under the file's lock
             #; removing it here, after the lock, could remove a later writer's current index.
             if any(str(name) == f"{data}{index}" for data in kept for index in (".tbi", ".csi")):

@@ -348,6 +348,29 @@ cache only when the two strengths are equal and otherwise rebuilds the emissions
 `Painting.emission_divisor` records the confidence divisor and `Painting.path_divisor` the
 path divisor. With equal divisors there is one fit and one set of emissions.
 
+The two reference decodes the pedigree reads (the reference painting and the refit repaint)
+also carry the label-error statistic h = (u, v_0, v_1) of the released labels
+(`ComponentPainting.label_error`; the pedigree's A9, A10 and PD29 allowances). h is read from
+the untempered chain, divisor 1 (`science.painting.parameters.LABEL_ERROR_CORRELATION` = 0):
+the copying model fitted at r = 0 by the same estimator and the label-pair posterior masses of
+that chain over the decoded labels. When the confidence strength is 0, h comes from the release
+pass itself; when the path strength is 0, from the path chain; otherwise a third model is fitted
+per component and a second forward-backward pass runs over the path emissions rescaled to
+r = 0 (with the read state, over read matrices built at weight 1, deferred as the confidence
+matrices are). The labels, their release, the packed emissions and the published correlation
+stay at the run's two strengths. Held-out read prediction does not use label identity. It
+chooses the confidence strength and, without the read state, the path strength. With the read
+state the path divisor is fixed at 4. With h at the confidence strength,
+an independent-site simulation at half depth chose divisor 4 instead of 32, and its label
+posterior sharpened on thinner data: mean u fell to 0.3 times its value while the true label
+error rose 3.8 times. At r = 0, h rose with the true label error on
+every design tested (independent-site, short-read backcross, medium and long reads; depth 5
+and 2.5), its top tenth of bins held 5.3 to 9.0 times the mean error, and the independent-site
+design's observed/stated error ratio fell from 8.6 / 84 to 4.1 / 7.9. Divisors 4, 8 and 32
+each failed one of those checks on some design. h remains a working score: observed label
+errors exceeded the stated ones 2.7 to 22 times on those designs, so the pedigree's allowances
+keep their floors.
+
 With the read state (`read_classes` > 1) the divisor step differs (`science/painting/read_calibration.py`).
 The path divisor is fixed at `path_divisor`. The confidence divisor is chosen from `confidence_grid`
 (1 to 16) by each sample's held-out log probability of the hidden part of every reference window
@@ -454,6 +477,54 @@ in the library's fitted distribution. The fine painting had zero such spans acro
 bc8, std and TroMau. The six paired reset replays agreed with their controls on released genotypes and
 switches.
 
+Read-state tempering. Each site's per-class read factor is tempered with its bin's weight w (one over the bin's
+design effect), f_l(c) = R_l(c)^w. The untempered factors average to one over the site's class law,
+Σ_c π_l(c) R_l(c) = 1. By Jensen's inequality the tempered average is strictly below one when 0 < w < 1 and
+R_l varies among classes with positive probability under π_l. This deficit arises at heterozygous allele
+configurations, which can also occur for a repeated BACKGROUND label. The painting's copying-model fits and
+decodes, reference repaint, calibration, family phase, and the pedigree's source chain and map-scale frames
+use the bin-level correction (`science/painting/read_factor.py`, 4.22 D5 and D5P). Label continuity scores scalar
+part emissions in its search and final verification and sees the correction through the fitted copying model.
+
+Each label pair's bin transfer is exp(l_b) M̂_b, where M̂_b is the stored, rescaled tempered matrix and l_b
+is its separate log scale. The correction preserves M̂_b and sets l_b = w log(α_b M_b^1 1) − log(α_b M̂_b 1),
+with M_b^1 the untempered bin matrix including its scale. The bin's total from the entering class law α_b then
+equals the bin's untempered read likelihood to the power w, the same exponent used for the scalar emission.
+The carry starts from the class law at the first bin's entry site and normalises α_{b−1} M̂_{b−1} to get α_b.
+This approximates the full predictor by carrying the class law along a fixed label pair, omitting label transitions
+and scalar emissions from the carry. In exact arithmetic the correction multiplier is at least one and equals
+one at w = 1, where rounding contributes about 10⁻⁸ nats. The correction makes a library without read sharing
+exactly neutral, so its samples bypass the read state.
+
+Two passes preserve parallelism over sample and 64-bin chunks in the first kernel, which also returns each bin's
+untempered row sums M_b^1 1 (a backward vector chain over the bin's sites, O(C²) per site). The second kernel
+carries the class law through the stored single-precision matrices for each sample and label pair. The results
+agree with a one-pass double-precision carry to about 2·10⁻⁸ nats. The read-matrix build costs 23–26 % more on
+synthetic batches at the same core use. Calibration's held-out blocks add the visible build's log-scale shift
+to the visible-plus-hidden log scale for the same pairs, bins and weights. The hidden sites stay at weight one.
+Correcting the visible matrices alone made the held-out ratio inconsistent (zero_stress then chose divisor 1 and
+gained half again as many genotype errors). The map-scale frames build the prefix through the last requested bin
+to carry the class law, then select the requested bins.
+
+The baseline on the nine truth designs is the D5 build, whose pedigree source chain already used the correction.
+The updated model removed a quarter to a third of long-read genotype errors (famhs 2.5x went from 1.92 M to 1.43 M,
+and famhs 5x from 210 k to 147 k). At 2.5x the painted switches fell 38 % and the phase switches fell 30 %.
+Zero_stress (short paired-end reads, per-sample depth heterogeneity) had 16 % fewer phase switches, 9 % fewer founder
+allele errors and 11 % more genotype errors. Its calibration choice moved from divisor 2 to divisor 4. For divisors
+8 and 16 the criterion differences from the best were −397,079 and −1,230,531 nats without the correction, and
+−6,083 and −17,080 nats with it. At a fixed divisor the genotype errors rose 22 %, almost all true homozygous ALT
+cells called heterozygous; without the design's heterozygote ALT bias the rise was 2.5 %. That bias was simulated by
+turning reference-homologue reads into ALT reads at heterozygous sites only, which the read-state class model (one
+symmetric read error) does not represent. Under the simulator's physical reference mapping loss (the realistic
+presets), the corrected model changed genotype errors by +0.07 % (short-read f3) and +0.18 % (a TroMau-like short-read
+design) under their own calibration (+0.15 % and +0.51 % at a fixed divisor of 4), with fewer long phase switches
+and set-aligned errors, and removed 31 % of the genotype errors of the realistic long-read design; Tier B edges were
+identical in all of them. The bc8, hsrand and std results stayed close to the D5 baseline. All released Tier B
+edges matched truth. Famhs 2.5x went from 94 to 93 of 98 true edges. The release withheld G0_B → F1_2 when its
+bootstrap fraction fell from 0.709 to 0.671, crossing the 0.70 cutoff. The true pair remained the local winner and
+leave-one-block-out passed with 14 of 15 replicates. The prototype that corrected only the visible matrices also
+withheld the edge at confidence divisor 1, establishing the correction as the trigger.
+
 Single-value grids skip their corresponding calibration fits. The setting
 robustness_grid=(0.01,), divisor_grid=(10.9,), and both bin sizes 100 gives r=0.1 for both
 strengths and reproduces the 4.19 painting.
@@ -465,3 +536,67 @@ evidence and map, and with the fine painting's label-continuity outcome passed w
 row maps (the refit's panels already carry them): painting/refit_reference. Pedigree
 consumes that second reference painting; founder refit, phase, recombination, export
 and evaluation consume fine paintings.
+
+## Contamination
+
+A library contaminated with foreign DNA carries reads that do not come from its own genotype. Painting measures this
+per library and corrects the likelihoods that the repaint, the pedigree and family phase read (4.22; stages
+`contamination_cells` per contig and `contamination` for the run, `stages/painting/contamination.py`; science in
+`science/painting/contamination.py`). The founder refit keeps the uncorrected evidence: on known-truth runs
+contamination left the founders unchanged and damaged only the painting the pedigree reads and the pedigree.
+
+**Model.** At a site with d reads, k of them ALT, a library with own genotype g and foreign read fraction alpha has
+
+    P(k | d, g, alpha) = Bin(k; d, (1 - alpha) theta(g) + alpha q),   theta(g) = (e, h, 1 - e),
+
+with h the evidence read model's heterozygote ALT mean and e the library's own read error, estimated jointly with alpha
+(the read model absorbs contamination as error). The own genotype g is the library's painted genotype: in a cross,
+genotypes follow the founder mosaic, and a Hardy-Weinberg own-genotype prior absorbed that misfit as alpha. Two
+foreign laws give q:
+
+- population: the other libraries' mean ALT read fraction at the site (a plug-in for an unknown source);
+- donor: phi(g_D) = (e_D, 1/2, 1 - e_D) at the painted genotype of one sequenced library D.
+
+**Estimation.** Sufficient statistics per contig: each library's read sums over (painted genotype, binned q) cells
+and every ordered pair's sums over (painted genotype, donor painted genotype) cells; the run sums them over the
+analysed contigs. Construct each contig's read sums, painted genotypes and fitted heterozygote means in its canonical
+search coding before pooling. Alpha and e are profiled on fixed grids with a golden-section refinement of alpha.
+
+**Flag.** A library is corrected when alpha exceeds the cohort's median alpha (its clean level) by at least
+`CONTAMINATION_ALPHA_FLOOR` (0.008) and the robust z of alpha over the cohort >= `CONTAMINATION_Z_FLOOR` (4). Both are
+needed: clean libraries carry a misfit floor (alpha 0.004-0.009 on known truth, highest in a systematic subgroup, the
+F1s of TroMau-like crosses), so a robust z alone flags clean libraries and a fixed floor alone ignores a noisier
+cohort. The floor is on the excess over the median because the clean level moves with the data: under the realistic
+simulator's artefacts a clean half-sib cohort sat at alpha 0.010-0.017, where a fixed 0.01 floor let its founders
+(0.020) be flagged. The excess of 0.008 is the earlier fixed floor of 0.01 at the clean level of the runs it was
+validated on (median alpha 0.0014-0.0018); on their saved reports and TroMau's it changes no other decision. On five known-truth runs the rule flagged none of about
+560 clean libraries and 14 of 15 contaminated ones (the miss: a realized share near 1 %, which changed no call).
+
+**Donor.** For a corrected library the best sequenced donor is the largest donor-law likelihood-ratio statistic on
+the pair's shared painted sites (log likelihoods over different site sets are not comparable). It is named only when
+its same-homozygote residual, (minor-read fraction where library and donor are the same homozygote minus the clean
+libraries' fraction) / alpha_D, is at most `CONTAMINATION_DONOR_RESIDUAL` (0.04): a true donor adds no foreign reads
+there (0.001-0.016 on known truth), a relative standing in for an unsequenced source does (0.079-0.213). A stand-in's
+donor law lost pedigree edges, so without a named donor the population law corrects (partially).
+
+**Correction.** The corrected library's likelihood rows are rebuilt from its counts under the model above (binomial own
+reads: the read model's heterozygote overdispersion is not carried for corrected libraries); unflagged libraries keep
+their rows exactly. Compute corrections in canonical search coding and return the likelihoods in input coding.
+When any library of the run is flagged, consumers read a dense projection of every contig's
+likelihoods (the flags are run-wide); otherwise their evidence path is unchanged.
+
+**Tiers** (`quality/contamination.csv`): clean; corrected; interpret_with_care when the correction's alpha exceeds
+`CONTAMINATION_CARE_ALPHA` (0.05).
+
+**Known limits.**
+- The population law is only a partial correction for one unsequenced donor, and its alpha can be a lower bound:
+  when no donor is named the fit can absorb foreign reads into the library's own error up to its grid top (a 20 %
+  library read 0.037). Such a library is marked interpret_with_care (`alpha_lower_bound` in the table).
+- The painting's per-library outlier rates come from the run calibration, before the correction (a known-truth check
+  with the uncorrected rates still recovered every lost edge).
+- Only genotype likelihoods are corrected: the read-state class likelihoods (painting and repaint, the pedigree's
+  source chain, map-scale frames, family phase's read matrices) still read the raw counts. Validated with the read
+  state on for short reads, not for long reads.
+- The empirical null assumes most libraries are clean: with 45 % of a synthetic cohort contaminated 23 of 135 were
+  missed, with 60 % all were.
+- The known-truth checks ran at about 10x; a clean control at 1-5x (older simulator) flagged no library.

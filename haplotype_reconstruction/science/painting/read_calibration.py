@@ -175,6 +175,10 @@ def confidence_unit(panels, evidence, config, genetic_map, *, epsilon, reverse, 
                         painted_states.alt_probability(), painted_states.background_frequency, painted_bins.starts,
                         painted_bins.stops, epsilon, weight, unit,
                     )
+                    if raw.read_shift is not None:
+                        # the visible part's bin-level tempering correction (the visible build's, same pairs, bins and
+                        # weights): the hidden sites stay at weight one
+                        log_hidden = log_hidden + raw.read_shift
                     out = block_scores(raw, read_hidden, log_hidden, scalar, tracks, capable, model)
                     scores[(candidate, fold)][start:stop] += out.sum(axis=1)
                     cells[(candidate, fold)] += int(

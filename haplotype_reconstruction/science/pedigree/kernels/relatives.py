@@ -27,7 +27,6 @@ OVERLOADS = {
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.float64,
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
@@ -51,7 +50,6 @@ OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -80,12 +78,10 @@ OVERLOADS = {
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.float64,
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.int64,
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
         ),
         (
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
@@ -105,14 +101,12 @@ OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.float64,
             types.Array(types.float64, 4, "C", readonly=False, aligned=True),
             types.int64,
-            types.Array(types.float64, 4, "C", readonly=False, aligned=True),
         ),
     ),
     "relatives._proxy_kernel": (
@@ -134,7 +128,6 @@ OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -159,7 +152,6 @@ OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -189,7 +181,6 @@ OVERLOADS = {
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
             types.float64,
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
@@ -213,7 +204,6 @@ OVERLOADS = {
             types.Array(types.int64, 1, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
             types.Array(types.int64, 2, "C", readonly=False, aligned=True),
-            types.Array(types.float64, 2, "C", readonly=True, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 3, "C", readonly=False, aligned=True),
@@ -232,19 +222,11 @@ OVERLOADS["relatives._m1_pairs"] = extend(OVERLOADS["relatives._m1_pairs"],
                                            *((*_READ_TERMS, cache) for cache in _CACHE_ARGUMENT))
 
 
-# Relatives distribute each pair's two independent views as separate work items.
-for _name in ("relatives._second_degree", "relatives._full_sib"):
-    OVERLOADS[_name] = tuple(signature + (types.int64,) for signature in OVERLOADS[_name])
-
 OVERLOADS["relatives._proxy_kernel"] = tuple(
-    sig[:25] + (_reset, _width) + sig[25:] for sig in OVERLOADS["relatives._proxy_kernel"])
+    sig[:24] + (_reset, _width) + sig[24:] for sig in OVERLOADS["relatives._proxy_kernel"])
 OVERLOADS["relatives._second_degree"] = tuple(
-    sig[:26] + (_reset, _width) + sig[26:] for sig in OVERLOADS["relatives._second_degree"])
+    sig[:25] + (_reset, _width) + sig[25:] for sig in OVERLOADS["relatives._second_degree"])
 OVERLOADS["relatives._full_sib"] = tuple(
-    sig[:26] + (_reset, _width) + sig[26:] for sig in OVERLOADS["relatives._full_sib"])
+    sig[:25] + (_reset, _width) + sig[25:] for sig in OVERLOADS["relatives._full_sib"])
 OVERLOADS["relatives._m1_pairs"] = tuple(
-    sig[:27] + (_reset, _width) + sig[27:] for sig in OVERLOADS["relatives._m1_pairs"])
-# A batch with only unit information exponents has no pre-powered scalar products. This is independent
-# of retaining its class cache. Compile this route before dispatch to the contig workers.
-_m1_pairs = OVERLOADS["relatives._m1_pairs"]
-OVERLOADS["relatives._m1_pairs"] = _m1_pairs + tuple(sig[:24] + (types.none,) + sig[25:] for sig in _m1_pairs)
+    sig[:25] + (_reset, _width) + sig[25:] for sig in OVERLOADS["relatives._m1_pairs"])
