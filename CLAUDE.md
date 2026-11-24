@@ -6,8 +6,8 @@
 `AGENTS_HISTORY.md`.
 
 - **Answers are text, not a turn's end.** Answer an owner's question as text before any further tool call (AGENTS
-  §4.1), then keep calling tools in the same turn. Text written between tool calls is easily missed: repeat the answer
-  at the top of the final reply.
+  §4.1), then keep calling tools in the same turn. Write the answer once: the final reply adds only what is new, never
+  a restatement [22 Nov].
 - **A final reply ends the turn; nothing happens until something wakes the session** [15 Nov]. While work remains,
   never end a turn on a wait or an answer. End it only when the work is done or needs a decision only the owner can
   make. Never write "starting X now" or "next I will" in a final reply: start X, then report it running.

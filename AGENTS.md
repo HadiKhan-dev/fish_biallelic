@@ -174,6 +174,11 @@ asked. Keep one unified route: remove superseded modes and relict code after the
     integer-valued quantity), said in a comment.
   - Check new or changed numerical tests under a last-bit perturbation (`NPY_DISABLE_CPU_FEATURES`, another thread
     count or node). A test that fails only through last-bit drift is broken: fix the test, never the code.
+- **Judge a gate by what its failure means** [22 Nov]: a preset criterion is a tool, not a verdict. A failure that
+  evidence shows is noise (a near-tie at a threshold, Monte Carlo or seed variation in a target shared with the
+  reference) passes: say so with the evidence and proceed without asking. Bring to the owner only a failure that is a
+  real difference in outcome beyond noise (a lost or false edge, a worse metric). Freezing a criterion before the
+  results still stands: it stops a criterion being tuned to pass, not judgement about what a failure means.
 - **Test an estimator's criterion against truth before building it** [16 Nov]:
   - Before building anything that estimates a setting from the data (a scale, temperature, rate, threshold or weight),
     check on known-truth simulations that the criterion's optimum agrees with the truth's. A lab prototype scoring
@@ -268,9 +273,10 @@ workflows may call `samtools` or `bcftools`.
   ambiguous.
 - **The owner's question comes first** [15 Nov]. Make no further tool call: the next thing you write is the complete,
   direct answer, starting with the answer and quoting the question. Running tasks keep running. Then resume exactly
-  where you stopped (edits, launches, start checks, waiters). Repeat an answer written while work continues at the top
-  of the next final reply. A question is not an instruction; if the answer shows the owner would want something
-  different, say what you will change, then change it.
+  where you stopped (edits, launches, start checks, waiters). Write each answer once; a later reply adds only what is
+  new, never a restatement [22 Nov]. A question is not an instruction [22 Nov]: change nothing on the strength of a
+  question unless it is plainly a request for that change. If the answer suggests something should change, propose it
+  and wait for the owner's confirmation; the 15-minute default does not apply to it.
 - **Never stall waiting for an answer** [31 Oct]. Every question states the recommended option and what happens without
   an answer. Keep all independent work moving. After 15 minutes, proceed with the recommended option, record the
   decision and its reasons in the progress file, and tell the owner they can override it. Prefer reversible defaults and
@@ -289,10 +295,13 @@ workflows may call `samtools` or `bcftools`.
   it, not after a cheaper version has failed.
 - **Stay in scope.** Never widen a task into an audit, redesign, security review, provenance overhaul or cleanup; report
   an unrelated concern briefly and pursue it only if it invalidates the work or the owner agrees. Exception: serial
-  bottlenecks in code from release 4.19 on (§4.6).
+  bottlenecks in code from release 4.19 on (§4.6). A failure that the item's own runs expose is located within the item
+  (its trigger and the stage that first goes wrong); only its fix may become a separate item [22 Nov].
 - **Match the process to the change** [5 Oct]: model or decision-rule changes (likelihoods, priors, counting or novelty
   criteria) and algorithm redesigns get diagnosis, a design with prototype runs, and one adversarial review; simple
-  fixes get one focused implementation and its focused check. Verify what changed rather than re-accepting everything.
+  fixes get one focused implementation and its focused check. A speedup or operational fix shown to give the same
+  results (§2.3) where it acts gets no separate review: that evidence is its check [22 Nov]. Verify what changed rather
+  than re-accepting everything.
 - **Stop** when the requested behaviour works, the agreed validation passes and the report is ready: no final hardening
   pass, optional abstraction or unrelated refactor.
 

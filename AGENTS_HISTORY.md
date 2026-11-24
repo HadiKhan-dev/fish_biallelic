@@ -139,3 +139,22 @@ need not load this file every session. Rules live only in `AGENTS.md`; nothing h
   are nodes assigned to use, we should use them. Doesn't matter if SL2, SL3 or SL4", and "You ask me about SL2/SL3
   when requesting allocations, you don't need to worry about what allocation something runs on for nodes allocated to
   me already". The 17 Oct rule now governs requests only; the account checks were removed from the lab scripts.
+- **22 Nov** (§4.1, review proportionate to the change). The EVQ sample-QC speedup had already been shown equivalent where
+  it acts (weights equal to rounding, identical TroMau QC decisions, the stall gone, 337 tests passing) when the
+  coordinator launched an xhigh Opus review that ran over 30 minutes. The owner: "I don't want to waste tokens given
+  something works. Don't stop stuff just now, but keep it in mind for the future."
+- **22 Nov** (§4.1, scope). SIM's realistic long reads exposed a pedigree loss on famhs (66 of 98 edges), and the
+  coordinator split its attribution off as a separate item. The owner: "we should be doing that with SIM, or at least
+  figuring out where the issue is coming from so it can be fixed at its proper stage".
+- **22 Nov** (§4.1, questions). Asked "Why is SIM and EVQ taking so long?", the coordinator narrowed SIM's scope and
+  split off its long-read attribution without asking; the owner reversed it. Later the owner prefaced a question with
+  "Don't change stuff, just answer my question", and ruled: "don't change anything just off of the basis of questions I
+  ask unless it's obvious I'm asking for a change rhetorically. If something should change, best to confirm with me."
+- **22 Nov** (§2.6, gates). The R4 sampler check froze its pass rule before results. The first fast sampler left one
+  near-tie M0 call (0.15 ± 0.12 nats) unreleased in 2 of 3 seeds, a probe showed it was Monte Carlo noise in the
+  target both samplers share, and the agent still recorded a fail that the coordinator relayed. The owner: "this is
+  obviously an accept, no need to even ask me, we shouldn't be ultra rigid about passing preset gates".
+- **22 Nov** (§4.1 and CLAUDE.md, answers once). The rule to repeat an answer at the top of the final reply, meant for
+  terminals where interim text scrolls away, made the coordinator write most answers twice in the desktop app, which
+  shows interim text. The owner: "I'm seeing various answers twice ... I fear I'm double burning tokens"; they approved
+  removing the rule.
