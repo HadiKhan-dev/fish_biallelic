@@ -34,8 +34,8 @@ the active item's own work, never by opening another front.
    own authorized attempt. Never overwrite accepted results (§5.1, §7.3).
 5. Never test on real AulStu (astcal) data (§3.1).
 6. Use every node already allocated to the owner, whatever its service level [22 Nov]. Request new allocations on
-   SL4-CPU; request SL3-CPU, SL2-CPU or SL3-GPU only when the owner asks at the time; SL3 + SL2 never exceed 448 CPUs.
-   Running SL4 allocations are kept until they expire (§6.2-§6.4).
+   SL4-CPU; request SL3-CPU, SL2-CPU or SL3-GPU only when the owner asks at the time, in the size the owner asks for
+   [24 Nov]. Running SL4 allocations are kept until they expire (§6.2-§6.4).
 7. Whole-genome runs, validation, resume checks and canaries included, use at least one full node (§6.5).
 8. Preserve scientific meaning: never silently change a model, objective, threshold, prior, likelihood, filter or
    biological assumption. "Same results" means scientifically identical, not bit-identical (§2.3).
@@ -51,8 +51,8 @@ the active item's own work, never by opening another front.
 16. The owner's question comes first: answer it at once, on its own, then resume (§4.1).
 17. One front at a time (the cardinal rule above: a second only while the first awaits another agent's review), from
     one ordered queue, first item first (§4.10).
-18. Parallel by default; size each submission to the free cores before submitting (§5.4); a serial section needs
-    recorded evidence (§4.6).
+18. Parallel by default, tests and lab scripts included [26 Nov]; size each submission to the free cores before
+    submitting (§5.4); a serial section needs recorded evidence (§4.6).
 19. Test an estimator's criterion against truth before building its machinery. Every option offered to the owner states
     its cost, its falsifying check and its fallback (§2.6, §4.1).
 
@@ -370,6 +370,11 @@ framework: no wrapper, factory, registry, generalized validator or parallel iden
   components, folds, grid values, replicates, chromosomes) runs in parallel from its first version, through a parallel
   kernel, the package's budgeted thread map or independent scheduler tasks (§4.5, §5.4). Plain Python or NumPy over
   large arrays, or a loop over independent fits, inside a multi-threaded task is single-threaded work.
+- **Tests and lab work too** [26 Nov]: tests, replays, diagnostics, analyses and lab scripts follow the same rule as
+  shipped code. Vectorise over samples, sites and bins (no Python loops over data), fan independent units (contigs,
+  arms, shares, folds) out as parallel tasks or a process pool, and size each task to the cores it actually uses and to
+  the idle capacity: while whole nodes are free, heavy steps take whole nodes and light per-unit steps share a node
+  through a pool. A serial script on a big node, or a narrow task while nodes idle, is a defect of the script.
 - **Serial needs evidence**, recorded with numbers in the progress file and a comment at the code: the parallel version
   was not faster on a realistic unit, a stated dependence makes it sequential, or parallelising changes results beyond
   §2.3.
@@ -611,12 +616,10 @@ unrequested full pipeline, anyone else's jobs.
 
 ### 6.3 Limits
 
-At most 448 allocated CPUs at once across SL3-CPU and SL2-CPU together, counting all the user's jobs with actual CPU
-counts (memory-driven extras, retained allocations, the hosting allocation if on SL3/SL2, pending requests that could
-start together). At the cap, reuse or defer; never cancel unrelated jobs or the hosting allocation to make room. SL4-CPU
-and host CPUs of GPU partitions are outside that cap, but every Slurm limit applies (account, association, QoS,
-partition, resource, walltime, the shared `GrpTRESRunMins` budget of cores x remaining walltime). Read current limits;
-never treat observed free SL4 capacity as a quota. GPU host CPUs must fit the GPU allocation and site limits.
+There is no project cap on SL3-CPU and SL2-CPU CPUs [24 Nov]: a request is sized as the owner asks at the time (§6.2).
+Never cancel unrelated jobs or the hosting allocation to make room. Every Slurm limit applies (account, association,
+QoS, partition, resource, walltime, the shared `GrpTRESRunMins` budget of cores x remaining walltime). Read current
+limits; never treat observed free SL4 capacity as a quota. GPU host CPUs must fit the GPU allocation and site limits.
 
 ### 6.4 SL4 workers
 
@@ -671,8 +674,8 @@ queries, retries); another process, node, account or service level is no separat
   demand: refresh demand from cheap workflow state, count running, pending and in-flight capacity, bound submissions per
   cycle, stop when capacity covers demand. Prefer one demand-sized job array per resource profile. Arrays need an
   array-aware ledger, queue parsing, recovery and cleanup; record array and task identities (elements also have raw job
-  IDs that logs may use), count every element that could run against the limits (site array and job limits, the paid-CPU
-  cap and QoS limits all apply), keep per-element ownership and logs.
+  IDs that logs may use), count every element that could run against the limits (site array and job limits and QoS
+  limits all apply), keep per-element ownership and logs.
 - One coordinator runs routine queries and cleanup with shared snapshots and a launch ledger; group queries and
   cancellations; for bulk cancellation prefer `scancel --ctld` with explicit owned selectors and server-side state
   filters such as `--state=PENDING`, excluding the hosting allocation. Ordinary progress comes from heartbeats and

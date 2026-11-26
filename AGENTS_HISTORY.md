@@ -158,3 +158,14 @@ need not load this file every session. Rules live only in `AGENTS.md`; nothing h
   terminals where interim text scrolls away, made the coordinator write most answers twice in the desktop app, which
   shows interim text. The owner: "I'm seeing various answers twice ... I fear I'm double burning tokens"; they approved
   removing the rule.
+- **24 Nov** (§1.6, §6.3, SL2/SL3 cap removed). Compute ran short during the 4.23 LRP build (SL4 workers expiring, SL4
+  requests pending on priority). The owner asked for four 112-core sapphire SL3 workers for 12 hours; the coordinator
+  submitted two and asked about the rest because four would exceed the 448-CPU SL2 + SL3 cap. The owner: "No, ignore the
+  cap, actually remove the 448 CPU cap in agents.md". SL2/SL3 requests remain the owner's to ask for, in the size asked.
+- **26 Nov** (§4.6, §1.18, tests and lab work parallel). Diagnosing the 4.23 foreign-share discontinuity, the
+  coordinator ran a lab classification script as a single-threaded Python loop over 60 samples x 13,128 bins on one
+  contig in a 12-core task, then a half-vectorised version at 8 cores, while whole paid nodes sat idle; earlier the
+  release runner had capped each arm at 2 active tasks and run per-contig steps at 0.1-0.4 core use on 76-core nodes.
+  The owner: "vectorise everything properly, even for your tests", "why are you submitting over 8 cores when we have
+  whole massive nodes idle???", and "Add something to agents.md that all tests must be properly parallelized as well
+  for the future".
