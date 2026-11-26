@@ -237,6 +237,7 @@ def run_contig(
     batch_samples: int | None = None,
     emission_cache_bytes: int = EMISSION_CACHE_MAX_BYTES,
     census: bool = False,
+    read_setup: Any = None,
 ) -> Painting:
     """Resume or execute model -> continuity -> decode -> release; publish product last."""
     complete = {records.PAINTING: expected, records.SUMMARY: expected, records.IDENTITY: expected}
@@ -258,7 +259,7 @@ def run_contig(
                 unit_batches=True,
                 # the reference painting reads the label-error statistic at its own strength (deferred matrices: the
                 # fine painting never builds them)
-                label_correlation=LABEL_ERROR_CORRELATION,
+                label_correlation=LABEL_ERROR_CORRELATION, read_setup=read_setup,
             )
         return builders["builder"]
     with claim(file, records.PAINTING, expected, blocking=False) as needed:
@@ -379,14 +380,15 @@ def run(
     expected = records.expected(store, reader.manifest, product="painting", contig=contig).identity
     from .read_state import effective_painting
 
+    # The painting carries the calibrated route so its consumers take the same route.
+    parameters = effective_painting(resolved.parameters.painting, calibration)
+    read_setup = calibration_records.read_setup(store, reader.manifest, contig) if parameters.read_classes > 1 else None
     run_contig(
         file,
         expected,
         (assembly.prepared, assembly.components),
         working_maps(store, reader.manifest, maps).for_contig(contig),
-        # read_classes = 1 when the calibration recorded no library of the run sharing reads (the painting carries
-        # the parameters it was made with, so its consumers take the same route)
-        effective_painting(resolved.parameters.painting, calibration),
+        parameters,
         evidence_identity=evidence_id,
         payload_identity=payload,
         robustness_epsilon=calibration["robustness_epsilon"],
@@ -396,6 +398,7 @@ def run(
         threads=team,
         max_threads=cores,
         census=ties.census is not None,
+        read_setup=read_setup,
     )
     identities = {RecordKey(contig, key): expected for key in (
         records.PAINTING, records.SUMMARY, records.IDENTITY

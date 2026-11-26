@@ -490,4 +490,4 @@ OVERLOADS["read_forward.score_path"] = tuple(
 _m1_path = (types.int64, types.int64, types.literal(0), types.literal(1))
 OVERLOADS["read_forward.score_path"] = tuple(dict.fromkeys(
     OVERLOADS["read_forward.score_path"]
-    + tuple(_m1_path + sig[1:] for sig in RELATIVE_OVERLOADS["relatives._m1_pairs"])))
+    + tuple(_m1_path + sig[1:-1] for sig in RELATIVE_OVERLOADS["relatives._m1_pairs"])))

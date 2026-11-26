@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 FINAL_STAGES = frozenset({"pedigree", "phase", "recombination", "export"})
 ANALYSIS_STAGES = FINAL_STAGES | {
     "observation_fits", "observation", "relatedness", "discovery", "selection", "assembly",
-    "calibration_robustness", "calibration_refine", "calibration_outlier",
+    "calibration_robustness", "calibration_refine", "calibration_outlier", "calibration_share",
     "calibration_divisor_fit", "calibration_divisor", "calibration",
     "painting", "contamination_cells", "contamination",
     "refit_histogram", "refit_priors", "refit", "repaint", "release",

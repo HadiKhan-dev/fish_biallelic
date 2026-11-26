@@ -2,7 +2,7 @@
 
 from numba import types
 
-from .read_layout import _CACHE_ARGUMENT, _READ_TERMS, _reset, _width, extend
+from .read_layout import _CACHE_ARGUMENT, _I64_1, _READ_TERMS, _reset, _width, extend
 
 OVERLOADS = {
     "read_score._dyads": (
@@ -243,6 +243,14 @@ for _name, _signatures in _T2_OBSERVED.items():
 OVERLOADS["read_score._m0_kernel"] = tuple(
     sig[:23] + (_reset, _width) + sig[23:] for sig in OVERLOADS["read_score._m0_kernel"])
 OVERLOADS["read_score._m2_kernel"] = tuple(
-    sig[:25] + (_reset, _width) + sig[25:] for sig in OVERLOADS["read_score._m2_kernel"])
+    sig[:1] + (mask,) + sig[1:25] + (_reset, _width) + sig[25:]
+    for sig in OVERLOADS["read_score._m2_kernel"]
+    for mask in (types.boolean[::1], types.Array(types.boolean, 1, "C", readonly=True)))
 OVERLOADS["read_score._dyads"] = tuple(
     sig[:27] + (_reset, _width) + sig[27:] for sig in OVERLOADS["read_score._dyads"])
+
+
+# M2's scalar fallback uses the same balanced static team assignment as the tile route.
+OVERLOADS["read_score._m2_kernel"] = tuple(
+    (signature[0], _I64_1, _I64_1) + signature[1:] for signature in OVERLOADS["read_score._m2_kernel"]
+)

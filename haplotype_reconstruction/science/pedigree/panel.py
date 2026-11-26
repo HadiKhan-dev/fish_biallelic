@@ -3,8 +3,8 @@
 Every eligible pair of a child's genome-retained M1 parents enters the panel: there is no relevance screen, so for a
 child within ``PanelParameters.max_pairs_per_child`` the M2 evidence covers every retained pair in every fit (the
 full data, each bootstrap draw and each leave-one-unit-out fit). A child with more pairs keeps those with the largest
-full-data pair bound (``pair_bound``, summed over contigs; no chromosome or unit structure enters the ranking), every
-pair tied with the last kept one and every pair whose bound is not a number; it is flagged, because the cap can drop
+full-data M2 likelihood key (``pair_bound``, summed over contigs; no chromosome or unit structure enters the ranking), every
+pair tied with the last kept one and every pair whose key is indeterminate; it is flagged, because the cap can drop
 a competitive pair. Pairs outside the panel contribute nothing to M2 evidence, which is then a lower bound. The
 robust M1 utility keeps all eligible identities, floor multiplicities and contamination; it is reported for
 diagnostics and does not select an arbitrary tied subset.
@@ -80,7 +80,7 @@ def robust_screen_values(
 
 def _genome_sums(values: np.ndarray) -> np.ndarray:
     """float64 [P]: the full-data sums of the chromosome rows of values [C, P] (rows are the per-contig storage of the
-    pair bounds), added in configured contig order. A sum meeting +inf and -inf is NaN."""
+    M2 keys), added in configured contig order. A sum meeting +inf and -inf is NaN."""
     out = np.zeros(values.shape[1])
     with np.errstate(invalid="ignore"):
         for row in values:
@@ -98,9 +98,9 @@ def bounded_panel(
     """The capped retained-parent pairs, and counts for the log.
 
     ``compact`` the certified M1 profile (the retained parents of each child), ``bounds`` [C, P] each chromosome's
-    pair bounds in the canonical retained-pair order (``pair_bound_screen.retained_batches``). Every eligible pair of a
+    M2 keys in the canonical retained-pair order (``pair_bound_screen.retained_batches``). Every eligible pair of a
     child's retained parents enters. When a child has more than the nominal per-child cap, it keeps the pairs with
-    the largest full-data bound sum_c bound (an upper bound on the pair's full-data M2), including every pair tied with
+    the largest sum of chromosome M2 keys, including every pair tied with
     the last kept one and every pair whose sum is not a number (a numerical failure is never evidence for exclusion).
     A capped child's panel is incomplete: the cap has no competitive-pair exclusion guarantee. Membership depends
     only on scores and eligibility; rows are serialized by child, then by ascending parent indices.
@@ -125,8 +125,7 @@ def bounded_panel(
         if len(trio) > cap:
             # cast: NumPy 2.5's stubs type signedinteger[32 | 64] + 1 as float64; it is an intp.
             bound = np.asarray(bounds[:, offsets[child] : offsets[cast(np.intp, child + 1)]], dtype=np.float64)
-            # The best pairs by their full-data bound (a bound that is not a number ranks first), with every pair tied
-            # at the last kept bound.
+            # A NaN key ranks first. Keep every pair tied at the cap.
             total = _genome_sums(bound)
             best = np.where(np.isnan(total), np.inf, total)[allowed]
             trio = trio[best >= np.sort(best)[len(best) - cap]]

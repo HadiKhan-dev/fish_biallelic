@@ -3,7 +3,18 @@
 from numba import types
 
 from .read_chain import _PATH_OVERLOADS
-from .read_layout import _CACHE_ARGUMENT, _F64_2, _I64_1, _I64_2, _READ_TAILS, _READ_TERMS, _reset, _width, extend
+from .read_layout import (
+    _CACHE_ARGUMENT,
+    _F64_2,
+    _F64_4,
+    _I64_1,
+    _I64_2,
+    _READ_TAILS,
+    _READ_TERMS,
+    _reset,
+    _width,
+    extend,
+)
 
 OVERLOADS = {
     "transmission._log_likelihood": (
@@ -104,12 +115,19 @@ OVERLOADS["read_block_forward.score_block_rows"] = tuple(
 # read_block_forward._score_tile (a tile of score_block_rows): (resolved rows, start, stop, block axis) + the blocks
 # chain's model, cache and read arguments + the scores output float64 [R, H]
 OVERLOADS["read_block_forward._score_tile"] = tuple(dict.fromkeys(
-    (_I64_2, types.int64, types.int64, signature[26], signature[27]) + tuple(signature[4:26]) + tuple(signature[28:33])
+    (_I64_2, types.int64, types.int64, signature[26], signature[27]) + tuple(signature[4:24])
+    + (products, signature[25]) + tuple(signature[28:33])
     + (_F64_2,)
-    for signature in _path_blocks))
+    for signature in _path_blocks for products in (types.none, _F64_4)))
 
 
 OVERLOADS["read_block_forward.score_block_rows"] = tuple(
-    sig[:27] + (_reset, _width) + sig[27:] for sig in OVERLOADS["read_block_forward.score_block_rows"])
+    sig[:27] + (_reset, _width) + sig[27:] + (products,)
+    for sig in OVERLOADS["read_block_forward.score_block_rows"]
+    for products in (types.none, types.Omitted(None), _F64_4))
 OVERLOADS["read_block_forward._score_tile"] = tuple(
     sig[:29] + (_reset, _width) + sig[29:] for sig in OVERLOADS["read_block_forward._score_tile"])
+
+# The block wrapper takes the live team size and immutable child work before the block axis.
+OVERLOADS["read_block_forward.score_block_rows"] = tuple(
+    sig[:2] + (types.int64, _I64_1) + sig[2:] for sig in OVERLOADS["read_block_forward.score_block_rows"])

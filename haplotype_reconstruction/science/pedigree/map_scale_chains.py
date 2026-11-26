@@ -27,6 +27,7 @@ import numpy as np
 from numba import prange, types
 
 from ...core.kernels import kernel
+from .map_scale_operators import OPERATOR_INPUTS, frame_action, native_inputs
 
 __all__ = ["frame_loglik", "target_loglik", "target_posterior", "error_run_loglik"]
 
@@ -82,14 +83,14 @@ def _tiles(lengths: np.ndarray, per: int) -> tuple[np.ndarray, np.ndarray]:
     return units, offsets
 
 
-@kernel(overloads=((_i64_1, _f1, _f4, _f2, _f1, _f1, _i64_1, _i64_1),), cache=True, parallel=True, nogil=True)
-def _frame_loglik_tiles(offsets, pos, em, entry, r_grid, delta_grid, units, tile_offsets):
+@kernel(overloads=tuple((_i64_1, _f1, _f4, _f2, _f1, _f1, _i64_1, _i64_1, operators) for operators in (types.none, OPERATOR_INPUTS)), cache=True, parallel=True, nogil=True)
+def _frame_loglik_tiles(offsets, pos, em, entry, r_grid, delta_grid, units, tile_offsets, operators=None):
     """4-state chain of a sib's two transmissions (independent homologue bits flipping at 1 per Morgan) with the read
     class carried, on each frame sequence [S, R, D]: em[x, :4] the configurations' transfer matrices (states 00, 01,
     10, 11), em[x, 4] the misfit matrix mixed in at weight delta; entry[x] the class law where a sequence starts."""
     S = len(offsets) - 1
     R = len(r_grid)
-    C = em.shape[2]
+    C = entry.shape[1]
     out = np.zeros((S, R, len(delta_grid)))
     # one unit per (sequence, rate), the units dealt to balanced tiles (_tiles); a unit's arithmetic is the same
     # whatever the thread count or tiling
@@ -100,6 +101,8 @@ def _frame_loglik_tiles(offsets, pos, em, entry, r_grid, delta_grid, units, tile
             ri = cell % R
             lo = offsets[s]
             hi = offsets[s + 1]
+            vectors = np.empty((3, C))
+            scratch = np.empty((4, C))
             a = np.empty((4, C))
             w = np.empty((4, C))
             rate = r_grid[ri] * 1e-8
@@ -124,12 +127,8 @@ def _frame_loglik_tiles(offsets, pos, em, entry, r_grid, delta_grid, units, tile
                             a[3, c] = q * b2 + st * b3
                     tot = 0.0
                     for k in range(4):
-                        for j in range(C):
-                            v = 0.0
-                            for i in range(C):
-                                v += a[k, i] * ((1.0 - dl) * em[x, k, i, j] + dl * em[x, _MISFIT_5, i, j])
-                            w[k, j] = v
-                            tot += v
+                        frame_action(em, operators, x, k, _MISFIT_5, dl, a[k], w[k], vectors, scratch, False)
+                        tot += w[k].sum()
                     ll += math.log(tot)
                     for k in range(4):
                         for j in range(C):
@@ -141,7 +140,8 @@ def _frame_loglik_tiles(offsets, pos, em, entry, r_grid, delta_grid, units, tile
 def frame_loglik(offsets, pos, em, entry, r_grid, delta_grid):
     """[S, R, D] log-likelihoods of _frame_loglik_tiles, its (sequence, rate) units in balanced tiles."""
     units, tile_offsets = _tiles(np.diff(offsets), len(r_grid))
-    return _frame_loglik_tiles(offsets, pos, em, entry, r_grid, delta_grid, units, tile_offsets)
+    em, operators = native_inputs(em)
+    return _frame_loglik_tiles(offsets, pos, em, entry, r_grid, delta_grid, units, tile_offsets, operators)
 
 
 @kernel(overloads=((_f2, types.float64, types.float64, types.float64),), cache=True, nogil=True)
@@ -202,9 +202,9 @@ def _track_step(a, T1, T2, tmp):
                 a[5 * v1 + v2, c] = acc
 
 
-@kernel(overloads=((_i64_1, _f1, _f4, _f2, types.float64, types.float64, _f1, _f1, _i64_1, _i64_1),), cache=True,
+@kernel(overloads=tuple((_i64_1, _f1, _f4, _f2, types.float64, types.float64, _f1, _f1, _i64_1, _i64_1, operators) for operators in (types.none, OPERATOR_INPUTS)), cache=True,
         parallel=True, nogil=True)
-def _target_loglik_tiles(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_grid, units, tile_offsets):
+def _target_loglik_tiles(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_grid, units, tile_offsets, operators=None):
     """Target relationship chain of each frame sequence [S, Ein, Eout], the read class carried. Track 1 symbols: 0, 1 =
     parent-0 classes (its full-sib symbols), 2, 3 = parent-1 classes, 4 = any class outside the four; track 2:
     full-sib symbols 2, 3. A full-sib symbol flips to the other with the Haldane probability q, leaves to each
@@ -214,7 +214,7 @@ def _target_loglik_tiles(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_
     S = len(offsets) - 1
     NI = len(ein_grid)
     NO = len(eout_grid)
-    C = em25.shape[2]
+    C = entry.shape[1]
     out = np.zeros((S, NI, NO))
     rate = rate_cm * 1e-8
     # one unit per (sequence, entry rate), in balanced tiles (as frame_loglik's units)
@@ -225,6 +225,8 @@ def _target_loglik_tiles(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_
             ii = cell % NI
             lo = offsets[s]
             hi = offsets[s + 1]
+            vectors = np.empty((3, C))
+            scratch = np.empty((4, C))
             T1 = np.zeros((5, 5))
             T2 = np.zeros((5, 5))
             a = np.zeros((25, C))
@@ -253,12 +255,8 @@ def _target_loglik_tiles(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_
                         _track_step(a, T1, T2, tmp)
                     tot = 0.0
                     for k in range(25):
-                        for j in range(C):
-                            v = 0.0
-                            for i in range(C):
-                                v += a[k, i] * ((1.0 - dl) * em25[x, k, i, j] + dl * em25[x, _MISFIT_25, i, j])
-                            w[k, j] = v
-                            tot += v
+                        frame_action(em25, operators, x, k, _MISFIT_25, dl, a[k], w[k], vectors, scratch, False)
+                        tot += w[k].sum()
                     ll += math.log(tot)
                     for k in range(25):
                         for j in range(C):
@@ -270,16 +268,17 @@ def _target_loglik_tiles(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_
 def target_loglik(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_grid):
     """[S, Ein, Eout] log-likelihoods of _target_loglik_tiles, its (sequence, entry rate) units in balanced tiles."""
     units, tile_offsets = _tiles(np.diff(offsets), len(ein_grid))
-    return _target_loglik_tiles(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_grid, units, tile_offsets)
+    em25, operators = native_inputs(em25)
+    return _target_loglik_tiles(offsets, pos, em25, entry, rate_cm, dl, ein_grid, eout_grid, units, tile_offsets, operators)
 
 
-@kernel(overloads=((_i64_1, _f1, _f4, _f2, types.float64, types.float64, types.float64, types.float64, _i64_1,
-                    _i64_1),), cache=True, parallel=True, nogil=True)
-def _target_posterior_tiles(offsets, pos, em25, entry, rate_cm, dl, ein, eout, units, tile_offsets):
+@kernel(overloads=tuple((_i64_1, _f1, _f4, _f2, types.float64, types.float64, types.float64, types.float64, _i64_1,
+                    _i64_1, operators) for operators in (types.none, OPERATOR_INPUTS)), cache=True, parallel=True, nogil=True)
+def _target_posterior_tiles(offsets, pos, em25, entry, rate_cm, dl, ein, eout, units, tile_offsets, operators=None):
     """Posterior probability [X] that the target's pair at each frame is not a full-sib configuration (one class of
     each parent), the read class summed, under the relationship chain of target_loglik at (r, delta, e_in, e_out)."""
-    X = em25.shape[0]
-    C = em25.shape[2]
+    X = len(pos)
+    C = entry.shape[1]
     out = np.zeros(X)
     rate = rate_cm * 1e-8
     fsconf = np.zeros(25, np.bool_)
@@ -295,6 +294,8 @@ def _target_posterior_tiles(offsets, pos, em25, entry, rate_cm, dl, ein, eout, u
             lo = offsets[s]
             hi = offsets[s + 1]
             n = hi - lo
+            vectors = np.empty((3, C))
+            scratch = np.empty((4, C))
             T1 = np.zeros((5, 5))
             T2 = np.zeros((5, 5))
             fwd = np.zeros((n, 25, C))
@@ -316,12 +317,8 @@ def _target_posterior_tiles(offsets, pos, em25, entry, rate_cm, dl, ein, eout, u
                     _track_step(a, T1, T2, tmp)
                 tot = 0.0
                 for k in range(25):
-                    for j in range(C):
-                        v = 0.0
-                        for c in range(C):
-                            v += a[k, c] * ((1.0 - dl) * em25[x, k, c, j] + dl * em25[x, _MISFIT_25, c, j])
-                        w[k, j] = v
-                        tot += v
+                    frame_action(em25, operators, x, k, _MISFIT_25, dl, a[k], w[k], vectors, scratch, False)
+                    tot += w[k].sum()
                 for k in range(25):
                     for j in range(C):
                         a[k, j] = w[k, j] / tot
@@ -343,11 +340,7 @@ def _target_posterior_tiles(offsets, pos, em25, entry, rate_cm, dl, ein, eout, u
                 if i > 0:
                     # cv(v, c) = sum_c' E_x(v)[c, c'] bw(v, c'); bw(u, c) <- sum_v A(u, v) cv(v, c)
                     for k in range(25):
-                        for c in range(C):
-                            v = 0.0
-                            for j in range(C):
-                                v += ((1.0 - dl) * em25[x, k, c, j] + dl * em25[x, _MISFIT_25, c, j]) * bw[k, j]
-                            cv[k, c] = v
+                        frame_action(em25, operators, x, k, _MISFIT_25, dl, bw[k], cv[k], vectors, scratch, True)
                     q = 0.5 * (1.0 - math.exp(-2.0 * (pos[x] - pos[x - 1]) * rate))
                     _first_track_transition(T1, q, ein, eout)
                     _second_track_transition(T2, q, ein, eout)
@@ -375,13 +368,14 @@ def _target_posterior_tiles(offsets, pos, em25, entry, rate_cm, dl, ein, eout, u
 def target_posterior(offsets, pos, em25, entry, rate_cm, dl, ein, eout):
     """[X] posteriors of _target_posterior_tiles, its sequences in balanced tiles."""
     units, tile_offsets = _tiles(np.diff(offsets), 1)
-    return _target_posterior_tiles(offsets, pos, em25, entry, rate_cm, dl, ein, eout, units, tile_offsets)
+    em25, operators = native_inputs(em25)
+    return _target_posterior_tiles(offsets, pos, em25, entry, rate_cm, dl, ein, eout, units, tile_offsets, operators)
 
 
-@kernel(overloads=((_i64_1, _f1, _f4, _f2, _i64_1, types.int64, _f1, types.float64, _f1, _f1, _i64_1, _i64_1),),
+@kernel(overloads=tuple((_i64_1, _f1, _f4, _f2, _i64_1, types.int64, _f1, types.float64, _f1, _f1, _i64_1, _i64_1, operators) for operators in (types.none, OPERATOR_INPUTS)),
         cache=True, parallel=True, nogil=True)
 def _error_run_loglik_tiles(offsets, pos, em, entry, segment, n_segments, r_grid, dl, eps_grid, xi_grid, units,
-                            tile_offsets):
+                            tile_offsets, operators=None):
     """Error-run chain log-likelihood of every frame sequence, split into its segments [n_segments, R, E, X], the read
     class carried.
 
@@ -399,7 +393,7 @@ def _error_run_loglik_tiles(offsets, pos, em, entry, segment, n_segments, r_grid
     R = len(r_grid)
     E = len(eps_grid)
     X = len(xi_grid)
-    C = em.shape[2]
+    C = entry.shape[1]
     out = np.zeros((n_segments, R, E, X))
     # one unit per (sequence, rate), in balanced tiles (as frame_loglik's units); a unit writes only its sequence's
     # segments at its rate
@@ -414,6 +408,8 @@ def _error_run_loglik_tiles(offsets, pos, em, entry, segment, n_segments, r_grid
                 continue
             seg_lo = segment[lo]
             seg_hi = segment[hi - 1] + 1
+            vectors = np.empty((3, C))
+            scratch = np.empty((4, C))
             a = np.zeros((16, C))
             b = np.zeros((16, C))
             P = np.zeros((4, 4))
@@ -464,13 +460,8 @@ def _error_run_loglik_tiles(offsets, pos, em, entry, segment, n_segments, r_grid
                                     a[k, c] = b[k, c]
                         tot = 0.0
                         for k in range(16):
-                            g = k % 4
-                            for j in range(C):
-                                v = 0.0
-                                for i in range(C):
-                                    v += a[k, i] * ((1.0 - dl) * em[x, g, i, j] + dl * em[x, _MISFIT_5, i, j])
-                                b[k, j] = v
-                                tot += v
+                            frame_action(em, operators, x, k % 4, _MISFIT_5, dl, a[k], b[k], vectors, scratch, False)
+                            tot += b[k].sum()
                         out[segment[x], ri, ei, xj] += math.log(tot)
                         for k in range(16):
                             for j in range(C):
@@ -482,5 +473,6 @@ def error_run_loglik(offsets, pos, em, entry, segment, n_segments, r_grid, dl, e
     """[n_segments, R, E, X] segment log-likelihoods of _error_run_loglik_tiles, its (sequence, rate) units in
     balanced tiles."""
     units, tile_offsets = _tiles(np.diff(offsets), len(r_grid))
+    em, operators = native_inputs(em)
     return _error_run_loglik_tiles(offsets, pos, em, entry, segment, n_segments, r_grid, dl, eps_grid, xi_grid, units,
-                                   tile_offsets)
+                                  tile_offsets, operators)

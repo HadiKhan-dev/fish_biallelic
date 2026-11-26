@@ -493,4 +493,4 @@ for _name, _signatures in _T2_OBSERVED.items():
 OVERLOADS["read_bounds.class_bound_matrices"] = tuple(
     sig[:13] + (_reset,) + sig[13:] for sig in OVERLOADS["read_bounds.class_bound_matrices"])
 OVERLOADS["read_bounds.pair_bounds_classes"] = tuple(
-    sig[:12] + (_width,) + sig[12:] for sig in OVERLOADS["read_bounds.pair_bounds_classes"])
+    sig[:12] + (_width,) + sig[12:] + (types.int64,) for sig in OVERLOADS["read_bounds.pair_bounds_classes"])

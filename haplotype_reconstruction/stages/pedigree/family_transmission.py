@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-
 import numpy as np
 
 from ...contracts.pedigree import PreparedChromosome, TransmissionEvidence, TransmissionRequest
 from ...core.errors import InputError
-from ...engine.cpu import thread_team
+from ...engine.cpu import CpuBudget, current_budget, thread_team
 from ...science.pedigree import family_transmission as science
 from ...science.pedigree import junctions
 from ...science.pedigree.numerical_parameters import TRANSMISSION_SWITCH_FLOOR
@@ -19,17 +17,19 @@ PREPARED = "pedigree/prepared"
 
 
 def _mapper(width: int):
-    """The vote's map factory (science.pedigree.family_models.Mapper): map(function, items) -> list in input order, on
-    up to ``width`` threads. The fits release the interpreter lock and write no array they share."""
+    """Ordered map for direct callers with an explicit fixed thread budget."""
+    return CpuBudget.fixed(width).thread_map
 
-    def threaded(function, items):
-        items = list(items)
-        if len(items) <= 1 or width <= 1:
-            return [function(item) for item in items]
-        with ThreadPoolExecutor(min(width, len(items))) as pool:
-            return list(pool.map(function, items))
 
-    return threaded
+def _concurrent(function, items):
+    """Use live child CPU shares, restoring the caller's input order."""
+    jobs = [lambda share, item=item: function(item) for item in items]
+    values = dict(current_budget().concurrent(jobs, label="family transmission"))
+    return [values[i] for i in range(len(jobs))]
+
+
+def _fit_map(function, items):
+    return current_budget().thread_map(function, items, label="family transmission starts")
 
 
 def run(
@@ -53,41 +53,34 @@ def run(
     delta = parameters.direction.mismatch_probability  # the floor of every label's allowance (science.member_allowances)
     plans = [science.component_plan(schedule, theta, parameters) for schedule, theta in parts]
     edges = range(len(request.parents))
+    members = tuple(
+        (int(request.parents[e]), int(request.children[e]),
+         *map(int, request.members[request.offsets[e]:request.offsets[e + 1]]))
+        for e in edges
+    )
+    jobs = [(e, c, u) for e in edges for c, plan in enumerate(plans) if plan is not None for u in range(len(plan[2]))]
 
-    def members(e: int) -> tuple[int, ...]:
-        return (int(request.parents[e]), int(request.children[e]),
-                *map(int, request.members[request.offsets[e]:request.offsets[e + 1]]))
-
-    # Every segment of every component of every edge is fitted independently (science.segment_unit), each on one
-    # thread. Mapped over edges only, a contig with one or two requested edges fitted all their segments in sequence
-    # on one thread of its team (a sibling-rich cross: 1 of 19 threads busy for the whole task, while the stage's
-    # one-CPU resampling tasks waited for the CPUs this task held).
-    jobs = [
-        (e, c, u) for e in edges for c, plan in enumerate(plans) if plan is not None for u in range(len(plan[2]))
-    ]
-
-    # A contig often has only a few segments (one requested edge and two 1-Morgan segments on a sibling-rich cross):
-    # the threads left over serve the independent fits inside each segment's search (the family transmission model search).
-    width = max(1, int(threads) // max(1, len(jobs)))
+    def work(job: tuple[int, int, int]) -> int:
+        e, c, u = job
+        _, offsets, _ = plans[c]
+        return len(members[e]) * int(offsets[u + 1] - offsets[u])
 
     def fit(job: tuple[int, int, int]) -> tuple[float, float, float]:
         e, c, u = job
         schedule, theta = parts[c]
         return science.segment_unit(
-            schedule, plans[c], theta, members(e), u, parameters, delta, TRANSMISSION_SWITCH_FLOOR, width=width,
-            mapper=_mapper,
+            schedule, plans[c], theta, members[e], u, parameters, delta, TRANSMISSION_SWITCH_FLOOR,
+            map_searches=_concurrent, map_fits=_fit_map,
         )
 
-    with thread_team(default=1):
-        workers = min(max(1, int(threads)), len(jobs))
-        if workers <= 1:
-            values = [fit(job) for job in jobs]
-        else:
-            with ThreadPoolExecutor(workers) as pool:
-                values = list(pool.map(fit, jobs))
+    # Advance the most expensive segments first. The shared engine grants
+    # their search orders spare CPUs for native starts as other jobs finish.
+    ordered = sorted(jobs, key=work, reverse=True)
+    with thread_team(default=threads):
+        values = dict(zip(ordered, _concurrent(fit, ordered), strict=True))
     fitted: dict[int, list[tuple[float, float, float]]] = {e: [] for e in edges}
-    for (e, _, _), value in zip(jobs, values, strict=True):
-        fitted[e].append(value)
+    for job in jobs:
+        fitted[job[0]].append(values[job])
     morgans = [plan[2] for plan in plans if plan is not None]
     lengths = np.concatenate(morgans) if morgans else np.zeros(0)
     results = [(np.asarray(fitted[e], dtype=np.float64).reshape(-1, 3), lengths) for e in edges]
@@ -117,7 +110,6 @@ def task(
         run,
         args=(prepared, parameters, request),
         inputs=(RecordKey(prepared.contig, PREPARED),),
-        affinity=prepared.contig,
-        resources=ResourceRequest(max_cores=cores),
+        resources=ResourceRequest(max_cores=cores, width=cores),
         thread_argument="threads",
     )

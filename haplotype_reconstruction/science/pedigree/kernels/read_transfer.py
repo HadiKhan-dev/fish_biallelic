@@ -9,7 +9,8 @@ OVERLOADS = {}
 _GL_ROWS = (_F64_1, types.Array(types.float64, 1, "C", readonly=True))
 OVERLOADS.update({
     "child_reads._fill": tuple(
-        (_F64_4, _F64_3, _F64_4, _F64_3, _F64_2, types.float64, _I64_1, observed, _I64_1, _F32_3, _F32_3)
+        (_F64_4, _F64_3, _F64_4, _F64_3, _F64_2, types.float64, _I64_1, observed, _I64_1, _F32_3, _F32_3,
+         _F64_2, _F64_3, _F64_1, _F64_1, _F64_2, _F64_2)
         for observed in (_BOOL_2, types.Array(types.boolean, 2, "C", readonly=True))),
     "read_transfer.read_ratio": tuple((_F64_1, _F32_3, types.int64, types.float64, types.float64, gl)
                                      for gl in _GL_ROWS),
@@ -26,9 +27,9 @@ OVERLOADS["read_transfer.carry_bin"] = tuple(
     sig[:15] + (_reset, _width) + sig[15:] for sig in OVERLOADS["read_transfer.carry_bin"])
 
 
-OVERLOADS["child_reads.class_layout"] = ((
-    types.Array(types.float32, 3, "C"), types.Array(types.int64, 1, "C"), _width, _width,
-),)
+OVERLOADS["child_reads.class_layout"] = tuple((
+    types.Array(types.float32, 3, "C"), types.Array(types.int64, 1, "C"), _width, _width, count,
+) for count in (types.int64, types.Omitted(0)))
 OVERLOADS["read_transfer.multiply_classes"] = ((
     types.Array(types.float64, 2, "C"), types.Array(types.float32, 2, "C"), types.Array(types.float64, 1, "C"),
     types.Array(types.float64, 2, "C"), types.int64, types.boolean,
@@ -54,3 +55,12 @@ OVERLOADS["read_transfer._carry_bin"] = tuple(
     for layout in _carry_layouts
     for cache in (types.none, types.Array(types.float64, 6, "C"))
 )
+
+OVERLOADS["read_transfer._carry_background"] = tuple(
+    (_F64_3, _F64_3, _F64_1, types.int64, types.int64, types.int64, ca, state, gl, site,
+     _reset, _F32_3, _F32_3, *(types.int64,) * 5)
+    for ca, state, gl, site, _, _ in _carry_layouts
+)
+# Every pair of an uncached structured bin in class planes: the background carrier's arguments without its factor.
+OVERLOADS["read_transfer._carry_lanes"] = tuple(
+    sig[:2] + sig[3:] for sig in OVERLOADS["read_transfer._carry_background"])

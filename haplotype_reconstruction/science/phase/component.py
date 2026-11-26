@@ -104,12 +104,20 @@ class PhaseWorkspace:
         "diagnostic", units="1", dtype="Callable[[int, np.ndarray], None] | None", stored=False, default=None
     )
 
+    corrected_rows: tuple[int, ...] = record_field(
+        "diagnostic", units="sample indices", dtype="tuple[int, ...]", stored=False, default=()
+    )
 
-def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False, windowed: bool = False) -> np.ndarray:
+
+def component_emissions(
+    inputs: PhaseComponentInputs, *, recompute: bool = False, windowed: bool = False,
+    corrected_rows: tuple[int, ...] = (),
+) -> np.ndarray:
     """Return float64[N,S,S,M] tempered emissions; mutate no input (FP01).
 
-    The painting's packed cache is optional. Without it (or with recompute) the same complete bins are recomputed
-    with the painting's own kernel and design effect. Resident: all samples and sites at once. Windowed: one sample
+    The packed cache uses the original likelihoods. Refresh corrected rows using their new likelihoods and
+    informative-site design weights at painting's confidence strength. Without the cache (or with recompute),
+    recompute all rows. Resident: all samples and sites at once. Windowed: one sample
     at a time, in runs of complete reference windows spanning at most SITE_WINDOW sites (a reference window
     longer than that is read whole), so only one sample's window of evidence is ever copied. Every bin's emission
     and design effect depend only on that sample's sites in its reference window, so both routes give the same values.
@@ -117,12 +125,20 @@ def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False
     painted = inputs.painting
     samples = len(inputs.observations.sample_ids)
     states = painted.states.n_states
+    cached = None
     if painted.packed_emissions is not None and not recompute:
-        return unpack_emissions(painted.packed_emissions, states).reshape(samples, states, states, -1)
+        cached = unpack_emissions(painted.packed_emissions, states)
+        if not corrected_rows:
+            return cached.reshape(samples, states, states, -1)
     selected = np.searchsorted(inputs.observations.positions, painted.states.positions)
     probabilities = state_alt_probabilities(painted.states.named_alleles, painted.states.background_frequency)
+    if cached is not None:
+        _fill_windowed_emissions(inputs, selected, probabilities, corrected_rows, cached)
+        return cached.reshape(samples, states, states, -1)
     if windowed:
-        return _windowed_emissions(inputs, selected, probabilities).reshape(samples, states, states, -1)
+        emissions = np.empty((samples, states**2, len(painted.bins.starts)), dtype=np.float64)
+        _fill_windowed_emissions(inputs, selected, probabilities, range(samples), emissions)
+        return emissions.reshape(samples, states, states, -1)
     gl, observed = gather_sites(inputs.observations.likelihoods, inputs.observations.observed, selected)
     gl = mix_window(gl, inputs.observations.cohort_frequencies[selected], painted.robustness_epsilon)
     emissions = binned_emissions(
@@ -140,15 +156,16 @@ def component_emissions(inputs: PhaseComponentInputs, *, recompute: bool = False
     return emissions.reshape(samples, states, states, -1)
 
 
-def _windowed_emissions(inputs: PhaseComponentInputs, selected: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
-    """float64[N, S*S, M] emissions recomputed one sample and one run of whole bins at a time."""
+def _fill_windowed_emissions(
+    inputs: PhaseComponentInputs, selected: np.ndarray, probabilities: np.ndarray,
+    rows: tuple[int, ...] | range, emissions: np.ndarray,
+) -> None:
+    """Fill selected rows, one sample and one run of complete reference windows at a time."""
     painted = inputs.painting
-    samples = len(inputs.observations.sample_ids)
     starts, stops = painted.bins.starts, painted.bins.stops
     background = painted.states.background_frequency
-    emissions = np.empty((samples, painted.states.n_states**2, len(starts)), dtype=np.float64)
     group = painted.bins_per_reference_window
-    for n in range(samples):
+    for n in rows:
         first = 0
         while first < len(starts):
             last = min(first + group, len(starts))
@@ -178,7 +195,6 @@ def _windowed_emissions(inputs: PhaseComponentInputs, selected: np.ndarray, prob
             ]
             emissions[n : n + 1, :, first:last] = raw
             first = last
-    return emissions
 
 
 def _solve_one(model, map_work=None):
@@ -401,7 +417,7 @@ def _phase_component(inputs, parameters, workspace):
     rates = edge_rates(inputs.painting, inputs.genetic_map, parameters)
 
     def solve():
-        emissions = component_emissions(inputs, windowed=workspace.windowed)
+        emissions = component_emissions(inputs, windowed=workspace.windowed, corrected_rows=workspace.corrected_rows)
         if workspace.apply_read_state is not None:
             workspace.apply_read_state(inputs.component, emissions)
         return _solve_models(inputs, parameters, emissions, rates, workspace.map_work, workspace.concurrent)

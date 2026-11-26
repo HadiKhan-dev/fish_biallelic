@@ -183,6 +183,8 @@ def _convert(kind: str, value, where: str, choices: tuple, cwd: Path):
         if choices and value not in choices:
             raise SettingsError(f"{where}: {value!r} is not one of {', '.join(repr(c) for c in choices)}")
         return value
+    if kind == "auto_float":
+        return "auto" if value == "auto" else _convert("float", value, where, choices, cwd)
     if kind == "float":
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             fail("a finite number")
@@ -331,6 +333,9 @@ def validate(config: Settings, given: Set[tuple[str, ...]] = frozenset()) -> Non
     ``given``: key paths set by the user (not by the preset or the defaults).
     """
     execution, inputs = config.execution, config.input
+    share = config.painting.foreign_read_share
+    if share != "auto" and not 0.0 <= share < 1.0:
+        raise SettingsError("[painting] foreign_read_share must be auto or in [0, 1)")
     if execution.max_contigs and ("execution", "serial") in given and not execution.serial:
         raise SettingsError("[execution] max_contigs runs contigs serially; it cannot be combined with serial = false")
     if not math.isfinite(execution.progress_minutes) or execution.progress_minutes < 0:

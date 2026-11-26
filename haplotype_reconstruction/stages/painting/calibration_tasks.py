@@ -1,6 +1,7 @@
 """CPU-budgeted per-contig fits and durable calibration reductions."""
 
 from contextlib import ExitStack
+from dataclasses import replace
 from functools import partial
 from math import fsum
 from time import perf_counter
@@ -9,11 +10,13 @@ import numpy as np
 
 from ...contracts.contigs import AnalysisContigs
 from ...contracts.panels import materialise
+from ...core.concurrency import threaded_each
 from ...core.errors import InvariantError, SettingsError
+from ...engine.cpu import TaskBudget, budget_context, current_budget, thread_team
 from ...engine.records import record_diagnostic
 from ...science.painting import calibration as science
 from ...science.painting import read_calibration
-from ...store.protocol import claim, publish, resume
+from ...store.protocol import claim, publish, read_items, resume
 from ..framework import Expansion, RecordKey, ResourceRequest, ResultRef, Task, TaskKey
 from ..inputs.products import required_product, task_inputs
 from . import calibration_records as records
@@ -22,6 +25,7 @@ PRODUCTS = dict(
     calibration_robustness="robustness",
     calibration_refine="refine",
     calibration_outlier="outlier",
+    calibration_share="share",
     calibration_divisor="divisor",
     calibration_divisor_fit="divisor_fit",
     calibration="calibration",
@@ -30,9 +34,16 @@ PRODUCTS = dict(
 BIN_FIELDS = ("material_coordinates", "bin_rows")
 # The zero_stress read-state units used 80.6% of an eight-thread team.
 READ_DIVISOR_CORES = 8
+# Keep each candidate's original workspace so it can retain the fit emissions
+# across EM iterations. Wider custom grids run in groups to bound private scratch.
+READ_DIVISOR_CONCURRENT_FITS = 5
+# Window workers each use one CPU. The saved chr8 shard took 27 s with either
+# four or 19 workers; four used 85 CPU s against 99 with 19.
+READ_SHARE_CORES = 4
+READ_SHARE_SAMPLE_BATCH = 19
 
 
-def _fit(root, contig, resolved, maps, cores, function, *, read_state=None, **options):
+def _fit(root, contig, resolved, maps, cores, function, *, read_state=None, foreign_read_share=0.0, **options):
     """Return a fit's value and elapsed seconds on the final assembly and evidence windows.
 
     ``cores`` sets the requested sample batch. The scheduler controls the kernel team. When read-state
@@ -49,7 +60,9 @@ def _fit(root, contig, resolved, maps, cores, function, *, read_state=None, **op
     assembled = required_product(reader, assembly_records, "assembly", contig)
     ev = evidence_records.expected(store, manifest, product="evidence", contig=contig)
     batch = max(1, cores)
-    with read_evidence(store.contig(contig), ev.identity) as source:
+    painting = resolved.parameters.painting
+    file = store.contig(contig)
+    with read_evidence(file, ev.identity) as source:
         builder = partial(
             _at_batch_boundary,
             partial(windowed_emissions, sample_tile=batch, cohort=source.cohort_frequencies),
@@ -58,18 +71,69 @@ def _fit(root, contig, resolved, maps, cores, function, *, read_state=None, **op
         if read_state is not None:
             from .read_state import stage_builder, with_detection
 
-            builder = stage_builder(builder, store.contig(contig), ev.identity, source.cohort_frequencies, None,
-                                    with_detection(resolved.parameters.painting, read_state), unit_batches=True)
+            painting = replace(painting, foreign_read_share=foreign_read_share)
+            # The window arrays share one seek-based reader. Load the compact GL and observation sources
+            # once so concurrent fits and their later scoring passes can share in-memory evidence.
+            likelihoods = evidence_records.load_likelihoods(file, expected_identity=ev.identity)
+            observed = evidence_records.load_observed(file, expected_identity=ev.identity, likelihoods=likelihoods)
+            source = replace(source, likelihoods=likelihoods, observed=observed)
+            request = records.expected(store, manifest, product="robustness", contig=contig)
+            robust = read_items(store.contig(contig), request.key, request.identity, ("read_setup",))
+            if robust is None:
+                raise InvariantError(f"{contig}: read-aware calibration requires the robustness receipt")
+            builder = stage_builder(
+                builder, store.contig(contig), ev.identity, source.cohort_frequencies, None,
+                with_detection(painting, read_state), unit_batches=True, read_setup=robust.payload["read_setup"],
+            )
         value = function(
             materialise(assembled.components, assembled.prepared),
             source,
-            resolved.parameters.painting,
+            painting,
             working_maps(store, manifest, maps).for_contig(contig),
             batch_samples=batch,
             emission_builder=builder,
             **options,
         )
     return value, perf_counter() - began
+
+
+def _fit_candidates(function, items):
+    """Ordered candidate fits with up to eight kernel threads apiece from the task's live budget."""
+    if len(items) == 1:
+        return [function(items[0])]
+
+    def fit(candidate, budget):
+        child = TaskBudget(budget, 1, READ_DIVISOR_CORES)
+        with budget_context(child), thread_team(child.threads()):
+            return function(candidate)
+
+    budget = current_budget()
+    values = [None] * len(items)
+    for start in range(0, len(items), READ_DIVISOR_CONCURRENT_FITS):
+        group = items[start:start + READ_DIVISOR_CONCURRENT_FITS]
+        for index, value in budget.concurrent(
+            (partial(fit, item) for item in group), label="read calibration candidates",
+        ):
+            values[start + index] = value
+    return values
+
+
+def fit_read_divisors(root, contig, resolved, maps, team, **options):
+    """Fit a fold with shared evidence and label-independent parts."""
+    return _fit(
+        root, contig, resolved, maps, min(READ_DIVISOR_CORES, team), read_calibration.confidence_unit,
+        fit_candidates=_fit_candidates, **options,
+    )
+
+
+def fit_share(root, contig, resolved, maps, **options):
+    from ...science.painting import share_estimator
+
+    # A window worker batches read-table setup independently of its one-thread kernel team.
+    return _fit(
+        root, contig, resolved, maps, READ_SHARE_SAMPLE_BATCH, share_estimator.score_contig,
+        map_windows=threaded_each, window_workers=READ_SHARE_CORES, **options,
+    )
 
 
 def _pooled_rows(store, manifest, product, grid):
@@ -146,6 +210,14 @@ def divisor_plan(root, resolved, maps):
         raise SettingsError("calibration prerequisite missing: outlier")
     outlier = saved.payload
     read = config.read_classes > 1 and outlier.get("read_state", READ_STATE_ON) == READ_STATE_ON
+    share = config.foreign_read_share
+    if resolved.parameters.estimate_foreign_read_share and config.read_classes > 1:
+        request = records.expected(store, manifest, product="share")
+        saved = resume(store.run, request.key, request.identity)
+        if saved is None:
+            raise SettingsError("calibration prerequisite missing: share")
+        share = saved.payload["estimate"]
+    outlier = dict(outlier, foreign_read_share=share)
     included = resolved.analysis.included
     if read:
         material = dict(calibration_material(store, manifest, maps, config, included))
@@ -158,22 +230,32 @@ def divisor_plan(root, resolved, maps):
     return outlier, read, material, grid
 
 
+def _divisor_cores(grid, read):
+    return READ_DIVISOR_CORES * min(len(grid), READ_DIVISOR_CONCURRENT_FITS) if read else 1
+
+
 def divisor_fit_plan(plan, resolved, *, default_by_fold):
     """The scatter units and useful CPU widths after the outlier barrier."""
     _, read, material, grid = plan
+    folds = range(resolved.parameters.painting.calibration_folds)
     return dict(
         by_fold=read and default_by_fold,
         read_state=read,
+        fold_fits=[
+            dict(contig=contig, fold=fold, cores=_divisor_cores(grid, read))
+            for contig in material
+            for fold in folds
+        ] if read else [],
         fits=[
             dict(contig=contig, fold=fold, divisor=divisor, cores=READ_DIVISOR_CORES if read else 1)
             for contig in material
-            for fold in range(resolved.parameters.painting.calibration_folds)
+            for fold in folds
             for divisor in grid
         ],
     )
 
 
-def publish_divisor_fits(root, contig, resolved, maps, ties, epsilon, detection, fold, grid, *, team=1):
+def publish_divisor_fits(root, contig, resolved, maps, ties, epsilon, detection, share, fold, grid, *, team=1):
     """Publish one receipt per candidate, with one read-state builder shared within this fit task."""
     reader, store = task_inputs(root)
     file = store.contig(contig)
@@ -186,9 +268,10 @@ def publish_divisor_fits(root, contig, resolved, maps, ties, epsilon, detection,
                         if locks.enter_context(claim(file, request.key, request.identity, blocking=False)))
         if pending:
             if detection is not None:
-                scores, seconds = _fit(
-                    root, contig, resolved, maps, team, read_calibration.confidence_unit,
-                    read_state=detection, epsilon=epsilon, reverse=ties.reverse, grid=pending, folds=(fold,),
+                scores, seconds = fit_read_divisors(
+                    root, contig, resolved, maps, team,
+                    read_state=detection, foreign_read_share=share, epsilon=epsilon, reverse=ties.reverse,
+                    grid=pending, folds=(fold,),
                 )
                 fits = [(value, dict(samples=samples, cells=cells)) for value, _, samples, cells in scores]
             elif len(pending) == 1:
@@ -247,13 +330,15 @@ def gather_divisor(root, contig, grid, folds, read, morgans):
 
 
 def _divisor_task(key, root, resolved, maps, ties, outlier, read, fold, grid, cores):
-    width = min(cores, READ_DIVISOR_CORES) if read else 1
+    width = min(cores, _divisor_cores(grid, read))
+    # Two 38-core folds can share a 76-core node, and an isolated fold can use all 40.
+    minimum = min(width, max(READ_DIVISOR_CORES, cores // 2))
     return Task(
         key, publish_divisor_fits,
         (root, key.scope, resolved, maps, ties, outlier["robustness_epsilon"],
-         outlier["read_detection"] if read else None, fold, grid),
+         outlier["read_detection"] if read else None, outlier["foreign_read_share"], fold, grid),
         outputs=tuple(RecordKey(key.scope, records.fit_key(fold, value)) for value in grid),
-        resources=ResourceRequest(width, width),
+        resources=ResourceRequest(minimum, width),
         thread_argument="team",
     )
 
@@ -323,11 +408,12 @@ def _read_sharing(store, manifest, contig):
 
     config = from_payload(PaintingParameters, manifest["parameters"]["painting"])
     if config.read_classes == 1:
-        return None
+        return dict(read_libraries=None, read_sharing=None, read_setup=None)
     ev = evidence_records.expected(store, manifest, product="evidence", contig=contig)
     detection = run_detection(store, manifest, config.read_state)
-    libraries, splits = contig_read_libraries(store.contig(contig), ev.identity, with_detection(config, detection))
-    return dict(libraries=libraries, splits=splits)
+    libraries, splits, setup = contig_read_libraries(store.contig(contig), ev.identity, with_detection(config, detection))
+    return dict(read_libraries=dict(libraries=libraries, splits=splits),
+                read_sharing=any(row["status"] == "fitted" for row in libraries), read_setup=setup)
 
 
 def fits_publish(root, product, contig, fits):
@@ -357,10 +443,7 @@ def fits_publish(root, product, contig, fits):
             payload = dict(schema=1, contig=contig, rows=rows, sample_rows=sample_rows, regime_rows=regime_rows,
                            material_coordinates=coordinates, bin_rows=bin_rows, seconds=seconds, skipped=False)
             if product == "robustness":
-                payload["read_libraries"] = _read_sharing(store, reader.manifest, contig)
-                payload["read_sharing"] = (
-                    None if payload["read_libraries"] is None else
-                    any(row["status"] == "fitted" for row in payload["read_libraries"]["libraries"]))
+                payload.update(_read_sharing(store, reader.manifest, contig))
             publish(file, request.key, request.identity, payload)
     return request.identity
 
@@ -408,7 +491,7 @@ def _expansion(root, product, contig, fits):
     return Expansion(tasks, gather)
 
 
-def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
+def run(root, product, contig, resolved, maps, ties, *, cores=1):
     reader, store = task_inputs(root)
     manifest = reader.manifest
     request = records.expected(store, manifest, product=product, contig=contig)
@@ -442,10 +525,7 @@ def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
                 # a single-value grid fixes the quantity: nothing is fitted
                 payload = dict(schema=1, contig=contig, rows=(), seconds=perf_counter() - began, skipped=True)
                 if product == "robustness":
-                    payload["read_libraries"] = _read_sharing(store, manifest, contig)
-                    payload["read_sharing"] = (
-                        None if payload["read_libraries"] is None else
-                        any(row["status"] == "fitted" for row in payload["read_libraries"]["libraries"]))
+                    payload.update(_read_sharing(store, manifest, contig))
             elif product == "outlier":
                 # each contig's rows: the literal grid and the two midpoints around the pooled grid maximum (the
                 # per-bin fields stay in the contig records: the run record keeps the material units they make)
@@ -454,7 +534,7 @@ def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
                     coarse, refine = get("robustness", c), get("refine", c)
                     fitted.append((coarse, refine))
                     contigs.append(dict(
-                        {k: v for k, v in coarse.items() if k not in BIN_FIELDS},
+                        {k: v for k, v in coarse.items() if k not in BIN_FIELDS and k != "read_setup"},
                         rows=tuple(sorted(tuple(coarse["rows"]) + tuple(refine["rows"]))),
                         sample_rows=tuple(sorted(tuple(coarse.get("sample_rows", ())) + tuple(refine.get("sample_rows", ())))),
                         regime_rows=tuple(sorted(tuple(coarse.get("regime_rows", ())) + tuple(refine.get("regime_rows", ())))),
@@ -540,8 +620,39 @@ def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
                     likelihood_set=() if profile is None else profile["plain_set"],
                     sample_rates=rates, sample_rate_at_top=at_top, seconds=perf_counter() - began,
                 )
+            elif product == "share":
+                from ...science.painting import share_estimator
+
+                outlier = get("outlier")
+                read = outlier["read_state"] == "on"
+                n_samples = len(manifest["sample_ids"])
+                if contig is not None:
+                    if read:
+                        scored, _ = fit_share(
+                            root, contig, resolved, maps,
+                            read_state=outlier["read_detection"], epsilon=outlier["robustness_epsilon"],
+                        )
+                    else:
+                        scored = dict(windows=0, rows=(), supported=0)
+                    payload = dict(schema=1, contig=contig, **scored, seconds=perf_counter() - began)
+                else:
+                    shards = [get("share", c) for c in analysed]
+                    active = [v["rows"] for v in shards if v["supported"]]
+                    profile = share_estimator.pool_profiles(active, n_samples) if read else dict(estimate=0.0)
+                    identified = bool(active) and max(profile["pooled"]) > min(profile["pooled"])
+                    payload = dict(
+                        schema=1, **profile, mode="estimated" if identified else "unavailable",
+                        contigs=tuple(dict(contig=v["contig"], windows=v["windows"], supported=v["supported"],
+                                           seconds=v["seconds"])
+                                      for v in shards),
+                        seconds=perf_counter() - began,
+                    )
             else:
                 outlier = get("outlier")
+                auto = resolved.parameters.estimate_foreign_read_share
+                share = get("share") if auto and config.read_classes > 1 else dict(
+                    estimate=config.foreign_read_share, mode="unavailable" if auto else "declared",
+                )
                 contigs = [get("divisor", c) for c in analysed]
                 grid = sorted(set(config.divisor_grid))
                 read_confidence = None
@@ -574,6 +685,8 @@ def run(root, product, contig, resolved, maps, ties, *, team=1, cores=1):
                 payload = dict(
                     schema=1,
                     robustness_epsilon=outlier["robustness_epsilon"],
+                    foreign_read_share=share["estimate"],
+                    foreign_read_share_profile={k: v for k, v in share.items() if k != "schema"},
                     read_state=outlier.get("read_state", "on"),
                     read_detection=outlier.get("read_detection"),
                     read_libraries=tuple(outlier.get("read_libraries", ())),
@@ -633,12 +746,12 @@ def task(key, context, *, gather_only=False, by_fold=False):
             key, run_divisor, (context.root, contig, context.resolved, context.maps, context.ties),
             kwargs=dict(cores=context.cores, gather_only=gather_only, by_fold=by_fold), outputs=outputs,
         )
+    threads = READ_SHARE_CORES if product == "share" and contig is not None else fit_count(product, config)
     return Task(
         key,
         run,
         (context.root, product, contig, context.resolved, context.maps, context.ties),
         kwargs=dict(cores=context.cores),
         outputs=outputs,
-        resources=ResourceRequest(1, max(1, min(context.cores, fit_count(product, config)))),
-        thread_argument="team",
+        resources=ResourceRequest(1, max(1, min(context.cores, threads))),
     )

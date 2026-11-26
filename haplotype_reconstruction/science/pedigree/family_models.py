@@ -48,7 +48,7 @@ def _maps(mapper: Mapper | None, width: int):
 
 
 def family_models(tc, mcls, mknown, cpairs, theta, floor, mdelta, max_iter=30, rounds=3, rho=0.01, n_random=3,
-                  seed=None, width=1, mapper=None):
+                  seed=None, width=1, mapper=None, *, map_fits=None):
     """Profile log likelihoods and per-bin increments of PAR, REL and UNR for members [C, S] + witnesses.
 
     cpairs int64 [2, B]: C's scheduled trajectory pair. S (member 1) is always a child; each witness (members 2..)
@@ -64,7 +64,7 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, mdelta, max_iter=30, r
     for them (None: in sequence). They are fitted at once and compared in their sequential order, so the result
     does not depend on ``width``. The adaptive steps stay sequential: adopt prefetches the moves it can know in
     advance onto spare threads (only with more than one thread), perturbed draws one start at a time."""
-    map_fits = _maps(mapper, width)
+    map_fits = _maps(mapper, width) if map_fits is None else map_fits
     B = tc.shape[1]
     n = len(mcls)
     loge, representatives, transition = _prepare(tc, mcls, mknown, theta, floor, mdelta)
@@ -109,24 +109,25 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, mdelta, max_iter=30, r
 
     fitted = {}
 
+    def fit_start(name, start, start_roles):
+        return fit(tc, mcls, mknown, start_roles, start, yes, theta, floor, mdelta, max_iter, alone_inc,
+                   flex, allowed[name], lpr, loge, representatives, transition)
+
     def run(name, start, start_roles):
-        # All other fit inputs are fixed for this family search. Keep exact bytes, including the roles, so only
-        # identical deterministic fits are reused. Cached arrays are read only throughout the search.
+        # A search's other fit inputs stay fixed, including the path and comparison order inside fit.
         key = (name, start.tobytes(), start_roles.tobytes())
         if key not in fitted:
-            fitted[key] = fit(tc, mcls, mknown, start_roles, start, yes, theta, floor, mdelta, max_iter, alone_inc,
-                              flex, allowed[name], lpr, loge, representatives, transition)
+            fitted[key] = fit_start(name, start, start_roles)
         return fitted[key]
 
     def run_all(requests):
-        # Fit every (name, start, roles) not yet fitted at once (distinct keys, first occurrence), then serve all in
-        # order: the same fits as calling run() on each in turn.
+        # Execute each missing start once. Only the owning thread publishes the results to the cache.
         keys = [(name, start.tobytes(), start_roles.tobytes()) for name, start, start_roles in requests]
         missing = {}
         for key, request in zip(keys, requests, strict=True):
             if key not in fitted and key not in missing:
                 missing[key] = request
-        for key, value in zip(missing, map_fits(lambda r: run(*r), list(missing.values())), strict=True):
+        for key, value in zip(missing, map_fits(lambda r: fit_start(*r), missing.values()), strict=True):
             fitted[key] = value
         return [fitted[key] for key in keys]
 
@@ -162,32 +163,18 @@ def family_models(tc, mcls, mknown, cpairs, theta, floor, mdelta, max_iter=30, r
         res0 = best[name]
         changed = False
         targets = (1,) if name == "PAR" else (0, 1)
-        if map_fits is not _serial:
-            # Prefetch on spare threads: the direct-observation moves depend only on res0, and the half-child moves
-            # on best[name], which is res0 unless a move below improves it. Fitting them now only fills run()'s
-            # cache; the sequential loop below is unchanged, so the result is the same (an improvement makes some
-            # prefetched half-child fits unused).
-            requests = []
-            for m in range(2, n):
-                for j in targets:
-                    q = res0[2].copy()
-                    q[j] = alone_paths[m]
-                    r = res0[4].copy()
-                    r[m] = j
-                    requests.append((name, q, r))
-                for j in (0, 1):
-                    r = res0[4].copy()
-                    if r[m] != 5 + j:
-                        r[m] = 5 + j
-                        requests.append((name, res0[2].copy(), r))
-            run_all(requests)
+        direct = []
         for m in range(2, n):
             for j in targets:
                 q = res0[2].copy()
                 q[j] = alone_paths[m]
                 r = res0[4].copy()
                 r[m] = j
-                res = run(name, q, r)
+                direct.append((name, q, r))
+        trials = iter(run_all(direct))
+        for m in range(2, n):
+            for _ in targets:
+                res = next(trials)
                 if res[0] > best[name][0] + 1e-9:
                     best[name] = res
                     changed = True

@@ -30,6 +30,7 @@ from ...engine.cpu import claim_threads, current_budget, thread_team
 from ...engine.scheduler import TaskSession
 from ...engine.workers import ResidentRef, release_resident, resident_value, retain
 from ...science.pedigree import forward, m1, pair_bound_screen, panel, selective_m1, selective_screen
+from ...science.pedigree.blocks import ScorePlacement
 from ...science.pedigree.compact_m1 import CompactBuilder, CompactM1
 from ...science.pedigree.parameters import PedigreeParameters
 from ...store.container import CheckpointFile
@@ -52,6 +53,13 @@ class ScreenAdapter:
         return from_payload(ScreenRecord, payload)
 
 
+@dataclass(frozen=True)
+class RankedBounds(PairBounds):
+    """Optional scored pieces published in the same record as their ranking keys."""
+
+    pieces: pair_bound_screen.RankedPieces | None = None
+
+
 class PairBoundsAdapter:
     """Schema-1 storage uses [1,P] so the store protocol's bounded two-axis windows can stream P.
 
@@ -62,14 +70,32 @@ class PairBoundsAdapter:
     schema = 1
 
     def encode(self, value: PairBounds) -> Mapping[str, Any]:
-        return dict(schema=self.schema, contig=value.contig, bounds=value.bounds.reshape(1, -1))
+        payload = dict(schema=self.schema, contig=value.contig, bounds=value.bounds.reshape(1, -1))
+        if isinstance(value, RankedBounds) and value.pieces is not None:
+            parts = value.pieces
+            payload.update(ranked_trios=parts.trios, ranked_cuts=parts.cuts, ranked_values=parts.values)
+        return payload
+
+    @staticmethod
+    def decode_pieces(payload: Mapping[str, Any]) -> pair_bound_screen.RankedPieces | None:
+        if "ranked_values" not in payload:
+            return None
+        trios, cuts, values = (payload[f"ranked_{name}"] for name in ("trios", "cuts", "values"))
+        if trios.ndim != 2 or trios.shape[1] != 3 or cuts.ndim != 2 or cuts.shape[1] != 3:
+            raise InputError("invalid ranked trio or piece coordinates")
+        if values.shape != (len(trios), len(cuts)):
+            raise InputError("invalid ranked piece dimensions")
+        return pair_bound_screen.RankedPieces(trios, cuts, values)
 
     def decode(self, payload: Mapping[str, Any]) -> PairBounds:
         require_schema(payload, self.schema)
         values = payload["bounds"]
         if values.ndim != 2 or values.shape[0] != 1 or values.dtype != np.float32:
             raise InputError("pair-bound payload needs float32[1,P]")
-        return from_payload(PairBounds, dict(payload, bounds=values[0]))
+        pieces = self.decode_pieces(payload)
+        if pieces is not None:
+            return RankedBounds(payload["contig"], values[0], pieces=pieces)
+        return PairBounds(payload["contig"], values[0])
 
 
 class PanelAdapter:
@@ -341,10 +367,19 @@ def bound_run(
     *,
     threads: int = 1,
     reverse: bool | None = None,
+    eligibility: ParentEligibility | None = None,
+    child_range: tuple[int, int] | None = None,
+    placement: ScorePlacement | None = None,
     file: CheckpointFile | None = None,
     identity: str | None = None,
 ) -> PairBounds:
-    """Evaluate the canonical retained-pair rows and round float32 upwards once."""
+    """Evaluate canonical pair rows and round upwards once.
+
+    A child range is a compute-only task. A scatter gather joins all ranges
+    in child order before publishing the ordinary complete contig record.
+    """
+    if child_range is not None and file is not None:
+        raise InputError("publish pair bounds only after gathering the whole contig")
     if (file is None) != (identity is None):
         raise InputError("publication requires both file and identity")
     adapter = PairBoundsAdapter()
@@ -354,14 +389,57 @@ def bound_run(
         if previous is not None:
             return previous
     with thread_team(default=threads):
-        product = PairBounds(
-            prepared.contig,
-            pair_bound_screen.chromosome_bounds(prepared, compact, parameters, claim_threads, reverse=reverse),
+        keys, pieces = pair_bound_screen.chromosome_ranking(
+            prepared, compact, parameters, claim_threads, reverse=reverse, eligibility=eligibility,
+            child_range=child_range, placement=placement,
         )
+        product = RankedBounds(prepared.contig, keys, pieces=pieces)
     if file is not None:
         assert identity is not None
         publish_product(file, BOUNDS, identity, product, adapter)
     return adapter.decode(adapter.encode(product))
+
+
+def merge_child_bounds(
+    contig: str,
+    compact: CompactM1,
+    blocks: Sequence[tuple[tuple[int, int], PairBounds]],
+) -> PairBounds:
+    """Join complete, disjoint child ranges for one contig, in canonical order."""
+    offsets = pair_bound_screen.retained_pair_offsets(compact)
+    bounds = np.empty(offsets[-1], dtype=np.float32)
+    cursor = 0
+    parts = []
+    for (start, stop), part in sorted(blocks, key=lambda block: block[0]):
+        if start != cursor or not start < stop <= compact.n_samples or part.contig != contig:
+            raise InputError(f"{contig}: invalid M2 ranking child block {(start, stop)}")
+        destination = bounds[offsets[start]:offsets[stop]]
+        if part.bounds.shape != destination.shape:
+            raise InputError(f"{contig}: invalid number of pair keys for children {(start, stop)}")
+        destination[:] = part.bounds
+        if isinstance(part, RankedBounds) and part.pieces is not None:
+            parts.append(part.pieces)
+        cursor = stop
+    if cursor != compact.n_samples:
+        raise InputError(f"{contig}: missing M2 ranking child blocks from {cursor} onward")
+    if parts:
+        cuts = parts[0].cuts
+        if not all(np.array_equal(p.cuts, cuts) for p in parts):
+            raise InputError(f"{contig}: inconsistent material cuts in M2 child blocks")
+        return RankedBounds(contig, bounds, pieces=pair_bound_screen.RankedPieces(
+            np.concatenate([p.trios for p in parts]), cuts, np.concatenate([p.values for p in parts])))
+    return PairBounds(contig, bounds)
+
+
+def load_ranked_pieces(file: CheckpointFile, identity: str) -> pair_bound_screen.RankedPieces | None:
+    """Read optional pieces from the rank record with its expected derivation."""
+    from ...store.protocol import read_items
+
+    record = read_items(file, BOUNDS, identity, ("schema", "ranked_trios", "ranked_cuts", "ranked_values"))
+    if record is None:
+        return None
+    require_schema(record.payload, PairBoundsAdapter.schema)
+    return PairBoundsAdapter.decode_pieces(record.payload)
 
 
 @dataclass(frozen=True)
@@ -477,8 +555,8 @@ def bound_derivation(
         code_dependency_identity((__name__,)),
         dict(
             scoring=parameters.scoring,
-            pair_bound_high_mass=parameters.panel.pair_bound_high_mass,
-            representation="retained-pairs-float32-up-v1",
+            max_pairs_per_child=parameters.panel.max_pairs_per_child,
+            representation="retained-pairs-full-likelihood-float32-up-v2",
         ),
         numerical_policy or NumericalPolicy.current(),
         dict(prepared=prepared_identity, screen=screen_identity),

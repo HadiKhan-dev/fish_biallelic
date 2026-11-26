@@ -30,7 +30,7 @@ from ...core import ties
 from ...core.errors import InputError, InvariantError
 from . import emissions, fidelity, hmm
 from .emissions import ArraySource, EmissionBuilder
-from .parameters import MAXIMUM_MASK_STATES, PaintingParameters
+from .parameters import MAXIMUM_MASK_STATES, READ_STATE_BATCH_BYTES, PaintingParameters
 from .release import release_tracks, track_members
 from .states import PaintingBins, PaintingStates, build_bins, build_states, local_allele_keys
 from .transitions import PaintingTransitions, copying_transitions, edge_morgans
@@ -148,6 +148,8 @@ def component_model(
     cache_emissions: bool = True,
     emission_builder: EmissionBuilder | None = None,
     final_likelihood: bool = False,
+    fit_workspace_bytes: int = READ_STATE_BATCH_BYTES,
+    emission_sink: Callable | None = None,
 ) -> fidelity.ChainModel | None:
     """The component's copying model (rho, a, b; painting.fidelity.estimate_chain), estimated from all its samples on
     the assembled panel, or None without bins. Label continuity then uses it unchanged: a relabelling renames states
@@ -156,7 +158,8 @@ def component_model(
     The tempered emissions do not depend on (rho, a, b), so every EM update reads the same batches. When the stage requests cached
     packed upper triangles they are built once and unpacked for each update (the same
     values: the ordered-pair emissions are symmetric), otherwise rebuilt for each update. The cache is released
-    before label continuity, so it never coexists with the decoding cache."""
+    before label continuity unless ``emission_sink`` retains the read-state batches for decoding.
+    ``fit_workspace_bytes`` limits the forward history when coalescing compiled actions."""
     n_samples = likelihoods.shape[0]
     states = build_states(panel.positions, panel.inference, panel.kept)
     bins = build_bins(states.positions, config.snps_per_bin, config.reference_snps_per_bin)
@@ -168,23 +171,48 @@ def component_model(
     n_states = states.n_states
     n_packed = n_states * (n_states + 1) // 2
     if cache_emissions:
-        packed = np.empty((n_samples, n_packed, bins.n_bins))
+        packed = None
         spans = []
         held = {}
-        for raw, eligible, start, stop, *_ in batches():
-            if hasattr(raw, "read"):          # read state: keep the batch object (its matrices cannot be packed)
-                held[start] = raw.path_only()     # the fits never read the confidence strength
+        fit_buffer = None
+        combined_samples = 0
+        n_tracks = n_states + int(np.count_nonzero(states.anchored))
+        for raw, eligible, start, stop, informative, flags in batches():
+            if hasattr(raw, "path_only"):
+                width = raw.matrix_width
+                if (
+                    width and size < n_samples
+                    and (fit_buffer is None or fit_buffer.matrix_width == width)
+                    and n_samples * bins.n_bins * n_tracks ** 2 * (width + 1) * 8 <= fit_workspace_bytes
+                ):
+                    if fit_buffer is None:
+                        fit_buffer = raw.fit_buffer(n_samples)
+                    held[start] = fit_buffer.copy_fit_slice(raw, start, stop)
+                    combined_samples += stop - start
+                else:
+                    held[start] = raw.path_only()
+                if emission_sink is not None:
+                    emission_sink((held[start], eligible, start, stop, informative, flags))
             else:
+                if packed is None:
+                    packed = np.empty((n_samples, n_packed, bins.n_bins))
                 emissions.pack_emissions(raw, packed, start, n_states)
             spans.append((eligible, start, stop))
             del raw
 
+        combined_eligible = (
+            np.concatenate([eligible for eligible, _, _ in spans]) if combined_samples == n_samples else None
+        )
+
         def source():
-            for eligible, start, stop in spans:
-                if start in held:
-                    yield held[start], eligible
-                else:
-                    yield emissions.unpack_emissions(packed[start:stop], n_states), eligible
+            if combined_eligible is not None:
+                yield fit_buffer, combined_eligible
+            else:
+                for eligible, start, stop in spans:
+                    if start in held:
+                        yield held[start], eligible
+                    else:
+                        yield emissions.unpack_emissions(packed[start:stop], n_states), eligible
 
     else:
 
@@ -302,7 +330,7 @@ def decoding_model(states, bins, evidence_sites, genetic_map, model):
 
 def read_decoder_for(raw):
     """painting.read_decode for a batch carrying the read state, else painting.fidelity."""
-    if hasattr(raw, "read"):
+    if hasattr(raw, "path_only"):
         from . import read_decode
         return read_decode
     return fidelity
@@ -321,7 +349,7 @@ def decode_batch(raw, batch_eligible, batch_observed, informative, states, bins,
     (fidelity.release_posteriors)."""
     # Combine switch intervals from both traceback conventions, canonical track order and faithful-copy
     # release masses of the chain's Viterbi labels.
-    if hasattr(raw, "read"):                  # read state carried (painting.read_decode)
+    if hasattr(raw, "path_only"):                  # read state carried (painting.read_decode)
         from . import read_decode as decoder
     else:
         decoder = fidelity

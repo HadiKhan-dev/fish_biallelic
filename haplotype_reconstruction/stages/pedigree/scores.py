@@ -20,6 +20,7 @@ from ...core.digest import array_digest
 from ...core.errors import InputError
 from ...engine.cpu import claim_threads, thread_team
 from ...science.pedigree.block_scoring import score
+from ...science.pedigree.pair_bound_screen import RankedPieces
 from ...science.pedigree.parameters import PedigreeParameters
 from ...store.container import CheckpointFile
 from ...store.identity import code_dependency_identity
@@ -88,6 +89,7 @@ def run(
     *,
     threads: int = 1,
     reverse: bool | None = None,
+    ranked: RankedPieces | None = None,
     file: CheckpointFile | None = None,
     identity: str | None = None,
 ) -> ChromosomeScores:
@@ -102,8 +104,9 @@ def run(
             return previous
     with thread_team(default=threads):
         # claim_threads: the science's kernel boundaries re-read this task's share (it grows as peers finish).
+        reuse = ranked.for_panel(panel.trios, placement.cuts) if ranked is not None else None
         product = score(prepared, compact, chromosome, panel, eligibility, parameters, placement.offset,
-                        placement.last, claim_threads, reverse=reverse, cuts=placement.cuts)
+                        placement.last, claim_threads, reverse=reverse, cuts=placement.cuts, ranked_pieces=reuse)
     if file is not None:
         assert identity is not None
         publish_product(file, KEY, identity, product, adapter)

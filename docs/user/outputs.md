@@ -905,4 +905,9 @@ and `selected`. `painting/calibration_divisor.csv` has `contig`, `divisor`, `fol
 `log_predictive_density`, `cells`, and `selected`. The pooled rows use `contig=RUN`
 and `fold=-1`. Single-value grids skip fitting and have empty objective tables;
 the specified values still appear in the JSON and `painting_model.csv`.
+`painting/calibration.json` records the run's `foreign_read_share` and its mode
+under `foreign_read_share_profile`. Estimated profiles include the evaluated shares,
+pooled and per-sample log likelihood differences from zero, and contig timings.
+`painting/calibration_share.csv` presents the evaluated profiles and selected share,
+with an empty sample ID for pooled rows. A declared value has a selected row.
 `painting_model.csv` also includes `EmissionDivisor`, the run's full-reference-window divisor.

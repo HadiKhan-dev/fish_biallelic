@@ -35,6 +35,7 @@ FILES = {
     "painting.CONTINUITY_COLUMNS": "painting/label_continuity.csv",
     "painting.MODEL_COLUMNS": "painting/painting_model.csv",
     "painting.CALIBRATION_ROBUSTNESS_COLUMNS": "painting/calibration_robustness.csv",
+    "painting.CALIBRATION_SHARE_COLUMNS": "painting/calibration_share.csv",
     "painting.CALIBRATION_DIVISOR_COLUMNS": "painting/calibration_divisor.csv",
     "pair_sharing.PAIR_SHARING_COLUMNS": "painting/pair_sharing.csv",
     "pair_sharing.CHROMOSOME_COLUMNS": "painting/pair_sharing_chromosomes.csv",

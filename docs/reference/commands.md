@@ -168,10 +168,10 @@ Calibrate painting across all final assemblies or run one calibration round.
 | `--tie-census` | 1 | `—` | — | Record tie diagnostics (developer). |
 | `--set` | 1 | `[]` | — | Override one setting (repeatable), e.g. quality.read_calibration=false. |
 | `--contig` | 1 | `—` | — | Analysed contig for a calibration fit round. |
-| `--stage` | 1 | `—` | robustness, refine, outlier, divisor | Calibration round (default with --contig: robustness). Requires --contig except for the run-wide outlier reduction and divisor inventory (--list-fits). |
+| `--stage` | 1 | `—` | robustness, refine, outlier, share, divisor | Calibration round (default with --contig: robustness). Use share with --contig to score one contig and without --contig to pool scores. Outlier and the divisor inventory (--list-fits) are run-wide. |
 | `--fold` | 1 | `—` | — | Zero-based held-out fold for a divisor fit. |
 | `--divisor` | 1 | `—` | — | Candidate to fit. Omit to fit the whole fold. |
-| `--list-fits` | 0 | `False` | — | Print the active divisor fits as JSON after the outlier reduction. Use --stage divisor without --contig. |
+| `--list-fits` | 0 | `False` | — | Print the active divisor fits as JSON after the calibration prerequisites. Use --stage divisor without --contig. |
 
 ## pedigree
 

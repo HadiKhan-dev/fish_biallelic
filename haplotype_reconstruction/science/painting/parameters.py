@@ -17,6 +17,18 @@ ENTRY_BOUNDS = (1e-6, 0.5)
 EXIT_BOUNDS = (1e-3, 0.999)
 RATE_GRID_POINTS = 241
 GOLDEN_STEPS = 60
+# Fail-fast tolerance of the copying-model EM (fidelity.estimate_chain; relative to |log-likelihood|, plus nats): an
+# update may lower the log-likelihood of the tempered emissions by at most EM_DECREASE_RELATIVE x |log-likelihood| +
+# EM_DECREASE_NATS. The emissions do not depend on (rho, a, b) and neither M-step lowers its part of the expected
+# complete-data log-likelihood, so in exact arithmetic the log-likelihood never falls; a larger fall means a
+# numerically corrupted E-step, which the fit must not return (4.23: the TroMau label-strength fits fell by 1,288 to
+# 4,204 nats per contig, 1.2e-4 to 3.9e-4 relative, and collapsed to a boundary point). Rounding: the falls of 8,700
+# recorded fits of the 4.23 runs were at most 2.8e-9 nats (5.6e-16 relative, the last bits of a 4e6-nat sum); the
+# relative bound is 1e6 times that and 1e5 times below the smallest corrupted fall.
+EM_DECREASE_RELATIVE = 1e-9
+# Absolute floor of that tolerance (nats), for a log-likelihood near zero: rounding of a sum of that size is far
+# smaller (2.8e-9 nats at 4e6 nats above).
+EM_DECREASE_NATS = 1e-6
 # Smallest switch probability of a bin edge. Two bin centres inside a cold interval of the map (equal cumulative
 # cM) are 0 Morgans apart; they keep a negligible chance to switch instead of none, so every transition weight
 # stays finite (Viterbi, posteriors and pedigree's chains use the logs). Such edges carry no information about rho
@@ -48,6 +60,16 @@ READ_STATE_BATCH_BYTES = 16 << 30
 # value) pairs (science/shared/reads.py build_tables), kept across a contig's sample batches; about 0.5 MB per pair
 # at the deepest tables. A table is a function of its key alone, so values never depend on it.
 READ_TABLE_CACHE_BYTES = 1 << 30
+# Positive-share route choice (dimensionless fraction of the run's memory limit; read_inputs.ReadEmissionBuilder.
+# compiles): bin actions are compiled while one strength's compiled actions of every sample of a component fit this
+# fraction, so fits can retain them and batches keep their CPU-sized concurrency; beyond it the site walk (storage:
+# the site tape) is used. Both routes are exact, so the choice changes cost only, never a value beyond rounding.
+# Measured on the K ladder (lab423/paintperf): compiled actions cost less CPU than the walk at every label count to
+# 31, but their storage grows as X^2 (C + X)^2 per bin: a TroMau-sized component (116 samples, 2,900 bins) needs 24 GB
+# at 9 labels, 80 GB at 13, 200 GB at 17 and 1.6 TB at 31, where the compiled plan keeps 17 of 76 CPUs busy in its
+# fits and 6 in its decode against the walk's 72 and 41. Half the limit keeps the retained fit beside the decode
+# batches; the measured crossover on that unit lies near 21-23 labels.
+READ_ACTION_MEMORY_FRACTION = 0.5
 
 # Probability-product floor (dimensionless): fold the product into its log below this value;
 # factors below it are logged directly, so bin aggregation never underflows.
@@ -562,6 +584,14 @@ class PaintingParameters:
         between sites, while the tempered class factors would still penalise heterozygous label pairs), so the run
         takes read_classes = 1 throughout, calibration, paintings and their consumers included; the calibration
         records the route (read_state: 'on', 'off: no library shares reads'; stages/painting/read_state.py).
+    foreign_read_share: fraction of called reads assigned to the uniform-donor foreign class (dimensionless).
+        The default is zero because the library's foreign share is unknown without an estimate or declaration.
+        Foreign occupancy is determined by twice the share times covering depth per homologue.
+    share_flank_windows: reference windows of flank on each side of every window the automatic share estimate
+        scores (painting/share_estimator.py). Each window is scored given its flanks, which pin its label pair as
+        the painting's flanking sequence does; without them a homozygous pair plus a foreign read from the
+        sample's own other founder explains a stretch where one homologue has few reads (the 4.23 false positive
+        on clean long reads). Not a user setting.
     read_state: the read state's model constants (ReadStateParameters).
     path_divisor: with the read state (read_classes > 1), the path strength's fixed full-reference-window divisor
         (painting/read_calibration.py path_divisor); without it the path divisor is calibrated from divisor_grid.
@@ -583,6 +613,32 @@ class PaintingParameters:
             "dtype": "int64",
             "stored": True,
             "provenance": "Owner 17 Nov 2026: user setting 1/3/5/7/9, default 5 (= 7 = 9 in every criterion measured).",
+        },
+    )
+    foreign_read_share: float = field(
+        default=0.0,
+        metadata={
+            "role": "state",
+            "axes": (),
+            "units": "fraction of reads",
+            "dtype": "float64",
+            "stored": True,
+            "provenance": "Declared library contamination fraction. Zero assigns all reads to the sample by default.",
+        },
+    )
+    share_flank_windows: int = field(
+        default=2,
+        metadata={
+            "role": "state",
+            "axes": (),
+            "units": "reference windows",
+            "dtype": "int64",
+            "stored": True,
+            "provenance": "4.23 share estimate (lab423/share_fp DESIGN.md sections 3-4, saved stage-D inputs): with "
+                          "1, 2 or 3 windows per side the clean famhs_corrected arm estimates exactly 0 (against "
+                          "4.28e-4 without flanks); the foreign ad_foreign arm (true 1e-2) gives 3.34e-3, 3.59e-3 and "
+                          "3.67e-3, rising slowly toward the unflanked 4.39e-3 while the scored sites grow as 2k + 1. "
+                          "Two is the smallest width at which the foreign estimate has nearly settled.",
         },
     )
     read_state: ReadStateParameters = field(
@@ -885,6 +941,10 @@ class PaintingParameters:
             raise SettingsError("snps_per_bin must divide reference_snps_per_bin")
         if self.read_classes not in (1, 3, 5, 7, 9):
             raise SettingsError("read_classes must be 1, 3, 5, 7 or 9")
+        if not 0.0 <= self.foreign_read_share < 1.0:
+            raise SettingsError("painting.foreign_read_share must be in [0, 1)")
+        if int(self.share_flank_windows) != self.share_flank_windows or self.share_flank_windows < 0:
+            raise SettingsError("painting.share_flank_windows must be an integer >= 0")
 
 
 __all__ = [
@@ -905,4 +965,5 @@ __all__ = [
     "READ_STATE_CACHE_BYTES",
     "READ_STATE_BATCH_BYTES",
     "READ_TABLE_CACHE_BYTES",
+    "READ_ACTION_MEMORY_FRACTION",
 ]

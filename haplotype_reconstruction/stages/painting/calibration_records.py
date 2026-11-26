@@ -1,4 +1,4 @@
-"""Derivations and readers of the two-stage run-level painting calibration."""
+"""Derivations and readers of the run-level painting calibration."""
 
 from dataclasses import dataclass
 
@@ -15,6 +15,7 @@ KEYS = dict(
     robustness="painting/calibration/robustness",
     refine="painting/calibration/refine",
     outlier="painting/calibration/outlier",
+    share="painting/calibration/share",
     divisor_fit="painting/calibration/divisor_fit",
     divisor="painting/calibration/divisor",
     calibration="painting/calibration",
@@ -54,6 +55,7 @@ def expected(store, manifest, *, product="calibration", contig=None, fold=None, 
             raise InvariantError("painting calibration requires every final assembly and evidence product")
         inputs[c + "/assembly"], inputs[c + "/evidence"], inputs[c + "/map"] = bound[1], bound[3], bound[4]
     params = from_payload(PaintingParameters, manifest["parameters"]["painting"])
+    auto = manifest["parameters"].get("estimate_foreign_read_share", False)
     # The outlier profile's clusters are the pedigree's material units (its MaterialParameters, read as the run's
     # values, never as pedigree code): bound whenever several candidate rates are fitted. A single-value grid fixes
     # the rate, fits nothing and reads no material.
@@ -66,7 +68,8 @@ def expected(store, manifest, *, product="calibration", contig=None, fold=None, 
     def identity(which, scope=None, upstream=None):
         return Derivation(
             code,
-            dict(product=which, contig=scope, contigs=contigs, parameters=params, material=material),
+            dict(product=which, contig=scope, contigs=contigs, parameters=params, material=material,
+                 estimate_foreign_read_share=auto if which == "calibration" else None),
             policy,
             dict(inputs, **(upstream or {})),
             tie_reverse=manifest["ties"]["reverse"],
@@ -83,15 +86,33 @@ def expected(store, manifest, *, product="calibration", contig=None, fold=None, 
         result = refine[contig]
     elif product == "outlier":
         result = outlier
-    elif product == "divisor_fit":
-        key = fit_key(fold, divisor)
-        return Reader(identity(key, contig, dict(outlier=outlier)), key)
-    elif product == "divisor":
-        result = identity("divisor", contig, dict(outlier=outlier))
     else:
-        divisors = {c: identity("divisor", c, dict(outlier=outlier)) for c in contigs}
-        result = identity("calibration", upstream=dict(divisors, outlier=outlier))
+        upstream = dict(outlier=outlier)
+        if auto and params.read_classes > 1:
+            share_shards = {c + "/share": identity("share", c, upstream) for c in contigs}
+            share = identity("share", upstream=dict(share_shards, **upstream))
+            if product == "share":
+                return Reader(share if contig is None else share_shards[contig + "/share"], KEYS["share"])
+            upstream["share"] = share
+        elif product == "share":
+            raise InvariantError("share estimation requires auto foreign_read_share and multiple read classes")
+        if product == "divisor_fit":
+            key = fit_key(fold, divisor)
+            return Reader(identity(key, contig, upstream), key)
+        if product == "divisor":
+            result = identity("divisor", contig, upstream)
+        else:
+            # The declared or inferred share reaches the paintings through this receipt.
+            divisors = {c: identity("divisor", c, upstream) for c in contigs}
+            result = identity("calibration", upstream=dict(divisors, **upstream))
     return Reader(result, KEYS[product])
+
+
+def read_setup(store, manifest, contig):
+    """Read the fitted library laws from the contig's checked robustness record."""
+    request = expected(store, manifest, product="robustness", contig=contig)
+    record = read_items(store.contig(contig), request.key, request.identity, ("read_setup",))
+    return None if record is None else record.payload.get("read_setup")
 
 
 def result_reader(store, manifest, *, product="calibration", contig=None):

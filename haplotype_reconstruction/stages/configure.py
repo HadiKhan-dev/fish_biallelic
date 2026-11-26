@@ -56,6 +56,8 @@ class SettingsView(Protocol):
     @property
     def quality(self) -> Any: ...
     @property
+    def painting(self) -> Any: ...
+    @property
     def genetic_map(self) -> Any: ...
     @property
     def pedigree(self) -> Any: ...
@@ -108,6 +110,7 @@ class StageConfigs:
     family_phase: PhaseParameters
     recombination: RecombinationParameters
     export: ExportParameters
+    estimate_foreign_read_share: bool = False
 
 
 def _quality(value: bool | str, kind: str) -> bool:
@@ -150,12 +153,16 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
         ordered = () if ordered is None else read_breakpoint_table(ordered).rows
     else:
         protected = ordered = ()
+    share = settings.painting.foreign_read_share
     return StageConfigs(
         evidence,
         DiscoveryParameters(),
         SelectionParameters(),
         AssemblyParameters(),
-        PaintingParameters(read_classes=settings.painting.read_classes),
+        PaintingParameters(
+            read_classes=settings.painting.read_classes,
+            foreign_read_share=0.0 if share == "auto" else share,
+        ),
         FamilyParameters(
             rate_estimate=settings.genetic_map.rate_estimate, source_populations=settings.input.source_populations
         ),
@@ -164,6 +171,7 @@ def stage_configs(settings: SettingsView) -> StageConfigs:
         PhaseParameters(protected_intervals=tuple(protected)),
         RecombinationParameters(order_breakpoints=tuple(ordered)),
         ExportParameters(full_length=settings.export.full_length),
+        estimate_foreign_read_share=share == "auto",
     )
 
 

@@ -782,6 +782,32 @@ CALIBRATION_DIVISOR_COLUMNS = (
 """
 
 
+CALIBRATION_SHARE_COLUMNS = ("sample", "foreign_read_share", "delta_log_likelihood", "grid", "selected")
+"""Columns in published order.
+
+    sample: sample ID, or empty for the pooled objective (text).
+    foreign_read_share: candidate fraction of reads assigned to the foreign class (probability).
+    delta_log_likelihood: held-out log likelihood relative to share zero (nats).
+    grid: whether the candidate belongs to the coarse grid (bool).
+    selected: whether the candidate is the estimated share or the declared value (bool).
+"""
+
+
+def _share_rows(value):
+    profile = value["foreign_read_share_profile"]
+    estimate = profile["estimate"]
+    if "shares" not in profile:
+        yield "", estimate, None, False, True
+        return
+    for share, pooled, samples in zip(profile["shares"], profile["pooled"], profile["samples"], strict=True):
+        grid = share in profile["grid"]
+        yield "", share, pooled, grid, share == estimate
+        for sample, score in zip(value["sample_ids"], samples, strict=True):
+            yield sample, share, score, grid, share == estimate
+    if estimate not in profile["shares"]:
+        yield "", estimate, None, False, True
+
+
 def _sharing_diagnostic(directory, identity, compute):
     """Publish the run-level diagnostic once per checked derivation; repeated reports reuse its record."""
     import json
@@ -824,5 +850,7 @@ def write_calibration(output, results):
         write_frame(directory / "calibration_robustness.csv",
                     pd.DataFrame(robust, columns=CALIBRATION_ROBUSTNESS_COLUMNS)),
         write_frame(directory / "calibration_divisor.csv", pd.DataFrame(divisors, columns=CALIBRATION_DIVISOR_COLUMNS)),
+        write_frame(directory / "calibration_share.csv",
+                    pd.DataFrame(_share_rows(value), columns=CALIBRATION_SHARE_COLUMNS)),
         record,
     ]

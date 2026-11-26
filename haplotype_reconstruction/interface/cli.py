@@ -113,16 +113,17 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument(
                 "--stage",
                 dest="calibration_stage",
-                choices=("robustness", "refine", "outlier", "divisor"),
+                choices=("robustness", "refine", "outlier", "share", "divisor"),
                 help="Calibration round (default with --contig: robustness). "
-                "Requires --contig except for the run-wide outlier reduction and divisor inventory (--list-fits).",
+                "Use share with --contig to score one contig and without --contig to pool scores. "
+                "Outlier and the divisor inventory (--list-fits) are run-wide.",
             )
 
             command.add_argument("--fold", type=int, help="Zero-based held-out fold for a divisor fit.")
             command.add_argument("--divisor", type=float, help="Candidate to fit. Omit to fit the whole fold.")
             command.add_argument(
                 "--list-fits", action="store_true",
-                help="Print the active divisor fits as JSON after the outlier reduction. "
+                help="Print the active divisor fits as JSON after the calibration prerequisites. "
                 "Use --stage divisor without --contig.",
             )
 

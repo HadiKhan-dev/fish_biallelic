@@ -339,6 +339,12 @@ RECYCLE_MAX_BYTES = 1 << 30
 # Give a worker time to release native resources before its coordinator escalates.
 # runtime.COORDINATOR_GRACE_SECONDS also covers the coordinator's bounded reaping.
 GROUP_TERMINATE_GRACE_SECONDS = 10.0
+# A retiring worker has delivered its result; the coordinator waits this long for its exit
+# inline, then replaces it at once and checks the exit later. Tearing down a worker that held tens
+# of GiB can take longer than a second, which is not a failure.
+RETIRE_JOIN_SECONDS = 1.0
+# Liveness bound on a retired worker's exit: still alive after this long counts as hung.
+RETIRE_EXIT_SECONDS = 300.0
 RECYCLE_CHECK_SECONDS = 0.2
 FORKSERVER = mp.get_context("forkserver")
 _GUARD_LOCK = threading.RLock()
@@ -1686,6 +1692,8 @@ class WorkerGroup:
         self.settings = bootstrap.worker_settings()
         self.threshold = recycle_threshold(processes, recycle_bytes)
         self.handles: list[_WorkerHandle] = []
+        # Replaced workers whose announced exit is still in progress, with the monotonic deadline for it.
+        self.retiring: list[tuple[_WorkerHandle, float]] = []
         self.failed_task: TaskKey | None = None  # attributed only while receive processes this worker
         # Each worker's announced shared-value segments, unlinked by close() whatever became of the worker.
         self.shared: dict[int, set[str]] = {}
@@ -1798,15 +1806,42 @@ class WorkerGroup:
                 handle.connection.send("release-idle")
 
     def _retired(self, index: int, *, idle: bool = False) -> None:
+        """Replace a worker that announced its retirement. A retiring worker owns no shared values or resident
+        state. Its exit is checked now, or later by _reap_retiring when teardown takes longer."""
         handle = self.handles[index]
         handle.announced = True
-        handle.process.join(timeout=1.0)
-        if handle.process.is_alive() or handle.process.exitcode != 0:
-            raise RuntimeError("announced worker retirement did not finish cleanly")
-        handle.connection.close()
+        handle.process.join(timeout=RETIRE_JOIN_SECONDS)
+        status = handle.process.exitcode
+        if status is None:
+            self.retiring.append((handle, time.monotonic() + RETIRE_EXIT_SECONDS))
+        elif status != 0:
+            raise RuntimeError(f"retired worker {handle.process.pid} exited with status {status}")
+        else:
+            handle.connection.close()
         self.shared.pop(index, None)
         self._spawn(index)
         self.handles[index].idle_released = idle
+
+    def _reap_retiring(self) -> None:
+        """Check replaced workers' exits: a non-zero status, or no exit within RETIRE_EXIT_SECONDS, fails the graph."""
+        if not self.retiring:
+            return
+        now = time.monotonic()
+        still = []
+        for handle, deadline in self.retiring:
+            status = handle.process.exitcode
+            if status is None:
+                if now > deadline:
+                    raise RuntimeError(
+                        f"retired worker {handle.process.pid} did not exit within {RETIRE_EXIT_SECONDS:.0f} s"
+                    )
+                still.append((handle, deadline))
+            elif status != 0:
+                raise RuntimeError(f"retired worker {handle.process.pid} exited with status {status}")
+            else:
+                handle.process.join(timeout=0.0)
+                handle.connection.close()
+        self.retiring = still
 
     def _count(self, direction: str, stage: str, size: int, seconds: float, receiving: float) -> None:
         row = self.traffic.get((direction, stage))
@@ -1818,6 +1853,7 @@ class WorkerGroup:
         row[3] += receiving
 
     def receive(self, timeout: float = 0.2) -> list[tuple[int, WorkerReply]]:
+        self._reap_retiring()
         ready = wait([h.connection for h in self.handles], timeout)
         replies = []
         for index, handle in enumerate(self.handles):
@@ -1891,15 +1927,17 @@ class WorkerGroup:
                     handle.connection.send(None)
                 except (BrokenPipeError, OSError):
                     pass
+        retiring = [handle for handle, _ in self.retiring]
+        self.retiring = []
         for handle in self.handles:
             process = handle.process
             if abort and handle.started is not None and process_alive(process.pid, handle.started):
                 process.terminate()
         deadline = time.monotonic() + GROUP_TERMINATE_GRACE_SECONDS
-        for handle in self.handles:
+        for handle in (*self.handles, *retiring):
             handle.process.join(timeout=max(0.0, deadline - time.monotonic()))
         forced = 0
-        for handle in self.handles:
+        for handle in (*self.handles, *retiring):
             if handle.started is not None and process_alive(handle.process.pid, handle.started):
                 handle.process.kill()
                 forced += 1
@@ -1915,6 +1953,8 @@ class WorkerGroup:
             for index, handle in enumerate(self.handles):
                 self._drain_shared(index, handle)
                 handle.connection.close()
+            for handle in retiring:
+                handle.connection.close()
             self._unlink_shared()
         finally:
             self.transport.close()
@@ -1927,6 +1967,11 @@ class WorkerGroup:
                     for (direction, stage), (n, size, pickled, receiving) in rows[:12]
                 )
             )
+        # A retired worker that crashed or hung after delivering its result still fails the graph.
+        failed = [handle for handle in retiring if handle.process.exitcode != 0]
+        if failed and not abort:
+            handle = failed[0]
+            raise RuntimeError(f"retired worker {handle.process.pid} exited with status {handle.process.exitcode}")
 
     def _drain_shared(self, index: int, handle: _WorkerHandle) -> None:
         """Read announcements still queued from a stopped worker (other messages no longer matter)."""

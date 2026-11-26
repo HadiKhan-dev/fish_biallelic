@@ -31,6 +31,7 @@ from ..shared.observation import mix_likelihoods
 from ..shared.recombination import haldane_fraction
 from . import child_reads, projection, read_sources
 from .kernels.preparation import OVERLOADS
+from .read_gaps import foreign_reads
 from .numerical_parameters import INFORMATIVE_GL_SPREAD, SELECTOR_SWITCH_FLOOR
 from .scoring_parameters import PreparationParameters
 from .workspace_parameters import EMISSION_SAMPLE_BLOCK
@@ -160,6 +161,7 @@ def _site_parts(
         weight=painting_hmm.design_weights(informative, bins.starts, site_correlation, group),
         site_start=np.asarray(bins.starts, dtype=np.int64), site_stop=np.asarray(bins.stops, dtype=np.int64),
         epsilon=float(robustness_epsilon),
+        foreign=foreign_reads(read_builder, sites, samples),
     )
 
 
@@ -202,18 +204,16 @@ def _source_laws(
     )
     alt_probability = states.alt_probability()
     step = _EMISSION_SAMPLE_BLOCK
-    split_bypass = getattr(read_builder, "unit_batches", False) and bool(read_builder.unshared.any())
+    split_bypass = (read_builder is not None and not read_builder.foreign_read_share
+                    and read_builder.unit_batches and bool(read_builder.unshared.any()))
     if read_builder is not None:
         # one batch's working set: the builder's (read matrices, parts and their transient inputs) plus the source
         # recurrence's backward vectors and entering vectors and the per-site parts it copies
         classes = int(painting_config.read_classes)
-        recurrence = 8 * n_bins * classes * (n_states * n_states + n_states) + 8 * len(sites) * (
+        width = classes + n_states if read_builder.foreign_read_share else classes
+        recurrence = 8 * n_bins * width * (n_states * n_states + n_states) + 8 * len(sites) * (
             classes * classes + 5 * classes + 4)
         per_sample = read_builder.sample_bytes(sites, n_states, n_bins, False) + recurrence
-        if split_bypass:
-            # A mixed evidence slice copies its carried rows into a compact batch before the read recurrence.
-            per_sample += read_builder.matrix_bytes(n_states, n_bins) + 8 * len(sites) * (
-                classes * classes + 5 * classes + 4)
         # at least one sample per thread: the read parts' per-batch passes over the sites (operator composition) and
         # the chain kernels (parallel over samples) amortise over the batch; values do not depend on the batch
         requested = max(_EMISSION_SAMPLE_BLOCK, numba.get_num_threads())
@@ -238,10 +238,10 @@ def _source_laws(
                 site_correlation=site_correlation,
             )
             emissions = built.raw
-            if built.read.shape[3] == 1:
+            if built.initial.shape[1] == 1:
                 reads.append(child_reads.scalar_batch(last - first))
             else:
-                read = read_sources.ReadInputs(built.read, built.read_log, built.initial, built.minor)
+                read = built
                 site_parts = _site_parts(
                     read_builder, evidence, sites, batch, informative, flags, painted, painting_config,
                     robustness_epsilon, site_correlation,
@@ -262,7 +262,12 @@ def _source_laws(
         del laws, emissions, read, site_parts
     laws = SourceLaws(pair_mass, pi, flows["diagonal_flow"], flows["outgoing_flow"], flows["incoming_flow"],
                       background_alt, available)
-    return laws, (child_reads.join_reads(reads, 2 * int(read_builder.minor) + 3) if reads else None)
+    if not reads:
+        return laws, None
+    width = 2 * int(read_builder.minor) + 3
+    if read_builder.foreign_read_share:
+        width += n_states
+    return laws, child_reads.join_reads(reads, width)
 
 
 def _prepare_component(

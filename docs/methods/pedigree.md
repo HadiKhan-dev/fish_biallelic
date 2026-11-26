@@ -138,31 +138,19 @@ of the others) and an iterative target test (tracks that may leave the parents' 
 `guard_nats` and at least `target_share` posterior non-full-sib frames; the parental switches follow the same Haldane
 process in both models, so the test does not select on a sib's crossover count).
 
-- **Read state (`read_classes` > 1; LR phase 2, Tier 3).** Long reads cover many selected sites, so the scalar bin
-  emissions count the same reads at every site they cover. Each hidden state then also holds the target's read class
-  c, in the transmission frame: homologue 1 carries parent 0's transmitted copy, homologue 2 parent 1's (a physical
-  homologue keeps its parent through every crossover, so c carries across frames unpermuted). A frame's emission is a
-  transfer matrix of c per emitted state, W_b(x, y) = exp(min(e_b - m, 300) + l_b - t) M~_b(x, y) for the ordered
-  pair (x on homologue 1, y on homologue 2): e_b the tempered scalar emission, M_b with log scale l_b the bin's read
-  matrix of the painting at the path strength (its builder, the one the source chain uses; the class at the previous
-  bin's last selected site carried through the bin's sites, each site's read factor tempered by the bin's weight
-  1 / DE), M~ its classes permuted by the homologue swap J when x > y, m the configurations' best scalar emission
-  (today's 300-nat overflow guard acts on the scalar ratio) and t one common scale for every column of the frame.
-  The misfit matrix is the mean over all unordered pairs, each in both homologue orientations at 1/2 ((M + J M J) /
-  2): a pair drawn from the scalar column's law that carries no parent assignment, the class crossing it by the law's
-  average transfer. The guard's target chain uses the same matrices per track-symbol pair (track 1 on homologue 1; the
-  'other' symbol averages the labels outside the four, an outside pair drawn with replacement; zero when every label
-  is one of the four). Between frames the class crosses the undetermined bins by the label-free product of the
-  painting's depth-conditioned class operators of their sites (their alleles are not read, as without read state),
-  folded once into the next frame's matrices; a sequence starts from the class law at the end of the preceding bin
-  (the component's first site: its own law) with uniform transmission states, so a sequence cut at file-map knots
-  starts from the marginal law too (pi_(l-1) T_l = pi_l). One normalisation per frame over (state, class). The pair
-  test reads painted classes only, no emission. Without read state, and for every sample that bypasses it (deep at
-  every site, or a library without detected read sharing), the matrices are 1 x 1 and the chains are the scalar
-  chains exactly (C = 1 of the same kernels). The frames' matrices are rebuilt with the read builder for the
-  requested bins in each sample batch. One graph task builds each contig's frames. A target removal changes
-  the carriers in its own family. The following guard pass reuses every unchanged family's complete sequences
-  and rebuilds the affected families on each contig. The fit consumes the final ordered sequences.
+- **Read state.** The target's state carries its read class in the physical transmission frame. Homologue 1
+  carries the first parent's transmitted copy and homologue 2 carries the second parent's copy. The ordered pair
+  \((x, y)\) contributes the painting's tempered bin operator at path strength, the D5 correction for that pair,
+  and the scalar bin ratio to the best of the four full-sib configurations. Clip the scalar log ratio at 300
+  before adding the correction. All symbols share one scale independent of the model and the incoming row.
+  Mirror pairs exchange the own homologue classes and leave each foreign label fixed. The misfit symbol averages
+  all unordered pairs and gives their two orientations equal weight. An outside symbol averages the labels
+  outside the four parental labels. Two outside slots draw independently with replacement.
+  Between successive frames, compose the unweighted read transitions through the strictly intervening bins.
+  The next frame owns its incoming site transition. A frame at a sequence cut starts with the label-free marginal
+  advanced from component entry to the beginning of that frame's gap. Independent sequences start their own
+  read state. These frame actions supply the full-sib profile, the target guard and its posterior, and the
+  error-run segment likelihoods. A small fixed-width cache holds exact mixtures of the same actions.
 - **What it estimates.** The event-weighted mean recombination rate of the meioses of the sibships that give frames.
   In a multi-generation cross those may be one generation's meioses (in a real cichlid cross 175 of 181 expected
   events came from two sibships). This is a statement about which sibships give frames, not about parentage.
@@ -360,24 +348,41 @@ state) and bc8 at 2.5x released none (120 with the correction). Long reads kept 
 scalar source chain loses entirely (famhs 0 of 98). The painting, its calibration, family phase and the map-scale
 frames take the same correction (4.22 D5P, [painting](painting.md), read-state tempering).
 
-Exact forward-backward per sample: backward class vectors β_b(u, c) (one Hamming contraction per class, max-normalised per bin), then the transmission-oriented propagation over (x, y, c), x the transmitted homologue's label: P_{b+1}(x, y, c') = (1 − τ_b) D(x, y, c') + τ_b D(y, x, J c'), D(v, c') = Σ_{u, c} P_b(u, c) A_b(u, v) E_{b+1}(v)[c, c'] β_{b+1}(v, c') / β_b(u, c), from the homologue-symmetrised first-bin posterior, τ_b the meiotic switch probability ([PS04](#ps04)). Its class-free law is the homologue-symmetrised marginal at every bin (the selector is stationary at one half and independent of the parent's data); the transmitted marginal π and the three flows of the transmitted coordinate (same state, leaving, entering) are the class-summed scalar formulas with each class's right weights r_b(v, c) = Σ_{c'} E_{b+1}(v)[c, c'] β_{b+1}(v, c'), and are normalised with the propagated law. Preparation computes and stores, class-free: the unordered pair masses (exposure), π, the flows and BACKGROUND's transmitted ALT probability ([PS06](#ps06)); no class axis is stored. Evidence-free samples keep the uniform chain (no emission, no read state). Available samples losing supported mass raise an invariant error naming the original sample, the component and the boundary. One bounded, contiguous evidence slice supplies the painting builder at a time. In a mixed slice, the source recurrence uses a one-class batch for samples of unshared libraries and samples that bypass the read state at every site. The read-state samples use their carried widths. Both sets of results are restored to the canonical sample order. Map-scale frames use one-class matrices for bypassed rows, with no class transfer in the gaps.
+Exact forward-backward per sample: backward class vectors β_b(u, c) (one Hamming contraction per class, max-normalised per bin), then the transmission-oriented propagation over (x, y, c), x the transmitted homologue's label: P_{b+1}(x, y, c') = (1 − τ_b) D(x, y, c') + τ_b D(y, x, J c'), D(v, c') = Σ_{u, c} P_b(u, c) A_b(u, v) E_{b+1}(v)[c, c'] β_{b+1}(v, c') / β_b(u, c), from the homologue-symmetrised first-bin posterior, τ_b the meiotic switch probability ([PS04](#ps04)). Its class-free law is the homologue-symmetrised marginal at every bin (the selector is stationary at one half and independent of the parent's data); the transmitted marginal π and the three flows of the transmitted coordinate (same state, leaving, entering) are the class-summed scalar formulas with each class's right weights r_b(v, c) = Σ_{c'} E_{b+1}(v)[c, c'] β_{b+1}(v, c'), and are normalised with the propagated law. Preparation computes and stores, class-free: the unordered pair masses (exposure), π, the flows and BACKGROUND's transmitted ALT probability ([PS06](#ps06)); no class axis is stored. Evidence-free samples keep the uniform chain (no emission, no read state). Available samples losing supported mass raise an invariant error naming the original sample, the component and the boundary. One bounded, contiguous evidence slice supplies the painting builder at a time. A bypassed sample occupies only class zero and its source and map likelihoods reduce to the scalar model.
+
+The read axis contains the fixed-width own classes and one foreign coordinate per emission label, including
+BACKGROUND. At component entry the own probability is exp(−m), where m is twice the product of the foreign share
+and the sample's covering depth per homologue. The remaining probability is uniform over foreign labels. For a
+library that QC A corrected, m is zero: its corrected likelihood already models its foreign reads, and the
+GL-anchored donor ratios would count them twice ([painting](painting.md#foreign-read-class-and-bin-operators)).
+The source chain, the child's read law and the map-scale frames read the same m. At a
+selected site with read survival phi, the foreign label persists with probability phi and arrivals follow the
+Poisson absence probability exp(−m(1−phi)). The read transfer masks the two diplotype labels as foreign destinations
+after each transition. The own and foreign coordinates carry through every bin boundary and each Hamming
+copying move. D5 uses the separate fixed-pair carry to set the bin correction, which enters the joint source
+likelihood once. At zero share the law and operators reduce to the own class model.
 
 Implementation: [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/read_sources.py](../../haplotype_reconstruction/science/pedigree/read_sources.py), [science/pedigree/sources.py](../../haplotype_reconstruction/science/pedigree/sources.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
 
 Parameters by name: `robustness_grid`, `emission_log_floor`, `read_classes`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(N B S² C²) time, O(n B S² C) per sample batch of n for the backward vectors; stored O(N B S²) (pair masses) + O(N B S) + O(N M). With C = 5 about C² = 25 times the scalar chain's arithmetic.
+Cost and scope: For S labels, C own classes and L selected sites, source smoothing costs O(L S² (C² + S)) per sample.
+The backward checkpoint has O(B S² (C + S)) entries. Stored source laws have no read axis.
 
 <a id="ps06"></a>
 ## ps06 Transmitted-state projection: prepared laws and transmitted ALT
 
 The projection reads the prepared transmitted marginal and flows ([PS05](#ps05)) and builds the bridges ([PS07](#ps07)). Named states transmit their state ALT value unchanged, including BACKGROUND's frequency at uncalled sites. A fractional BACKGROUND frequency is conditioned on the candidate's own reads in preparation: P(a = ALT | x = BACKGROUND) = Σ_y P_b(BACKGROUND, y) Σ_c P(c at the marker's site | BACKGROUND, y) P(a = ALT | BACKGROUND, y, c, the site's reads), the class posterior from the oriented pair's entering class vector carried forward through the bin's selected sites (their class operators and tempered read factors) and β_b carried backward, and the site's configuration evidence (1 − ε) L_a κ_c(a) + ε B untempered (L the genotype likelihoods, κ the class likelihood ratio, B the cohort law). Without read state κ = 1: the mixed genotype likelihoods; the unconditioned value is kept where the denominator is nonpositive.
 
+The within-bin conditional uses the same incoming class message, site factors and exit suffix as the source.
+It averages the untempered configuration conditional under the tempered class posterior, including the foreign
+coordinates. A missing marker or zero BACKGROUND marginal keeps the panel frequency.
+
 Implementation: [science/pedigree/read_sources.py](../../haplotype_reconstruction/science/pedigree/read_sources.py), [science/pedigree/projection.py](../../haplotype_reconstruction/science/pedigree/projection.py).
 
 Parameters by name: `robustness_grid`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: O(N L S C²) for the read-conditioned BACKGROUND ALT (L the painting's selected sites; O(N M S) without read state), in preparation; the projection itself O(N B S) plus the bridges.
+Cost and scope: O(N L S (C² + S)) for the read-conditioned BACKGROUND ALT (L the painting's selected sites; O(N M S) without read state), in preparation; the projection itself O(N B S) plus the bridges.
 
 <a id="ps07"></a>
 ## ps07 Maximum-entropy bridges
@@ -427,7 +432,20 @@ Cost and scope: O((M_obs + B)·S²); O(S); O(N (M + B) S²). These terms describ
 <a id="child-read-state"></a>
 ## Child read state in the configuration chains
 
-With the painting's read state (`read_classes` > 1) every configuration chain of a child (M0, M1, M2 and the second-degree and full-sib proxies) carries the child's read class c (which homologue the covering reads come from) besides its transmitted founder pair (f, s): S² C states. The founder pair moves at bin edges by the bridges and the null source, the same for every class; the class moves between the child's observed selected markers by the painting's class operators composed over the selected sites between them (the read state is defined on the evidence grid), whatever the founders do, and the chain starts from the class law at the component's first selected marker. At an observed marker the emission of the slots' transmitted ALT probabilities (a, b) (slot 1 = homologue 1) is E_c(a, b) = G(a, b) R_c(a, b): G the scalar site likelihood ([PS10](#ps10)) and R_c the GL-anchored read ratio of the painting's factor at full strength, R_c(a, b) = Σ_g W_g(a, b) L′_g R_c(g) / Σ_g W_g(a, b) L′_g, R_c(g) = [(1 − ε) L_g κ_c(g) + ε B] / [(1 − ε) L_g + ε B] (W the product law of the ordered configuration g, L′ the mixed and L the raw genotype likelihoods, κ the class likelihood ratio, B the cohort law). Σ_c π(c) R_c(g) = 1, so without read sharing (operator rows equal to the next marker's class law) the chain is the scalar chain. The chain applies E itself at every observed marker ([ps03](#ps03)). Preparation stores each child's operators into its observed markers and its four configuration ratios per class (float32) and the first marker's class law (ChildReads); a sample deep at every site (the painting's bypass) stores none and keeps the scalar chain exactly, as does every child with one read class, through the same kernels.
+The child carries its own read class in M0, M1, M2 and the relative models. The transmitted founder pair moves
+at bin boundaries through the source bridges and excursion. Each read class has the same founder movement.
+The read law starts at the first chosen marker. A gap composes the selected-site transitions up to the next
+observed marker, including unobserved selected sites. Own-origin classes have a small square block. The gap's
+foreign part uses one arrival vector, one return vector, and common diagonal and off-diagonal entries. Each
+distinct entry is rounded once to float32 for storage.
+
+At every observed marker the likelihood for transmitted ALT probabilities a and b is the mixed genotype
+likelihood times the read factor. The factor averages the four ordered configuration ratios with weights
+proportional to the allele configuration probability and its mixed genotype likelihood. Each own ratio uses the
+own count likelihood divided by its mean under the own law. Each foreign ratio uses the same GL-anchored donor
+count law as the source. The child applies its observed-marker factor once at full strength. Donor destinations
+remain available and D5 tempering is confined to the source and target-frame operators. A bypassed child
+stores no slots and reduces to the scalar likelihood.
 
 When the stored transition into the child's next observed marker has identical rows, its destination law is
 independent of the incoming class. For each founder pair, summing the incoming class mass before that transition
@@ -436,15 +454,16 @@ bin edges, including empty bins, up to that marker. Its class law is restored fr
 marker emission. At the end of the observations only total mass is needed. Tests use exact row equality on the
 stored operator. An arbitrarily small difference between rows keeps the full class dimension. The relative proxies
 apply the same rule within each inheritance layer.
-The pair bound retains its entrywise group maxima over founders before summing destination classes.
+The M1 certificate with read state is the exact M1 likelihood of every eligible pair in the child batch.
+The screen's queries read those same scores.
 
-The pair bound carries the class too. Each site factor is nonnegative and bilinear in (a, b), so over an allele box (the pair bound's BACKGROUND range) every class entry is largest at a corner: r̄_c = max_corner E_c / max_corner G, and the bin's class transfer bound Π_k T_k diag(r̄_k) is entrywise above the chain's; the pair bound aggregates (class, group, group) with each group pair's entrywise maximum (no partner caps on this route). The M1 screen's certificate of a pair is its exact M1 with the read state: every eligible pair of a child batch is scored once and the screen's queries read those scores. A class-carrying group bound cost a third to a half of that exact pass, and the screen queried 85–100 % of the eligible chromosome pairs on every simulated cohort; the screen's record (best, cutoff, retained pairs, chromosome maxima, floors) depends only on exact scores, so the choice of valid certificates changes no value.
-
-Implementation: [science/pedigree/child_reads.py](../../haplotype_reconstruction/science/pedigree/child_reads.py), [science/pedigree/read_forward.py](../../haplotype_reconstruction/science/pedigree/read_forward.py), [science/pedigree/read_bounds.py](../../haplotype_reconstruction/science/pedigree/read_bounds.py), [science/pedigree/relatives.py](../../haplotype_reconstruction/science/pedigree/relatives.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
+Implementation: [science/pedigree/child_reads.py](../../haplotype_reconstruction/science/pedigree/child_reads.py), [science/pedigree/read_forward.py](../../haplotype_reconstruction/science/pedigree/read_forward.py), [science/pedigree/read_gaps.py](../../haplotype_reconstruction/science/pedigree/read_gaps.py), [science/pedigree/relatives.py](../../haplotype_reconstruction/science/pedigree/relatives.py), [science/pedigree/prepare.py](../../haplotype_reconstruction/science/pedigree/prepare.py).
 
 Parameters by name: `read_classes`, `class_transfer_cache_bytes`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
-Cost and scope: per configuration O(B C S² + K (C² + C) S²) for K observed markers (the class mix of every state pair, then its factor), against O(B S² + K S²) for one class; the M1 screen one exact chain per eligible pair; the pair bound O(K S² C³) per child to build the bin bounds; stored O(K (C² + 4C)) float32 per component. The chains take each bin's class transfer Π_k T_k diag(f_k) of every state pair no candidate changes from a per-batch cache (`class_transfer_cache_bytes`), computed once per pair of allele words at the bin's observed markers (states with the same alleles there share it); the block scorer advances a tile of one child's rows together bin by bin, so each bin's transfers are read once per tile, and the relatives' proxies read the same cache. The pair bound builds each bin's class bound once per pair of box words. None of this changes a value beyond the order of floating-point operations.
+For J observed slots, S labels, C own classes and B bins, one configuration costs
+O(J S² (C² + S) + B S² (C + S)). The gap and ratio storage per child is O(J (C² + S)) and the live
+state is O(S² (C + S)). The fixed-width own-block cache reuses transfer products over identical panel words.
 
 <a id="ps11"></a>
 ## ps11 Block-certificate upper bound on chromosome M1
@@ -484,20 +503,33 @@ Parameters by name: `rank_weight`, `chromosome_contamination`, `maximum_contig_w
 Cost and scope: O(C Σ_c n_c); O(C N²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
 <a id="ps14"></a>
-## ps14 M2 pair bound by state aggregation
+## ps14 Exact full-data ranking for capped children
 
-Aggregate high-mass and BACKGROUND states separately, placing other named states in a single low group. Build upper transition factors and child emission envelopes, with partner caps only on that parent’s BACKGROUND axis. Contract the second parent axis before the first, preserving this bound’s own arithmetic order. Retry unstable absorption in log space, sum components and round stored float32 bounds upward. Check group counts before narrowing their dtype. Bound values determine panel membership and must be reproduced, not merely remain valid. With the read state the aggregated forward carries the child's class and the partner caps are not applied ([child read state](#child-read-state)).
+Count the eligible canonical pairs of each child's retained parents. A child with more pairs than the cap
+receives one full-data M2 score for each eligible pair. The score uses all observed markers, with each parent's
+candidate-specific BACKGROUND probabilities and the child's full-strength read likelihood. If a component lacks
+one candidate it contributes the observed candidate's M1 score. If it lacks both it contributes M0. Sum components
+within each contig and round the contig score once upward to float32. The genome ranking adds these keys in
+configured contig order in float64. Full-data scoring applies at every configured foreign share.
 
-Implementation: [science/pedigree/pair_bound.py](../../haplotype_reconstruction/science/pedigree/pair_bound.py).
+Named founder alleles are shared by all candidate parents. The scalar bin-emission products and, for bounded
+read widths, the products of the read-class operators for unchanged state pairs can therefore be reused across
+a child's configurations. A candidate BACKGROUND state keeps its own emissions. Read-class transfer storage is
+bounded per worker. Wide foreign vectors use the structured gaps directly, so the number of foreign donors
+cannot make the cache quartic in the number of founders. The block scorer also reuses the component score
+of each distinct configuration when unavailable parental slots map multiple rows to the same M1 or M0 chain.
 
-Parameters by name: `pair_bound_high_mass`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Implementation: [science/pedigree/pair_bound_screen.py](../../haplotype_reconstruction/science/pedigree/pair_bound_screen.py)
+and [science/pedigree/read_score.py](../../haplotype_reconstruction/science/pedigree/read_score.py).
 
-Cost and scope: O(R² B G²); O(G³); O(K³). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Parameters by name: `max_pairs_per_child`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: The cost per eligible pair of a capped child is one ordinary likelihood pass over its components.
 
 <a id="ps15"></a>
 ## ps15 M2 panel admission
 
-Admit every eligible pair of a child's retained parents (canonical parent ordering); there is no relevance screen. A screen proves exclusion only for the fits it screens, while the decision reuses the panel in every bootstrap and leave-one-unit-out fit: a pair rejected on the full data (or on any fixed family of fits) can be the best configuration of a resampled fit, and its missing row then lowers the two-parent evidence there. Below the cap the M2 evidence is therefore exact over the retained parents in every fit. A per-child pair cap (`max_pairs_per_child`) bounds the panel at cap x N rows. A child with more pairs keeps those with the largest full-data pair bound (the per-contig bounds summed in contig order; no chromosome or unit structure enters), with the whole tie class at the last kept bound and every pair whose bound is not a number. It is flagged (`capped_children`, `M2PanelCapped`): its M2 evidence then covers an incomplete panel, a lower bound, and the cap can discard a competitive pair. Children retain many parents, and so reach the cap, at low depth and in large sib-rich cohorts.
+Admit every eligible pair of a child's retained parents (canonical parent ordering); there is no relevance screen. A screen proves exclusion only for the fits it screens, while the decision reuses the panel in every bootstrap and leave-one-unit-out fit: a pair rejected on the full data (or on any fixed family of fits) can be the best configuration of a resampled fit, and its missing row then lowers the two-parent evidence there. Below the cap the M2 evidence is therefore exact over the retained parents in every fit. A per-child pair cap (`max_pairs_per_child`) bounds the panel at cap x N rows. A child with more pairs keeps those with the largest full-data M2 keys, including all ties at the cap and every indeterminate key. It is flagged (`capped_children`, `M2PanelCapped`): its M2 evidence then covers an incomplete panel, a lower bound, and the cap can discard a competitive pair. Children retain many parents, and so reach the cap, at low depth and in large sib-rich cohorts.
 
 Implementation: [stages/pedigree/screen.py](../../haplotype_reconstruction/stages/pedigree/screen.py), [science/pedigree/panel.py](../../haplotype_reconstruction/science/pedigree/panel.py).
 
@@ -610,7 +642,14 @@ Cost and scope: At most the full bet/window dyad scan; certification can stop a 
 <a id="ps22"></a>
 ## ps22 Scoring orchestration, records, identities and resume
 
-Publish prepared, selective-screen, pair-bound, piece-score and exclusion records under their distinct checked identities. A score identity binds the scoring parameters, the material partition rule and the contig's placement on the genome axis (offset, last unit and cut list), never the regime or release thresholds; an exclusion identity binds the contig's log weight. Reuse the selective screen as a whole, other products at their declared contig granularity, and rebuild the deterministic candidate panel from records. Keep state counters distinct from timing diagnostics. Worker count, completion order, resident caching and memory pacing cannot alter scientific values or admission.
+Publish prepared, selective-screen, M2 ranking, piece-score and exclusion records under their distinct checked identities. A score identity binds the scoring parameters, the material partition rule and the contig's placement on the genome axis (offset, last unit and cut list), never the regime or release thresholds; an exclusion identity binds the contig's log weight. Reuse the selective screen as a whole, other products at their declared contig granularity, and rebuild the deterministic candidate panel from records. Keep state counters distinct from timing diagnostics. Worker count, completion order, resident caching and memory pacing cannot alter scientific values or admission.
+
+Ranking and piece scoring re-read their CPU teams between batches. Tiles of one child's candidate rows reuse its
+bin transfers and the scalar products of adjoining rows that share their first parental source. Tiles are assigned
+to the live team according to observed markers and class widths, keeping each forward chain in bin order. Independent
+contig tasks share the node's CPU budget and publish their own complete records. A scattered caller can also score
+contiguous child ranges of a contig, then join the ranges in the original pair order and publish one complete record.
+The panel gathers the same upward-rounded chromosome keys in either case.
 
 Implementation: [stages/pedigree/exclusion.py](../../haplotype_reconstruction/stages/pedigree/exclusion.py), [stages/pedigree/prepare.py](../../haplotype_reconstruction/stages/pedigree/prepare.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py).
 
@@ -1099,7 +1138,7 @@ Cost and scope: O(B · S² · m); O(K²). These terms describe the unit’s work
 <a id="pd27"></a>
 ## pd27 Stage orchestration, records, identities and consistency checks
 
-Validate samples and informative-contig reach, then prepare, screen, bound and score before full decision/resampling. Build count-exclusion and relationship requests, score them per contig, solve the guard, perform count release, orient slots and construct the typed product. Recheck edge/withheld consistency and reject a count resting on a withheld direction. Publish only under the checked identity; execution and formatting stay outside the pure decision steps.
+Validate samples and informative-contig reach, then prepare, screen, rank and score before full decision/resampling. Build count-exclusion and relationship requests, score them per contig, solve the guard, perform count release, orient slots and construct the typed product. Recheck edge/withheld consistency and reject a count resting on a withheld direction. Publish only under the checked identity; execution and formatting stay outside the pure decision steps.
 
 Implementation: [contracts/pedigree.py](../../haplotype_reconstruction/contracts/pedigree.py), [science/pedigree/run.py](../../haplotype_reconstruction/science/pedigree/run.py), [stages/pedigree/decision.py](../../haplotype_reconstruction/stages/pedigree/decision.py), [stages/pedigree/records.py](../../haplotype_reconstruction/stages/pedigree/records.py), [stages/graph.py](../../haplotype_reconstruction/stages/graph.py), [interface/run.py](../../haplotype_reconstruction/interface/run.py).
 
@@ -1254,7 +1293,8 @@ the pairwise posteriors of its children and half children), role updates, adopt 
 diploid initialised at its own mosaic, or a half child of either latent diploid), starts seeded at members' own mosaics, `random_starts` block perturbations per round
 drawn from the named `pedigree.family_transmission.starts` stream keyed by a digest of the segment's data, and
 cross-initialisation of every model from every other model's best paths for up to `start_rounds` rounds. Every step
-is monotone; the optimum is local, not certified. Each segment is searched twice, with the witnesses ordered by a
+is monotone; the optimum is local, not certified. Segment fits and independent search starts can use the live CPU
+budget as their peers finish. Each segment is searched twice, with the witnesses ordered by a
 digest of their painted classes and in the reverse order, and each model keeps the better value; the value then
 depends neither on the order in which witnesses are supplied nor on sample names (witnesses with identical data are
 interchangeable).

@@ -33,6 +33,7 @@ from ...core.kernels import kernel
 from .forward import site_likelihood
 from .kernels.bounds import OVERLOADS
 from .read_transfer import multiply_classes, read_ratio
+from .scheduling import balanced_units
 
 __all__ = ["site_bound", "class_bound_matrices", "slot_intervals", "pair_bounds_classes"]
 
@@ -237,7 +238,7 @@ def _absorb_classes(alpha, moved, n_p, n_q, group_p, group_q, scaled, log_emissi
 
 @kernel(overloads=OVERLOADS["read_bounds.pair_bounds_classes"], cache=True, parallel=True, nogil=True)
 def pair_bounds_classes(trios, row_child, log_emission, scaled, top, offset, group, count, initial, transfer, matrices,
-                        read_initial, read_width, run_start):
+                        read_initial, read_width, run_start, threads):
     """float64 [T]: pair_bound.pair_bounds with the read class carried (module docstring): the aggregated forward
     over (class, group of p, group of q), its group transfers applied to every class slice, each bin's group emission
     the entrywise maximum of the scaled scalar bound times the class transfer bound (``matrices`` [n, B, S, S, C, C],
@@ -251,105 +252,117 @@ def pair_bounds_classes(trios, row_child, log_emission, scaled, top, offset, gro
     groups = initial.shape[1]
     classes = matrices.shape[4]
     out = np.empty(trios.shape[0])
-    for run in prange(len(run_start) - 1):
+    cost = np.empty(len(run_start) - 1, np.int64)
+    child_width = read_width[:, :bins].sum(axis=1)
+    for run in range(len(cost)):
         first_row = run_start[run]
         rows = run_start[run + 1] - first_row
-        child, p = trios[first_row, 0], trios[first_row, 1]
-        local = row_child[first_row]
-        # the run's rows advance together bin by bin (each row's operations in the same order as alone), so the
-        # first parent's partial maxima are needed for one bin at a time
-        partial = np.zeros((groups, states, classes, classes))
-        forward = np.zeros((rows, classes, groups, groups))
-        log_bound = np.zeros(rows)
-        alive = np.ones(rows, dtype=np.bool_)
-        moved = np.zeros((classes, groups, groups))
-        work = np.empty((groups, groups))
-        group_matrix = np.empty((groups, groups, classes, classes))
-        log_group = np.empty((groups, groups))
-        for r in range(rows):
-            q = trios[first_row + r, 2]
-            for c in range(classes):
-                for i in range(count[p, 0]):
-                    for j in range(count[q, 0]):
-                        forward[r, c, i, j] = initial[p, i] * initial[q, j] * read_initial[child, c]
-        for block in range(bins):
-            enter, leave = read_width[child, block], read_width[child, block + 1]
-            partial[:] = 0.0
-            for x in range(states):
-                gx = group[p, block, x]
-                for y in range(states):
-                    weight = scaled[local, block, x, y]
-                    matrix = matrices[local, block, x, y]
-                    for c in range(enter):
-                        for d in range(classes):
-                            value = weight * matrix[c, d]
-                            if value > partial[gx, y, c, d]:
-                                partial[gx, y, c, d] = value
+        # Each piece pays once for the first-parent partial maxima, then
+        # aggregates them and moves the group/class state for every pair.
+        cost[run] = (1 + child_width[trios[first_row, 0]]) * (states + rows * groups)
+    units, offsets = balanced_units(cost, threads)
+    for tile in prange(len(offsets) - 1):
+        for cell in range(offsets[tile], offsets[tile + 1]):
+            run = units[cell]
+            first_row = run_start[run]
+            rows = run_start[run + 1] - first_row
+            child, p = trios[first_row, 0], trios[first_row, 1]
+            local = row_child[first_row]
+            # the run's rows advance together bin by bin (each row's operations in the same order as alone), so the
+            # first parent's partial maxima are needed for one bin at a time
+            partial = np.zeros((groups, states, classes, classes))
+            forward = np.zeros((rows, classes, groups, groups))
+            log_bound = np.zeros(rows)
+            alive = np.ones(rows, dtype=np.bool_)
+            moved = np.zeros((classes, groups, groups))
+            work = np.empty((groups, groups))
+            group_matrix = np.empty((groups, groups, classes, classes))
+            log_group = np.empty((groups, groups))
             for r in range(rows):
-                if not alive[r]:
-                    continue
                 q = trios[first_row + r, 2]
-                n_p, n_q = count[p, block], count[q, block]
-                alpha = forward[r]
-                if block > 0:
-                    a_p, a_q = count[p, block - 1], count[q, block - 1]
-                    for c in range(enter):
-                        _group_step(alpha[c], work, a_p, a_q, n_p, n_q, transfer[p, block - 1], transfer[q, block - 1])
-                maximum = top[local, block]
-                if not np.isfinite(maximum):
-                    alive[r] = False
-                    continue
-                for i in range(n_p):
-                    for j in range(n_q):
-                        for c in range(enter):
-                            for d in range(classes):
-                                group_matrix[i, j, c, d] = 0.0
-                for i in range(n_p):
+                for c in range(classes):
+                    for i in range(count[p, 0]):
+                        for j in range(count[q, 0]):
+                            forward[r, c, i, j] = initial[p, i] * initial[q, j] * read_initial[child, c]
+            for block in range(bins):
+                enter, leave = read_width[child, block], read_width[child, block + 1]
+                partial[:] = 0.0
+                for x in range(states):
+                    gx = group[p, block, x]
                     for y in range(states):
-                        gy = group[q, block, y]
+                        weight = scaled[local, block, x, y]
+                        matrix = matrices[local, block, x, y]
                         for c in range(enter):
                             for d in range(classes):
-                                value = partial[i, y, c, d]
-                                if value > group_matrix[i, gy, c, d]:
-                                    group_matrix[i, gy, c, d] = value
-                total = 0.0
-                for i in range(n_p):
-                    for j in range(n_q):
-                        for d in range(classes):
-                            acc = 0.0
-                            for c in range(enter):
-                                acc += alpha[c, i, j] * group_matrix[i, j, c, d]
-                            moved[d, i, j] = acc
-                            total += acc
-                if total > 1e-280 and np.isfinite(total):
+                                value = weight * matrix[c, d]
+                                if value > partial[gx, y, c, d]:
+                                    partial[gx, y, c, d] = value
+                for r in range(rows):
+                    if not alive[r]:
+                        continue
+                    q = trios[first_row + r, 2]
+                    n_p, n_q = count[p, block], count[q, block]
+                    alpha = forward[r]
+                    if block > 0:
+                        a_p, a_q = count[p, block - 1], count[q, block - 1]
+                        for c in range(enter):
+                            _group_step(alpha[c], work, a_p, a_q, n_p, n_q,
+                                        transfer[p, block - 1], transfer[q, block - 1])
+                    maximum = top[local, block]
+                    if not np.isfinite(maximum):
+                        alive[r] = False
+                        continue
                     for i in range(n_p):
                         for j in range(n_q):
-                            if leave == 1:
-                                mass = 0.0
+                            for c in range(enter):
                                 for d in range(classes):
-                                    mass += moved[d, i, j]
-                                alpha[0, i, j] = mass / total
-                            else:
+                                    group_matrix[i, j, c, d] = 0.0
+                    for i in range(n_p):
+                        for y in range(states):
+                            gy = group[q, block, y]
+                            for c in range(enter):
                                 for d in range(classes):
-                                    alpha[d, i, j] = moved[d, i, j] / total
-                    value = math.log(total)
-                else:
-                    # The underflow fallback uses the full workspace. Expand the scalar as mass in class
-                    # zero (the incoming operator has equal rows, or this is an empty bin), then marginalise.
-                    if enter == 1:
-                        alpha[1:] = 0.0
-                    value = _absorb_classes(alpha, moved, n_p, n_q, group[p, block], group[q, block], scaled,
-                                            log_emission, matrices, local, block, maximum, group_matrix, log_group,
-                                            states)
-                    if leave == 1:
+                                    value = partial[i, y, c, d]
+                                    if value > group_matrix[i, gy, c, d]:
+                                        group_matrix[i, gy, c, d] = value
+                    total = 0.0
+                    for i in range(n_p):
+                        for j in range(n_q):
+                            for d in range(classes):
+                                acc = 0.0
+                                for c in range(enter):
+                                    acc += alpha[c, i, j] * group_matrix[i, j, c, d]
+                                moved[d, i, j] = acc
+                                total += acc
+                    if total > 1e-280 and np.isfinite(total):
                         for i in range(n_p):
                             for j in range(n_q):
-                                for d in range(1, classes):
-                                    alpha[0, i, j] += alpha[d, i, j]
-                if not np.isfinite(value):
-                    alive[r] = False
-                    continue
-                log_bound[r] += value
-        for r in range(rows):
-            out[first_row + r] = log_bound[r] + offset[local] if alive[r] else -np.inf
+                                if leave == 1:
+                                    mass = 0.0
+                                    for d in range(classes):
+                                        mass += moved[d, i, j]
+                                    alpha[0, i, j] = mass / total
+                                else:
+                                    for d in range(classes):
+                                        alpha[d, i, j] = moved[d, i, j] / total
+                        value = math.log(total)
+                    else:
+                        # The underflow fallback uses the full workspace. Expand the scalar as mass in class
+                        # zero (the incoming operator has equal rows, or this is an empty bin), then marginalise.
+                        if enter == 1:
+                            alpha[1:] = 0.0
+                        value = _absorb_classes(alpha, moved, n_p, n_q, group[p, block], group[q, block], scaled,
+                                                log_emission, matrices, local, block, maximum, group_matrix, log_group,
+                                                states)
+                        if leave == 1:
+                            for i in range(n_p):
+                                for j in range(n_q):
+                                    for d in range(1, classes):
+                                        alpha[0, i, j] += alpha[d, i, j]
+                    if not np.isfinite(value):
+                        alive[r] = False
+                        continue
+                    log_bound[r] += value
+            for r in range(rows):
+                out[first_row + r] = log_bound[r] + offset[local] if alive[r] else -np.inf
     return out

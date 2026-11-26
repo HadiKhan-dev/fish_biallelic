@@ -318,8 +318,8 @@ def sib_frames(cls, key, members, slots, centers):
     fr_lab = np.empty((n * B, 4), np.int64)
     nf = 0
     chain_next = 0
-    D = np.empty(8, np.int64)
-    Dk = np.empty(8, np.int64)
+    D = np.empty(4, np.int64)
+    Dk = np.empty(4, np.int64)
     for ti in range(n):
         target = members[ti]
         have_prev = False
@@ -346,10 +346,14 @@ def sib_frames(cls, key, members, slots, centers):
                                 bad = True
                             break
                     if not found:
-                        if nd < 8:
-                            D[nd] = c
-                            Dk[nd] = k
+                        if nd == 4:
+                            bad = True
+                            break
+                        D[nd] = c
+                        Dk[nd] = k
                         nd += 1
+                if bad:
+                    break
             if bad or nd != 4:
                 continue
             distinct_keys = True

@@ -40,7 +40,8 @@ def segments(theta: np.ndarray, unit_morgans: float, tail_morgans: float) -> tup
     return segment, lengths
 
 
-def segment_models(tc, mcls, mknown, cpairs, theta, floor, mdelta, ft, seed, width=1, mapper=None):
+def segment_models(tc, mcls, mknown, cpairs, theta, floor, mdelta, ft, seed, width=1, mapper=None, *,
+                   map_searches=None, map_fits=None):
     """(PAR, REL, UNR) profile log likelihoods of one segment for members [C, S, witnesses...] (UNR includes C's own
     mosaic): the best, per model, of two searches from data-derived starts, the witnesses ordered by a digest of
     each witness's painted classes and known bits and in the reverse of that order. Each search only raises the
@@ -63,11 +64,12 @@ def segment_models(tc, mcls, mknown, cpairs, theta, floor, mdelta, ft, seed, wid
         res = family_models(tc, np.ascontiguousarray(mcls[idx]), np.ascontiguousarray(mknown[idx]), cpairs, theta,
                             floor, np.ascontiguousarray(mdelta[idx]), max_iter=ft.maximum_iterations, rounds=ft.start_rounds, rho=ft.role_prior,
                             n_random=ft.random_starts, seed=seed, width=max(1, width // len(orders)),
-                            mapper=mapper)
+                            mapper=mapper, map_fits=map_fits)
         return (res["PAR"][0], res["REL"][0], res["C"][0] + res["UNR"][0])
 
     best = None
-    for value in _maps(mapper, min(width, len(orders)))(search, orders):
+    map_searches = _maps(mapper, min(width, len(orders))) if map_searches is None else map_searches
+    for value in map_searches(search, orders):
         best = value if best is None else tuple(max(a, b) for a, b in zip(best, value, strict=True))
     return best
 
@@ -105,25 +107,26 @@ def member_allowances(schedule, members: np.ndarray, lo: int, hi: int, delta: fl
 
 
 def component_plan(schedule, theta: np.ndarray, parameters) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-    """(trajectory classes, the segment of every bin, the Morgans of every segment) of one component, or None when
+    """(trajectory classes, the bin offsets of the segments, the Morgans of each segment) of one component, or None when
     the component has no bins. The plan does not depend on the edge: one per component serves every edge."""
     if schedule.classes.shape[1] == 0:
         return None
     m = parameters.material
     seg, lengths = segments(theta, m.unit_morgans, m.tail_morgans)
-    return _trajectory_classes(schedule), seg, lengths
+    offsets = np.searchsorted(seg, np.arange(len(lengths) + 1))
+    return _trajectory_classes(schedule), offsets, lengths
 
 
 def segment_unit(schedule, plan, theta: np.ndarray, members: tuple[int, ...], u: int, parameters, delta: float,
-                 floor: float, width: int = 1, mapper: Mapper | None = None) -> tuple[float, float, float]:
+                 floor: float, width: int = 1, mapper: Mapper | None = None, *,
+                 map_searches=None, map_fits=None) -> tuple[float, float, float]:
     """(PAR, REL, UNR) profile log likelihoods of segment ``u`` of one component for members (C, S, witnesses...).
     Every segment of every component and edge is fitted independently of the others (segment_models): a caller may
     fit them in any order, or at once on separate threads; ``width`` threads, mapped by the caller's ``mapper``,
     serve this one segment's search."""
-    trajectories, seg, _ = plan
+    trajectories, offsets, _ = plan
     idx = np.asarray(members, dtype=np.int64)
-    bins = np.flatnonzero(seg == u)
-    lo, hi = int(bins[0]), int(bins[-1]) + 1
+    lo, hi = int(offsets[u]), int(offsets[u + 1])
     return segment_models(
         np.ascontiguousarray(trajectories[:, lo:hi], dtype=np.int64),
         np.ascontiguousarray(schedule.classes[idx, lo:hi], dtype=np.int64),
@@ -133,6 +136,7 @@ def segment_unit(schedule, plan, theta: np.ndarray, members: tuple[int, ...], u:
         float(floor),
         member_allowances(schedule, idx, lo, hi, delta),
         parameters.family_transmission, parameters.resampling.bootstrap_seed, width=width, mapper=mapper,
+        map_searches=map_searches, map_fits=map_fits,
     )
 
 

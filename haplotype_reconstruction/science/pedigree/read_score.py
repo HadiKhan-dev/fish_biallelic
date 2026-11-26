@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import numba
 import numpy as np
 from numba import prange
 
@@ -16,6 +17,7 @@ from .forward import (
 from .kernels.component_scores import OVERLOADS
 from .projection import Projection
 from .read_forward import read_arguments, score_path
+from .scheduling import balanced_units, chain_work
 
 
 @kernel(overloads=OVERLOADS["read_score._m0_kernel"], cache=True, parallel=True, nogil=True)
@@ -152,6 +154,9 @@ def component_m1(
 @kernel(overloads=OVERLOADS["read_score._m2_kernel"], cache=True, parallel=True, nogil=True)
 def _m2_kernel(
     trios,
+    units,
+    offsets,
+    available,
     pi,
     candidate_alt,
     stay,
@@ -181,13 +186,20 @@ def _m2_kernel(
     class_cache=None,
 ):
     full = np.empty(len(trios), dtype=np.float64)
-    for row in prange(len(trios)):
-        full[row] = score_path(
-            trios[row, 0], trios[row, 1], trios[row, 2], 2, pi, candidate_alt, stay, alpha, beta, row_arm,
-            column_arm, pivot, excursion, branch, state_alt, child_gl, coefficient, site_index, site_start,
-            site_stop, null_diagonal, null_off, null_frequency, mismatch, common_products, first_cached_child,
-            read_offset, read_initial, read_reset, read_width, read_operator, read_ratio_table, class_cache,
-        )
+    for group in prange(len(offsets) - 1):
+        for index in range(offsets[group], offsets[group + 1]):
+            row = units[index]
+            child, first, second = trios[row]
+            first_available, second_available = available[first], available[second]
+            mode = np.int64(first_available) + np.int64(second_available)
+            if not first_available and second_available:
+                first = second
+            full[row] = score_path(
+                child, first, second, mode, pi, candidate_alt, stay, alpha, beta, row_arm,
+                column_arm, pivot, excursion, branch, state_alt, child_gl, coefficient, site_index, site_start,
+                site_stop, null_diagonal, null_off, null_frequency, mismatch, common_products, first_cached_child,
+                read_offset, read_initial, read_reset, read_width, read_operator, read_ratio_table, class_cache,
+            )
     return full
 
 
@@ -195,39 +207,66 @@ def component_m2(
     projection: Projection,
     terms: ChildTerms,
     trios: np.ndarray,
-    zero: np.ndarray,
-    one: np.ndarray,
+    zero: np.ndarray | None = None,
+    one: np.ndarray | None = None,
     claim_threads=lambda: None,
 ) -> np.ndarray:
-    """M2 log likelihoods [T] of the panel rows; a row with an evidence-free parent reduces to the other
-    parent's M1 (or M0) screen value. (Production scores the panel through component_block_scores; this whole-chain
-    form serves the reference checks.)"""
+    """Full-data M2 scores, with exact M1/M0 reductions on unavailable components."""
     children = terms.gl.shape[0]
-    first_available = projection.available[trios[:, 1]]
-    second_available = projection.available[trios[:, 2]]
-    active = first_available & second_available
     two = np.empty(len(trios), dtype=np.float64)
-    for row in np.flatnonzero(~active):
-        child, first, second = trios[row]
-        two[row] = (
-            one[child, first] if first_available[row] else one[child, second] if second_available[row] else zero[child]
-        )
-    active_rows = np.flatnonzero(active)
+    if zero is None or one is None:
+        active_rows = np.arange(len(trios))
+    else:
+        first_available = projection.available[trios[:, 1]]
+        second_available = projection.available[trios[:, 2]]
+        active = first_available & second_available
+        for row in np.flatnonzero(~active):
+            child, first, second = trios[row]
+            two[row] = (
+                one[child, first] if first_available[row] else one[child, second] if second_available[row] else zero[child]
+            )
+        active_rows = np.flatnonzero(active)
     if not len(active_rows):
         return two
     active_children = trios[active_rows, 0]
-    for child_start in range(0, children, terms.batch):
-        child_stop = min(children, child_start + terms.batch)
-        batch_rows = active_rows[(active_children >= child_start) & (active_children < child_stop)]
-        if not len(batch_rows):
+    if np.any(active_children[1:] < active_children[:-1]):
+        order = np.argsort(active_children, kind="stable")
+        active_rows = active_rows[order]
+        active_children = active_children[order]
+    model, args, reads = model_arguments(projection), terms_args(projection, terms), read_arguments(terms)
+    from .read_block_forward import row_chunk, row_tiles, score_block_rows
+
+    batch = terms.trio_batch
+    cuts = np.searchsorted(active_children, np.arange(0, children + batch, batch))
+    child_cost = chain_work(terms.site_start, terms.site_stop, terms.read_width)
+    single_block = np.zeros(projection.n_bins, dtype=np.int64)
+    availability = np.array(projection.available, copy=True)
+    for start, stop in zip(cuts[:-1], cuts[1:], strict=True):
+        if start == stop:
             continue
+        child_start, child_stop = int(active_children[start]), int(active_children[stop - 1]) + 1
         claim_threads()
         products = terms.common(projection, child_start, child_stop)
-        classes = terms.class_cache(projection, child_start, child_stop)
         claim_threads()
-        two[batch_rows] = _m2_kernel(
-            np.ascontiguousarray(trios[batch_rows]), *model_arguments(projection), *terms_args(projection, terms),
-            products, child_start, *read_arguments(terms), classes,
-        )
+        classes = terms.class_cache(projection, child_start, child_stop, trios=True)
+        # Keep window caches resident while successive tiles refresh the live CPU claim.
+        first = start
+        while first < stop:
+            claim_threads()
+            threads = numba.get_num_threads()
+            last = min(stop, first + row_chunk(threads))
+            batch_rows = active_rows[first:last]
+            chosen = np.ascontiguousarray(trios[batch_rows])
+            if classes is None:
+                units, offsets = balanced_units(child_cost[chosen[:, 0]], threads)
+                two[batch_rows] = _m2_kernel(
+                    chosen, units, offsets, projection.available, *model, *args, products, child_start, *reads, None,
+                )
+            else:
+                tiles = row_tiles(chosen[:, 0], threads)
+                scores = score_block_rows(chosen, tiles, threads, child_cost, single_block, 1, availability,
+                                          *model, *args, *reads, classes, child_start, products)
+                two[batch_rows] = scores[:, 0]
+            first = last
         del products, classes
     return two

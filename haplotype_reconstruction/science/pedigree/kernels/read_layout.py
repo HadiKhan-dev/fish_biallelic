@@ -3,7 +3,7 @@
 from numba import types
 
 # Chain declarations share the read arguments that follow the scalar model inputs.
-# A class-transfer cache is an owned float64 [n, B, S, S, C, C] array or None.
+# An owned float64 transfer cache is [n, B, S, S, C, C] for own gaps or [n, B, C, C, S, S] for structured gaps.
 _F32_3 = types.Array(types.float32, 3, "C")
 _F64_1 = types.Array(types.float64, 1, "C")
 _F64_2 = types.Array(types.float64, 2, "C")

@@ -643,7 +643,7 @@ def _model_actions(prepared, resolved, cut, *, outputs=None, ties=None, divisor_
             module = importlib.import_module("haplotype_reconstruction." + STAGES[key.stage].tasks)
             bound = selected if key.stage in ANALYSIS_STAGES else context
             if key.stage == "calibration_divisor":
-                # A zero_stress replay saved 5.7% calibration CPU by sharing the read-state builder within a fold.
+                # A read-state fold shares its builder across concurrent candidate fits.
                 by_fold = True if divisor_by_fold is None else divisor_by_fold
                 actions[key] = module.task(key, bound, gather_only=divisor_gather, by_fold=by_fold)
             elif key.stage == "pedigree":
@@ -1033,6 +1033,9 @@ def execute(
             output_nodes=output_nodes,
             analysis=resolved.analysis,
             adopt_rate=resolved.parameters.relatedness.infers_rate,
+            estimate_share=(
+                resolved.parameters.estimate_foreign_read_share and resolved.parameters.painting.read_classes > 1
+            ),
             divisor_fit=divisor_fit,
         )
         reader = _analysis_reader(prepared, resolved.analysis)

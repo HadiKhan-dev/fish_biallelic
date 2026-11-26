@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ...contracts.genetic_map import GeneticMapSet
     from ...contracts.painting import ComponentPainting
+    from ...science.painting.parameters import PaintingParameters
+    from ...science.painting.read_decode import ReadEmissions
     from ...science.painting.read_inputs import ReadEmissionBuilder
     from ..configure import ResolvedConfiguration
 
@@ -32,7 +34,7 @@ from ...contracts.phase import PhasedSamples, PhaseInputIdentities, PhaseObserva
 from ...contracts.refit import FounderRefit
 from ...science.phase.component import PhaseMemo, PhaseWorkspace
 from ...science.phase.parameters import PhaseParameters
-from ...science.phase.read_emissions import project_read_state
+from ...science.phase.read_emissions import apply_read_matrices
 from ...science.selection.parameters import LANE_WIDTH
 from ...store.container import CheckpointFile
 from ...store.protocol import Derivation
@@ -68,21 +70,39 @@ def use_windows(samples: int, sites: int, storage: str = "auto") -> bool:
     return 24 * samples * sites > RESIDENT_EVIDENCE_BYTES if storage == "auto" else storage == "windowed"
 
 
+def _read_masks(likelihoods, observed, sites, samples, *_args, cohort, robustness_epsilon, **_kwargs):
+    """Supply painting's read builder with its masks, reusing phase's existing scalar scores."""
+    from ...science.painting.api import gather_sites, informative_sites, mix_window
+
+    gl, flags = gather_sites(likelihoods, observed, sites, samples)
+    mixed = mix_window(gl, cohort[sites], robustness_epsilon)
+    return np.empty(0), flags, informative_sites(mixed, flags)
+
+
 def read_state_builder(
-    painting: Painting, evidence: ContigEvidence, file: CheckpointFile, evidence_identity: str
+    painting: Painting,
+    evidence: ContigEvidence,
+    file: CheckpointFile,
+    evidence_identity: str,
+    *,
+    read_setup: Callable[[], dict | None] | None = None,
+    corrected_rows: tuple[int, ...] = (),
 ) -> Callable[[], ReadEmissionBuilder] | None:
-    """Make a lazy contig read builder using the effective parameters published by painting."""
+    """Make a lazy contig read builder using the effective parameters published by painting. ``corrected_rows``: QC
+    A's corrected samples of ``evidence``, which carry no uniform foreign class (stages.painting.read_state)."""
     if painting.parameters.read_classes == 1:
         return None
 
     @cache
     def build() -> ReadEmissionBuilder:
-        from ...science.painting.emissions import tempered_emissions
         from ..painting.read_state import stage_builder
 
         cohort = evidence.cohort_frequencies
-        base = partial(tempered_emissions, cohort=cohort)
-        builder = stage_builder(base, file, evidence_identity, cohort, None, painting.parameters, unit_batches=True)
+        base = partial(_read_masks, cohort=cohort)
+        builder = stage_builder(
+            base, file, evidence_identity, cohort, None, painting.parameters, unit_batches=True,
+            read_setup=None if read_setup is None else read_setup(), corrected_rows=corrected_rows,
+        )
         # The native kernels run one sample-parallel batch and write the parts once. This saves CPU by
         # removing per-sample Python dispatch and the copy into a second batch.
         builder.map_work = None
@@ -93,36 +113,38 @@ def read_state_builder(
     return build
 
 
+def _calibrated_read_setup(store, manifest, contig):
+    """Read the fitted library setup bound by the painting's run calibration."""
+    from ...contracts.roles import require_schema
+    from ...store.protocol import read_items
+    from ..painting import calibration_records
+
+    request = calibration_records.expected(store, manifest, product="robustness", contig=contig)
+    saved = read_items(store.contig(contig), request.key, request.identity, ("schema", "read_setup"))
+    if saved is None:
+        return None
+    require_schema(saved.payload, request.schema)
+    return saved.payload.get("read_setup")
+
+
 def _build_read_matrices(
     builder: ReadEmissionBuilder,
     evidence: ContigEvidence,
     painted: ComponentPainting,
     sites: np.ndarray,
     samples: slice,
-    alt_rows: np.ndarray,
-    group: int,
+    alt_probability: np.ndarray,
+    parameters: PaintingParameters,
     robustness_epsilon: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Use the confidence-strength build's masks and weights for the phase-owned scalar emissions."""
-    from ...science.painting.api import design_weights, gather_sites, informative_sites, mix_window
-
+) -> ReadEmissions:
+    """Build once at painting's effective share and the component's confidence strength."""
     bins = painted.bins
-    gl, observed = gather_sites(evidence.likelihoods, evidence.observed, sites, samples)
-    mixed = mix_window(gl, builder.cohort[sites], robustness_epsilon)
-    informative = informative_sites(mixed, observed)
-    del mixed
-    weight = design_weights(informative, bins.starts, painted.transitions.site_correlation, group)
-    # Painting's base builder returns the gathered observation flags unchanged. Phase already has its
-    # scalar emissions, so it only needs the informative mask and the read-state part of the build.
-    rows = np.arange(samples.start, samples.stop)
-    args = (rows, sites, gl, observed, alt_rows, painted.states.background_frequency,
-            robustness_epsilon, bins.starts, bins.stops, weight)
-    libraries = builder.library[samples]
-    library = int(libraries[0])
-    if np.all(libraries == library):
-        # This is the one-library branch of _matrices without its identity row gather and output copy.
-        return builder._library_part(*args, builder.survivals[library])[:3]
-    return builder._matrices(*args)[:3]
+    read, _, _ = builder(
+        evidence.likelihoods, evidence.observed, sites, samples, alt_probability,
+        painted.states.background_frequency, bins.starts, bins.stops, parameters,
+        robustness_epsilon=robustness_epsilon, site_correlation=painted.transitions.site_correlation,
+    )
+    return read
 
 
 def execute_contig(
@@ -138,6 +160,7 @@ def execute_contig(
     root: str | Path | None = None,
     memo: PhaseMemo | None = None,
     read_builder: Callable[[], ReadEmissionBuilder] | None = None,
+    corrected_rows: tuple[int, ...] = (),
 ) -> PhasedSamples:
     """Check canonical boundaries, then compute every component and assemble a complete contig."""
     import numpy as np
@@ -219,27 +242,24 @@ def execute_contig(
         painted = painting.components[component]
         states, bins = painted.states, painted.bins
         sites = np.searchsorted(evidence.positions, states.positions)
-        alt_rows = np.vstack([states.alt_probability(), states.background_frequency])
-        group = max(1, painting.parameters.reference_snps_per_bin // painting.parameters.snps_per_bin)
+        alt_probability = states.alt_probability()
         start = 0
         while start < len(emissions):
-            # The materialized matrices and one-shot site parts fit the painting builder's memory bound.
-            # Use the memory bound for the batch width. The live grant only sets
-            # the team's width, so smaller contig shares still amortise library tables.
+            # The confidence action and one-shot site parts fit painting's batch memory bound.
+            # The live grant sets the team width, so smaller shares still amortise library tables.
             claim_threads()
             width = builder.batch_samples(sites, states.n_states, bins.n_bins, False, len(emissions) - start)
             stop = min(len(emissions), start + width)
             samples = slice(start, stop)
             bypass = builder._bypassed(np.arange(start, stop), int(sites[0]), int(sites[-1]) + 1)
-            active = len(bypass) - int(bypass.sum())
-            if active:
-                matrices, log_scale, initial = _build_read_matrices(
-                    builder, evidence, painted, sites, samples, alt_rows, group, painting.robustness_epsilon,
+            if not bypass.all():
+                read = _build_read_matrices(
+                    builder, evidence, painted, sites, samples, alt_probability, painting.parameters,
+                    painting.robustness_epsilon,
                 )
-                # Both bin kernels can use the full live grant around the directional recurrences.
                 claim_threads()
-                project_read_state(emissions[samples], matrices, log_scale, initial, builder.minor, bypass)
-                del matrices, log_scale, initial
+                apply_read_matrices(emissions[samples], read, bypass)
+                del read
             start = stop
         claim_threads()
 
@@ -259,6 +279,7 @@ def execute_contig(
             prepare_likelihoods=prepare_likelihoods,
             map_work=map_work,
             apply_read_state=apply_read_state if read_builder is not None else None,
+            corrected_rows=corrected_rows,
             concurrent=concurrent,
             concurrent_releases=concurrent if use_elastic_releases(evidence.observed.shape[0]) else None,
         ),
@@ -278,6 +299,7 @@ def publish_contig(
     expected: Derivation,
     *,
     read_builder: Callable[[], ReadEmissionBuilder] | None = None,
+    corrected_rows: tuple[int, ...] = (),
     storage: str = "auto",
     root: str | Path | None = None,
 ) -> PhasedSamples:
@@ -309,7 +331,7 @@ def publish_contig(
         return saved
     product = execute_contig(
         evidence, painting, refit, edges, genetic_map, parameters, identities, storage=storage, root=root, memo=memo,
-        read_builder=read_builder,
+        read_builder=read_builder, corrected_rows=corrected_rows,
     )
     records.write(file, expected, product)
     mark_complete(file, records.KEY, {records.KEY: expected.identity})
@@ -367,8 +389,10 @@ def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMa
     # correction's code is in the phase task's code closure
     from ..painting import contamination as contamination_stage
 
-    evidence = contamination_stage.corrected_evidence(store, reader.manifest, contig, evidence)
     identities = PhaseInputIdentities(**expected.inputs)
+    evidence, corrected_rows = contamination_stage.corrected_evidence_with_rows(
+        store, reader.manifest, contig, evidence, evidence_identity=identities.evidence,
+    )
     publish_contig(
         file,
         evidence,
@@ -379,7 +403,11 @@ def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMa
         resolved.parameters.family_phase,
         identities,
         expected,
-        read_builder=read_state_builder(painting, evidence, store.contig(contig), identities.evidence),
+        read_builder=read_state_builder(
+            painting, evidence, file, identities.evidence,
+            read_setup=partial(_calibrated_read_setup, store, reader.manifest, contig), corrected_rows=corrected_rows,
+        ),
+        corrected_rows=corrected_rows,
         root=default_scratch(Path(root)) / "phase" / json_digest(contig)[:16]
         if scratch is None
         else Path(scratch) / "phase" / json_digest(contig)[:16],

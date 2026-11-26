@@ -265,9 +265,11 @@ def _half_flip(tc, cls, known, paths, latent, theta, floor, dm, gains):
             for sl in range(2):
                 tot = 0.0
                 for f in range(T):
-                    tot += fw[t - 1, sl, f] * st + fw[t - 1, 1 - sl, f] * th
+                    selected = fw[t - 1, sl, f] * st + fw[t - 1, 1 - sl, f] * th
+                    fw[t, sl, f] = selected
+                    tot += selected
                 for f in range(T):
-                    sel = fw[t - 1, sl, f] * st + fw[t - 1, 1 - sl, f] * th
+                    sel = fw[t, sl, f]
                     e = 1.0
                     if known[t]:
                         e = _emit(cls[t, 0], cls[t, 1], tc[paths[latent, sl, t], t], tc[f, t],
@@ -439,6 +441,12 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, mdelta, max_iter,
     valid = np.zeros((n, 7), dtype=np.bool_)
     values = np.zeros((n, 7))
     increments = np.zeros((n, 7, B))
+    # Proposals use the other set of buffers. Rejecting one leaves the
+    # accepted messages intact. An acceptance swaps the two buffer sets.
+    tinc = np.empty_like(inc)
+    tvalid = np.empty_like(valid)
+    tvalues = np.empty_like(values)
+    tincrements = np.empty_like(increments)
     # The initial evaluation and first E step share their forward pass.
     for m in range(n):
         r = roles[m]
@@ -480,10 +488,10 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, mdelta, max_iter,
             trial = paths.copy()
             trial[latent, 0, :] = new[0]
             trial[latent, 1, :] = new[1]
-            tinc = np.zeros(B)
-            tvalid = valid.copy()
-            tvalues = values.copy()
-            tincrements = increments.copy()
+            tinc[:] = 0.0
+            tvalid[:] = valid
+            tvalues[:] = values
+            tincrements[:] = increments
             tvalid[:, 2] = False
             tvalid[:, latent] = False
             tvalid[:, 5 + latent] = False
@@ -491,13 +499,15 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, mdelta, max_iter,
                                      role_lp, tvalid, tvalues, tincrements, transition)
             if value > current + 1e-9:
                 paths = trial
-                valid, values, increments = tvalid, tvalues, tincrements
+                valid, tvalid = tvalid, valid
+                values, tvalues = tvalues, values
+                increments, tincrements = tincrements, increments
                 gamma_valid[:] = False
                 for m in range(n):
                     if roles[m] == 5 + latent:
                         half_valid[m] = False
                 current = value
-                inc = tinc
+                inc, tinc = tinc, inc
                 improved = True
         if not improved:
             # roles of flexible members given the paths
@@ -524,7 +534,7 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, mdelta, max_iter,
                 trial_roles[m] = best_r
                 trial_lp[m] = lpr[best_r]
             if not np.array_equal(trial_roles, roles):
-                tinc = np.zeros(B)
+                tinc[:] = 0.0
                 value = _evaluate_cached(tc, mcls, mknown, trial_roles, paths, which, theta, floor, mdelta, tinc,
                                          alone_inc, trial_lp, valid, values, increments, transition)
                 if value > current + 1e-9:
@@ -533,7 +543,7 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, mdelta, max_iter,
                     gamma_valid[:] = False
                     half_valid[:] = False
                     current = value
-                    inc = tinc
+                    inc, tinc = tinc, inc
                     improved = True
         if not improved:
             # The two latent flip gains share messages until an accepted flip changes the paths.
@@ -554,10 +564,10 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, mdelta, max_iter,
                     for b in range(t + 1, B):
                         trial[latent, 0, b] = paths[latent, 1, b]
                         trial[latent, 1, b] = paths[latent, 0, b]
-                    tinc = np.zeros(B)
-                    tvalid = valid.copy()
-                    tvalues = values.copy()
-                    tincrements = increments.copy()
+                    tinc[:] = 0.0
+                    tvalid[:] = valid
+                    tvalues[:] = values
+                    tincrements[:] = increments
                     tvalid[:, 2] = False
                     tvalid[:, latent] = False
                     tvalid[:, 5 + latent] = False
@@ -566,13 +576,15 @@ def fit(tc, mcls, mknown, roles0, paths0, which, theta, floor, mdelta, max_iter,
                     if value > current + 1e-9:
                         paths = trial
                         flips_valid = False
-                        valid, values, increments = tvalid, tvalues, tincrements
+                        valid, tvalid = tvalid, valid
+                        values, tvalues = tvalues, values
+                        increments, tincrements = tincrements, increments
                         gamma_valid[:] = False
                         for m in range(n):
                             if roles[m] == 5 + latent:
                                 half_valid[m] = False
                         current = value
-                        inc = tinc
+                        inc, tinc = tinc, inc
                         improved = True
         if not improved:
             break

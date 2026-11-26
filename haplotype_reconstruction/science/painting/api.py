@@ -14,8 +14,9 @@ from .emissions import (
     state_alt_probabilities,
     unpack_emissions,
 )
-from .read_factor import swap_classes
+from .read_factor import donor_ratio, swap_classes
 from .read_inputs import design_weights
+from .read_operator import TAPE, apply_bin, empty_tape
 from .states import background_alt_frequency, build_bins, build_states
 
 __all__ = [
@@ -30,5 +31,9 @@ __all__ = [
     "build_states",
     "build_bins",
     "swap_classes",
+    "donor_ratio",
     "design_weights",
+    "TAPE",
+    "apply_bin",
+    "empty_tape",
 ]

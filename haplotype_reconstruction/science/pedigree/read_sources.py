@@ -8,7 +8,7 @@ with weight A_b(u, v) E_{b+1}(v)[c, c'], where
 
 A_b is the painting's label-level Hamming transition (same / one / two founders change; applied in O(S^2) per class),
 e_b the tempered scalar bin emission at the painting's PATH strength on the reference grid, and M_b with log scale l_b
-the bin's read matrix (painting.read_factor): it carries the class at the previous bin's last selected site through
+the bin's structured read product (painting.read_operator): it carries the class at the previous bin's last selected site through
 the bin's sites to the class at its last site; the first bin starts from the class law at the component's first
 selected site. An ordered v with v1 > v2 reads the unordered pair's matrix with both class indices permuted by J
 (read_factor.swap_classes), so the chain is invariant under the homologue relabelling (a, b, c) <-> (b, a, J c). The
@@ -49,7 +49,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ..painting.api import swap_classes
+from ..painting.api import empty_tape, swap_classes
+from .read_gaps import ForeignReads
 from .read_source_kernels import _background_alt, _backward, _oriented
 from .sources import SourceInferenceError
 
@@ -78,6 +79,10 @@ class ReadInputs:
     initial: np.ndarray
     minor: int
 
+    def chain_inputs(self):
+        return (self.read, self.read_log, self.initial, swap_classes(self.minor), empty_tape(),
+                np.empty((0, 0)))
+
 
 @dataclass(frozen=True)
 class SiteParts:
@@ -100,6 +105,7 @@ class SiteParts:
     site_start: np.ndarray
     site_stop: np.ndarray
     epsilon: float
+    foreign: ForeignReads | None = None
 
 
 def pair_features(states: int) -> tuple[np.ndarray, np.ndarray]:
@@ -147,38 +153,35 @@ def batch_laws(
     candidates, diplotypes, bins = emissions.shape
     states = int(round(math.sqrt(diplotypes)))
     emission = np.ascontiguousarray(np.transpose(emissions, (0, 2, 1)).reshape(candidates, bins, states, states))
-    available = np.asarray(available, dtype=np.bool_)
+    available = _writable(available, np.bool_)
     if read is None:
         read_matrix = np.ones((candidates, 1, bins, 1, 1), dtype=np.float32)
         read_log = np.zeros((candidates, 1, bins), dtype=np.float64)
         initial = np.ones((candidates, 1), dtype=np.float64)
         perm = np.zeros(1, dtype=np.int64)
+        tape, exponent = empty_tape(), np.empty((0, 0))
         has_reads = np.zeros(candidates, dtype=np.bool_)
     else:
         if sites is None:
             raise ValueError("the read state's source laws need its per-site parts")
-        read_matrix = _writable(read.read, np.float32)
-        read_log = _writable(read.read_log, np.float64)
-        initial = _writable(read.initial, np.float64)
-        perm = swap_classes(int(read.minor)).astype(np.int64)
+        read_matrix, read_log, initial, perm, tape, exponent = read.chain_inputs()
+        read_matrix = _writable(read_matrix, read_matrix.dtype)
+        read_log = _writable(read_log, np.float64)
+        initial = _writable(initial, np.float64)
         has_reads = available & ~np.asarray(sites.deep, dtype=np.bool_)
-    # evidence-free samples: the uniform chain (no emission, no read state)
-    absent = np.flatnonzero(~available)
-    if len(absent):
-        emission[absent] = 0.0
-        read_matrix[absent] = 0.0
-        read_matrix[absent, :, :, 0, 0] = 1.0
-        read_log[absent] = 0.0
-        initial[absent] = 0.0
-        initial[absent, 0] = 1.0
-    classes = read_matrix.shape[3]
-    pair_index = _pair_index(states, read_matrix.shape[1])
+    if not np.all(available):
+        initial = initial.copy()
+        initial[~available] = 0.0
+        initial[~available, 0] = 1.0
+    classes = initial.shape[1]
+    pair_index = _pair_index(states, read_log.shape[1])
+    bin_args = (emission, read_matrix, read_log, tape, exponent, pair_index, perm, available)
     same = _writable(transition.same, np.float64)
     one = _writable(transition.one_change, np.float64)
     two = _writable(transition.two_changes, np.float64)
     beta = np.empty((candidates, bins, classes, states, states), dtype=np.float64)
     failed = np.full(candidates, -1, dtype=np.int64)
-    valid = _backward(emission, read_matrix, read_log, pair_index, perm, same, one, two, beta, failed)
+    valid = _backward(*bin_args, same, one, two, beta, failed)
     _raise_lost(valid, failed, sample_offset, component_index, "candidate source chain lost all supported mass",
                 sample_rows)
     pair_first, pair_second = pair_features(states)
@@ -193,13 +196,12 @@ def batch_laws(
     entering = np.empty((candidates, bins, classes, states), dtype=np.float64)
     failed[:] = -1
     valid = _oriented(
-        emission, read_matrix, read_log, pair_index, perm, initial, same, one, two,
+        *bin_args, initial, same, one, two,
         _writable(selector, np.float64), beta, pair_first, pair_second, out["pair_mass"], out["pi"],
         out["diagonal_flow"], out["outgoing_flow"], out["incoming_flow"], background_law, entering, failed,
     )
     _raise_lost(valid, failed, sample_offset, component_index, "transmission-oriented source propagation lost mass",
                 sample_rows)
-    del emission, read_matrix, read_log
     sizes = np.asarray(markers.bin_sizes, dtype=np.int64)
     marker_stop = np.cumsum(sizes).astype(np.int64)
     marker_start = marker_stop - sizes
@@ -221,12 +223,18 @@ def batch_laws(
             _writable(sites.gl, np.float64), _writable(sites.seen, np.bool_), _writable(sites.cohort, np.float64),
             float(sites.epsilon), _writable(sites.weight, np.float64),
         )
+    foreign = sites.foreign if sites is not None else None
+    if foreign is None:
+        foreign_args = (np.empty((0, 0, 0)), np.empty(0), np.empty(0), np.empty((0, 0)), np.empty((0, 0)), np.empty(0))
+    else:
+        foreign_args = (foreign.counts, foreign.error, foreign.loss, foreign.survival, foreign.absent,
+                        _writable(foreign.depth, np.float64))
     out["background_alt"] = np.empty((candidates, len(markers.site)), dtype=np.float64)
     lost = np.zeros((candidates, bins), dtype=np.bool_)
     _background_alt(
         background_law, entering, beta, has_reads, _writable(markers.gl, np.float64),
         _writable(markers.observed, np.bool_), _writable(markers.state_alt, np.float64),
-        _writable(markers.site, np.int64), marker_start, marker_stop, *site_args, out["background_alt"], lost,
+        _writable(markers.site, np.int64), marker_start, marker_stop, *site_args, *foreign_args, out["background_alt"], lost,
     )
     if np.any(lost):
         sample, block = map(int, np.argwhere(lost)[0])
@@ -251,7 +259,7 @@ def mixed_batch_laws(emissions, transition, selector, available, markers, *, rea
             continue
         group_read = group_sites = None
         if rows is carried:
-            group_read = replace(read, read=read.read[rows], read_log=read.read_log[rows], initial=read.initial[rows])
+            group_read = ReadInputs(read.read[rows], read.read_log[rows], read.initial[rows], read.minor)
             group_sites = replace(
                 sites, deep=sites.deep[rows], composed=sites.composed[:, rows], laws=sites.laws[:, rows],
                 class_lik=sites.class_lik[rows], gl=sites.gl[rows], seen=sites.seen[rows], weight=sites.weight[rows],

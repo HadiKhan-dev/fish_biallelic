@@ -460,22 +460,42 @@ class LabelModel:
         ``keep``), else undone. Records (p, j, gain) of every candidate in ``pairings``; returns the number kept. A move
         that leaves every label and chain as it was (the parent's swapped suffix is the same configuration, e.g. a
         homozygous pair on both sides) is no competing pairing and is not recorded."""
-        kept = 0
-        records = []
         margin = max(self.pairing_odds, self.config.gain_quantum)
+        by_parent = {}
         for p, j in self.pairing_candidates():
-            gain, rows, X0, V0, changed = self._pairing_move(p, j)
-            if not len(changed):
-                continue  # the same state: nothing to choose between
-            records.append((p, j, float(gain)))
-            taken = keep and gain > margin
-            if taken:
-                kept += 1
-                self.pairing_moves.append((p, j, float(gain)))
-            else:
-                self._restore(rows, X0, V0, changed)
-        self.pairings = records
-        return kept
+            by_parent.setdefault(p, []).append(j)
+
+        def evaluate(p):
+            records, kept = [], []
+            for j in by_parent[p]:
+                gain, rows, X0, V0, changed = self._pairing_move(p, j)
+                if not len(changed):
+                    continue  # the same state: nothing to choose between
+                record = (p, j, float(gain))
+                records.append(record)
+                if keep and gain > margin:
+                    kept.append(record)
+                else:
+                    self._restore(rows, X0, V0, changed)
+            return p, (records, kept)
+
+        # Each move can update only the parent's affected rows. Re-solving its children
+        # reads those rows and their parents, the same conflict bounds as a sweep block.
+        # Different edges of one parent still depend on the earlier accepted moves.
+        results = {}
+        if self.map_work is not None and len(by_parent) > 1:
+            for wave in self._waves(by_parent):
+                results.update(self._concurrent(evaluate, wave))
+        else:
+            results.update(map(evaluate, by_parent))
+        self.pairings = []
+        kept_count = 0
+        for p in by_parent:
+            records, kept = results[p]
+            self.pairings.extend(records)
+            self.pairing_moves.extend(kept)
+            kept_count += len(kept)
+        return kept_count
 
     def ambiguous_pairings(self):
         """(p, j) of the final state whose other pairing is within ``pairing_odds`` of J: not decided by the data."""

@@ -20,7 +20,7 @@ from ...core.errors import InvariantError
 from ...engine.records import record_diagnostic
 from ...science.shared.read_loss import check_zero_loss
 from ...science.evidence.read_sharing import read_sharing
-from ...science.painting.parameters import PaintingParameters
+from ...science.painting.parameters import READ_ACTION_MEMORY_FRACTION, PaintingParameters
 from ...science.painting.read_inputs import ReadEmissionBuilder, split_minor
 from ...science.shared import reads
 from ...store.container import CheckpointFile
@@ -60,21 +60,24 @@ def with_detection(parameters: PaintingParameters, detection) -> PaintingParamet
     return replace(parameters, read_state=replace(parameters.read_state, detection_z=float(detection["z"])))
 
 
+def _count_inputs(file, evidence_identity):
+    arrays = evidence_records.load_arrays(file, ("counts", "positions"), expected_identity=evidence_identity)
+    found = read_items(file, "evidence", evidence_identity, ("schema", "contig", "decisions"))
+    if found is None:
+        raise InvariantError("the painting's read state requires the evidence decisions")
+    counts, positions = np.asarray(arrays["counts"]), np.asarray(arrays["positions"])
+    return found.payload, counts, positions, counts.sum(axis=2)
+
+
 def _library_laws(file: CheckpointFile, evidence_identity: str, settings):
     """Read the count inputs and fit their library survival laws once per contig."""
     z = settings.detection_z
     if z is None:
         raise InvariantError("the read state's detection threshold is resolved per run (the calibration's "
                              "read_detection, carried on the paintings' parameters)")
-    arrays = evidence_records.load_arrays(file, ("counts", "positions"), expected_identity=evidence_identity)
-    found = read_items(file, "evidence", evidence_identity, ("schema", "contig", "decisions"))
-    if found is None:
-        raise InvariantError("the painting's read state requires the evidence decisions")
-    info = found.payload
-    counts, positions = np.asarray(arrays["counts"]), np.asarray(arrays["positions"])
+    info, counts, positions, depth = _count_inputs(file, evidence_identity)
     sharing = evidence_records.load_read_sharing(file, evidence_identity)
     survival = reads.fit_survival(sharing, settings, z) if sharing is not None else reads.no_survival(settings)
-    depth = counts.sum(axis=2)
     library, survivals, splits, strengths = reads.library_groups(
         depth, positions, str(info["contig"]), settings, read_sharing, z, map_work=threaded_each
     )
@@ -96,12 +99,15 @@ def _library_laws(file: CheckpointFile, evidence_identity: str, settings):
 
 
 def contig_read_libraries(file: CheckpointFile, evidence_identity: str, parameters: PaintingParameters) -> tuple:
-    """(libraries, splits) of the contig as the painting's read state groups its samples (stage_builder): each library
+    """Library summaries, split diagnostics and fitted setup as grouped by the painting's read state. Each library
     dict(library, samples, status: 'fitted' (shares reads) or 'none', max_z: its largest usable-bin excess / SE,
     bin_bp: that bin's lag interval, usable: its usable bins); each candidate split as reads.library_groups logs it
     (level, sizes, contrast z, survival difference, accepted, the parts' max z and fit status). ``parameters``
-    carry the run's z* (with_detection)."""
-    _, _, _, _, _, library, _, splits, laws, strengths = _library_laws(file, evidence_identity, parameters.read_state)
+    carry the run's z* (with_detection). The last returned item is the fitted library setup for later calibration
+    tasks, from exactly the laws used to produce those diagnostics."""
+    _, _, _, _, survival, library, survivals, splits, laws, strengths = _library_laws(
+        file, evidence_identity, parameters.read_state,
+    )
     libraries = [dict(library=k, samples=int((library == k).sum()), status=law.status,
                       max_z=float(strengths[k]["max_z"]),
                       bin_bp=None if strengths[k]["bin_bp"] is None else list(strengths[k]["bin_bp"]),
@@ -111,7 +117,15 @@ def contig_read_libraries(file: CheckpointFile, evidence_identity: str, paramete
                  for k, law in enumerate(laws)]
     splits = [dict(split, sizes=list(split["sizes"]), parts_max_z=list(split["parts_max_z"]),
                    parts_status=list(split["parts_status"])) for split in splits]
-    return libraries, splits
+
+    def law_payload(law):
+        return dict(grid=law.grid, weights=law.weights, loss=law.loss, status=law.status, fitted_loss=law.fitted_loss)
+
+    setup = dict(
+        library=library, survival=law_payload(survival),
+        survivals=tuple(None if law is None else law_payload(law) for law in survivals), splits=splits,
+    )
+    return libraries, splits, setup
 
 
 def detection_margins(contigs, detection, route: str, tolerance: float) -> tuple[list, list, list]:
@@ -173,6 +187,8 @@ def effective_painting(parameters: PaintingParameters, calibration) -> PaintingP
     and the same threshold."""
     if parameters.read_classes == 1:
         return parameters
+    parameters = replace(parameters, foreign_read_share=calibration.get("foreign_read_share",
+                                                                         parameters.foreign_read_share))
     if calibration.get("read_state", READ_STATE_ON) != READ_STATE_ON:
         return replace(parameters, read_classes=1)
     # the run's family-wise detection threshold z*, which every read-state builder of the run uses
@@ -189,6 +205,8 @@ def stage_builder(
     *,
     unit_batches: bool = False,
     label_correlation: float | None = None,
+    read_setup=None,
+    corrected_rows: tuple[int, ...] = (),
 ) -> Callable:
     """The emission builder of one contig's painting: ``base`` unchanged when ``parameters.read_classes`` is 1 (no read
     state), else the read-state builder with 2 minor + 3 = read_classes classes over ``base``'s emissions. Its inputs
@@ -202,14 +220,24 @@ def stage_builder(
     read_classes classes keeps the default). ``label_correlation``: the label-error strength
     (parameters.LABEL_ERROR_CORRELATION) when a decode of this builder reads the label-error statistic (the
     reference paintings), else None. The read matrices take the bin-level tempering correction
-    (science.painting.read_factor)."""
+    (science.painting.read_factor). When calibration already fitted the libraries, its robustness
+    receipt supplies the same laws and memberships through ``read_setup``. ``corrected_rows``: the samples whose
+    likelihood rows QC A replaced (contamination.corrected_evidence_with_rows, which every consumer of the corrected
+    evidence passes here): they carry no uniform foreign class (ReadEmissionBuilder)."""
     if parameters.read_classes == 1:
         return base
     settings = parameters.read_state
     minor = split_minor(parameters.read_classes)
-    info, counts, positions, depth, survival, library, survivals, splits, laws, _ = _library_laws(
-        file, evidence_identity, settings
-    )
+    if read_setup is None:
+        info, counts, positions, depth, survival, library, survivals, splits, laws, _ = _library_laws(
+            file, evidence_identity, settings
+        )
+    else:
+        info, counts, positions, depth = _count_inputs(file, evidence_identity)
+        survival = reads.ReadSurvival(**read_setup["survival"])
+        library, splits = read_setup["library"], read_setup["splits"]
+        survivals = [None if law is None else reads.ReadSurvival(**law) for law in read_setup["survivals"]]
+        laws = [survival if law is None else law for law in survivals]
     model = from_payload(EvidenceDecisions, info["decisions"]).read_model
     if model.selected is None:
         # the evidence stage's fixed binomial model (science.evidence.run: fixed_model(read_model.fixed_error))
@@ -230,9 +258,30 @@ def stage_builder(
         f"{int(sum((library == k).sum() for k, law in enumerate(laws) if law.status != 'fitted'))} samples in "
         f"libraries without read sharing (both bypass the read state; detection z* {settings.detection_z:.3f}); "
         f"covering depth per homologue median "
-        f"{float(np.median(covering)) if len(covering) else 0.0:.2f}"
+        f"{float(np.median(covering)) if len(covering) else 0.0:.2f}; "
+        f"foreign share {parameters.foreign_read_share:g}"
+        + (f" (none for the {len(corrected_rows)} QC A-corrected samples {list(corrected_rows)})"
+           if corrected_rows and parameters.foreign_read_share else "")
     )
     # Table chunks use the ordered map. Site kernels use the ambient team.
     return ReadEmissionBuilder(base, counts, positions, survival, error_rate, covering, cohort, minor, settings,
                                confidence_correlation, library, survivals, map_work=threaded_each,
-                               unit_batches=unit_batches, label_correlation=label_correlation)
+                               unit_batches=unit_batches, label_correlation=label_correlation,
+                               foreign_read_share=parameters.foreign_read_share, action_bytes=_action_bytes(),
+                               corrected_rows=corrected_rows)
+
+
+def _action_bytes() -> int | None:
+    """The compiled-action memory of this run's builders (ReadEmissionBuilder.compiles): READ_ACTION_MEMORY_FRACTION of
+    the run's memory limit (the job's memory capacity, or the configured limit when lower); None (always compile)
+    where no limit can be read. A capacity, not the live usage, so the route of a unit is the same at every point of
+    the run on one allocation."""
+    from ...engine.memory import current_governor
+    from ...engine.runtime import memory_pressure
+
+    pressure = memory_pressure()
+    limit = None if pressure is None else pressure[1]
+    governor = current_governor()
+    if governor is not None:
+        limit = governor.limit if limit is None else min(limit, governor.limit)
+    return None if limit is None else int(READ_ACTION_MEMORY_FRACTION * limit)

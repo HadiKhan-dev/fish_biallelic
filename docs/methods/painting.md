@@ -86,10 +86,12 @@ Cost and scope: O(n B S'^2). These terms describe the unit’s work/storage dime
 
 Start from the named copying/error parameters and execute the fixed number of EM updates. Each E-step supplies both the rate and error updates; use the fixed grid/refinement and bounded searches with their stated tie preferences. Round final estimates to the named natural-log grid. Sample reductions follow sample order independently of memory batches. Run-level calibration, described below, supplies the outlier mixture and divisor before each component's final fit.
 
+Neither M-step lowers its part of the expected complete-data log-likelihood, and the tempered emissions do not depend on (rho, a, b), so the log-likelihood never falls in exact arithmetic. A fall of more than `EM_DECREASE_RELATIVE` times its magnitude plus `EM_DECREASE_NATS`, or a log-likelihood that is not finite, means a numerically corrupted E-step: the fit raises an invariant error instead of returning a model. Rounding moved the recorded fits of the 4.23 runs by at most 5.6e-16 relative; the corrupted TroMau label-strength fits of the first QC A repair fell by 1.2e-4 to 3.9e-4 relative and collapsed to a boundary point.
+
 
 Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py), [stages/painting/tasks.py](../../haplotype_reconstruction/stages/painting/tasks.py), [science/painting/run.py](../../haplotype_reconstruction/science/painting/run.py).
 
-Parameters by name: `initial_switch_rate`, `initial_error_entry`, `initial_error_exit`, `estimation_iterations`, `estimate_grid`, `RATE_BOUNDS`, `ENTRY_BOUNDS`, `EXIT_BOUNDS`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `initial_switch_rate`, `initial_error_entry`, `initial_error_exit`, `estimation_iterations`, `estimate_grid`, `RATE_BOUNDS`, `ENTRY_BOUNDS`, `EXIT_BOUNDS`, `EM_DECREASE_RELATIVE`, `EM_DECREASE_NATS`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(N L_s S^2/2); O(N B S'^2); O(B). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -98,34 +100,28 @@ Cost and scope: O(N L_s S^2/2); O(N B S'^2); O(B). These terms describe the unit
 
 Decode both conventions with the structured two-track Viterbi recurrence. Apply the same-label/fidelity and label-change candidate rules before centring scores. Ties use the declared Viterbi policy and traceback convention; the decoder does not replace them with a generic argmax.
 
-The read-state search keeps one history per ordered track-pair state, with its log score and normalized
-read-class vector $v$. For each destination it ranks the retained predecessors by their prefix score plus
-the copying transition and $\log(v M \mathbf{1})$, where $M$ is the destination bin's read matrix for that
-pair. The destination's scalar emission and matrix log scale are common to those contenders. The reverse
-convention uses transposed copying transitions and read matrices. Its last contraction weights the original
-first bin by the first-site class law, and the track initial law also enters at that bin. Copying bounds and
-the largest coefficient of the contraction skip contenders outside the tie band. The search is exact over the
-current one-history candidates when it finishes within $(C+1)S'$ inspected predecessors per destination. This
-is the number of class-specific leaders plus a scalar leader for each second source track. When the exact
-search needs more work, keep its visited candidates and all predecessors sharing either founder label with
-the destination, subject to the same safe pruning. For each second source track, also consider the
-scalar copying leader under the usual tie preference and the first source track maximizing each of the
-$C$ prefix class masses after copying. Also consider the scalar copying leader along each first source track.
-Rank their union by the original full marginal score and apply the predecessor preference within the tie band.
-The shortlist can omit a source that changes both founder labels. The highest score before tie selection
-corresponds to at least $1/C$ of the unrestricted peak mass, including the prefix and copying weights.
-This compares the same one-history input for a single step. The complete traceback has no such bound.
+The read-state search retains one prefix per ordered track pair with its log score and normalized read-class
+vector. Each destination ranks those prefixes using the copying transition and a class contraction with its bin
+operator. The reverse convention transposes both operators and contracts the original first bin against the entry
+class law.
 
-Implementation: [science/painting/fidelity.py](../../haplotype_reconstruction/science/painting/fidelity.py) and [science/painting/read_chain.py](../../haplotype_reconstruction/science/painting/read_chain.py).
+Two linear copying maxima find the leaders of total, own, foreign and individual class masses. Each destination
+scores the total, own and foreign leaders, the own-class leaders, and the foreign leader with the largest weighted
+residual. It also scores itself and the preferred prefix in the scalar copying tie band. The full marginal score
+and declared tie preference select its parent. The largest offered mass is at least $1/D$ of the unrestricted peak
+over the previous bin's retained prefixes, where $D$ is the read class count.
 
-Parameters by name: `VITERBI_TIE`. Values, units and current rationale are in the [generated parameter reference](../reference/parameters.md).
+Traceback starts from the preferred terminal state. At each edge it contracts the fixed suffix through the current
+bin and scores it against all retained prefixes. The seed parent stays if its score lies in the tie band.
+Each replacement improves the score of the full path with that suffix. This conditional search can miss the global
+marginal optimum.
 
-Cost and scope: The scalar path search is O(n B S′²). The read-state search contracts each destination's C-by-C
-matrix in O(n B S′² C²). It computes each needed column of class leaders once per sample and bin,
-for O(C S′²) preprocessing work. At each of O(S′²) destinations the bounded scan, shared-label pairs and class leaders
-require O(C S′) candidate visits. The O(C) marginal score therefore bounds traceback work by
-O(n B C² S′³), cubic in the founder count for fixed class width. Backpointers and active class vectors
-use O(B S′² + S′² C) space per sample apart from the input matrices.
+Cost and scope: for $S'$ track states and fixed own-class width, the search and traceback take $O(S'^2 D + S'^3)$ work per bin
+in addition to the site transfers. Retained prefixes take $O(B S'^2 D)$ space per sample. The decoder uses the
+read-state sample batches.
+
+Implementation: [science/painting/read_chain.py](../../haplotype_reconstruction/science/painting/read_chain.py).
+Parameters by name: `VITERBI_TIE`. See the [parameter reference](../reference/parameters.md) for the tie band.
 
 <a id="pr10"></a>
 ## pr10 Parsimonious track order of decoded paths and painted switch counts
@@ -477,34 +473,157 @@ in the library's fitted distribution. The fine painting had zero such spans acro
 bc8, std and TroMau. The six paired reset replays agreed with their controls on released genotypes and
 switches.
 
-Read-state tempering. Each site's per-class read factor is tempered with its bin's weight w (one over the bin's
-design effect), f_l(c) = R_l(c)^w. The untempered factors average to one over the site's class law,
-Σ_c π_l(c) R_l(c) = 1. By Jensen's inequality the tempered average is strictly below one when 0 < w < 1 and
-R_l varies among classes with positive probability under π_l. This deficit arises at heterozygous allele
-configurations, which can also occur for a repeated BACKGROUND label. The painting's copying-model fits and
-decodes, reference repaint, calibration, family phase, and the pedigree's source chain and map-scale frames
-use the bin-level correction (`science/painting/read_factor.py`, 4.22 D5 and D5P). Label continuity scores scalar
-part emissions in its search and final verification and sees the correction through the fitted copying model.
+### Foreign-read class and bin operators
 
-Each label pair's bin transfer is exp(l_b) M̂_b, where M̂_b is the stored, rescaled tempered matrix and l_b
-is its separate log scale. The correction preserves M̂_b and sets l_b = w log(α_b M_b^1 1) − log(α_b M̂_b 1),
-with M_b^1 the untempered bin matrix including its scale. The bin's total from the entering class law α_b then
-equals the bin's untempered read likelihood to the power w, the same exponent used for the scalar emission.
-The carry starts from the class law at the first bin's entry site and normalises α_{b−1} M̂_{b−1} to get α_b.
-This approximates the full predictor by carrying the class law along a fixed label pair, omitting label transitions
-and scalar emissions from the carry. In exact arithmetic the correction multiplier is at least one and equals
-one at w = 1, where rounding contributes about 10⁻⁸ nats. The correction makes a library without read sharing
-exactly neutral, so its samples bypass the read state.
+`[painting] foreign_read_share` is a fraction of reads estimated by default. A declared value in
+`[0, 1)` fixes the fraction. One foreign read retains a uniformly chosen donor label, including
+BACKGROUND, while it spans sites. The Poisson mean foreign depth is
+$m=2\,\mathrm{share}\,\mathrm{covering}$, where covering is per homologue. At a selected-site gap with fitted
+survival $\phi$, the probability of no foreign arrival is $q=\exp[-m(1-\phi)]$. An own read state follows its
+depth-conditioned transition with probability $q$. A departing foreign state restarts at the site's own class
+law with probability $(1-\phi)q$. Arrivals and renewals choose a uniform donor.
 
-Two passes preserve parallelism over sample and 64-bin chunks in the first kernel, which also returns each bin's
-untempered row sums M_b^1 1 (a backward vector chain over the bin's sites, O(C²) per site). The second kernel
-carries the class law through the stored single-precision matrices for each sample and label pair. The results
-agree with a one-pass double-precision carry to about 2·10⁻⁸ nats. The read-matrix build costs 23–26 % more on
-synthetic batches at the same core use. Calibration's held-out blocks add the visible build's log-scale shift
-to the visible-plus-hidden log scale for the same pairs, bins and weights. The hidden sites stay at weight one.
-Correcting the visible matrices alone made the held-out ratio inconsistent (zero_stress then chose divisor 1 and
-gained half again as many genotype errors). The map-scale frames build the prefix through the last requested bin
-to carry the class law, then select the requested bins.
+The genotype likelihood anchors the foreign factor. It compares the count under a foreign base from the donor
+with the count under the sample's genotype, allowing library loss and base error. The emitting labels are
+excluded from foreign destination classes, even at unobserved sites. A mirror pair swaps the own homologue
+classes and keeps the donor coordinates fixed.
+
+Only an allele the sample's genotype does not carry identifies a foreign read. Under each ordered allele
+configuration of the two homologues, a donor base with an allele that one homologue carries has ratio one: the read
+could equally be one of the sample's own reads (`read_factor.donor_ratio`, shared by the painting's site factors,
+their held-out count laws and the pedigree's read gaps). BACKGROUND's fractional allele mixes the REF and ALT
+ratios linearly. Without this rule the foreign class stood in for the own read state wherever that state is an
+approximation: the lumped 'balanced' read class redraws its split at every site, so a long-read sample with a
+persistent uneven split (for example two reads on one homologue and six on the other across a window) was
+under-predicted at every heterozygous site, and a donor read from a label locally identical to one of the pair's
+labels acted as one more persistent own read. Its benefit grows with the number of covered heterozygous sites, so
+it outweighed even a share of $10^{-15}$ and results jumped as the share approached zero. On famhs_d chr18 (fold 0,
+held-out score over share 0) the untempered gain was +555 nats at $10^{-15}$ and +2,746 at $10^{-7}$, almost all in
+sample-windows whose hidden heterozygous sites fall in the balanced class with an uneven split and none in windows
+the exact classes cover; with nine classes, where those splits are exact, it was 0 and +141. With the rule it is
+-0.1 and +53 at five classes. Pooled over the calibration material, a share of $10^{-7}$ moved the divisor
+criterion's margin by about 580 nats instead of 21,876. A foreign read from a different haplotype still carries
+alleles the sample's genotype lacks wherever the haplotypes differ, so genuine contamination keeps its evidence.
+
+The libraries that QC A corrected ([Contamination](#contamination)) carry no uniform foreign class: $m=0$ for
+them, and their foreign columns form no donor ratio, in the repaint and in every later consumer of the corrected
+likelihoods (the pedigree's source and child chains and map-scale frames, family phase). With no entry and no
+arrival those classes are unreachable, so their factor is free: it is zero at the row's observed sites in the site
+tape and in the pedigree's within-bin BACKGROUND chain, which leaves their backward messages only the own classes'
+restart. With GL-anchored donor ratios the unreachable classes dominated the max-normalised backward messages on
+long reads and underflowed the own classes to zero; with a unit factor they still set the normalisation, the own
+classes' maximum falling to $2.6\times10^{-22}$ of it. The child chains' read terms keep a unit factor: their
+products carry no gauge shared across classes. Their corrected likelihood is already a fitted foreign-read model, with
+its own $\alpha$ (0.010 to 0.24 on TroMau) and a population or donor law $q$. The anchor above assumes the
+uncontaminated binomial read law, so the class would explain the contaminant's reads a second time: at a
+contaminated site its column grows by about $(1-\alpha)+\alpha q/e$, up to about 200 for $\alpha\approx 0.2$. On
+TroMau (six corrected libraries, estimated share $1.2\times10^{-4}$) the double count moved the repaint's label
+model on all 22 contigs and fragmented the corrected libraries' paintings; the pedigree lost two parent pairs and
+released one edge whose margin came from a corrected competitor. Without the class for those rows the two parent
+pairs return, the artifact edge goes, and the repaint's label models return to 4.22's (exactly on 8 of 22 contigs,
+within a grid step on the rest). The uniform class at the run share is a nested, much smaller component of the same
+mixture, so one model per row avoids the double count. A corrected row's read state is then the own classes alone,
+as at zero share; other rows are unchanged. The correction is site by site, so it does not model a long contaminant
+read that spans many sites. On a known-truth long-read simulation with five corrected libraries (2-30 %
+contaminated) and a true share of 3e-3, the corrected libraries gained phased heterozygotes (1.38 M to 2.13 M) and
+lost genotype errors (1.148 M to 0.777 M) against the double count, but their switch errors rose (189 to 535, long
+switches 25 to 100); the pedigree gained one true edge and the other 55 samples were unchanged.
+
+A bin represents the ordered product of these site operators. Each uses a small own block and a foreign update
+from persistence, a uniform arrival and a restart on departure. The forward row action walks the sites in order
+and the adjoint walks them in reverse. Each action takes $O(C^2+X)$ work per site for $C$ own classes and $X$
+donor labels and returns a separate log gauge. All strengths and painting grids use the same site operator.
+At zero share the site table has no foreign rows or arrival terms. Its fixed-width own-class bin product is
+compiled once and reused by the copying fits, forward–backward, and Viterbi. At positive share the extended
+bin action (own classes and donor labels) is compiled the same way in binary64, once per strength, while one
+strength's compiled actions of every sample of the component fit half the run's memory limit; larger panels, and
+actions whose rows need separate numerical gauges, use the site walk. Both routes are exact. Compiling is
+$O(C^2+X)$ per site and basis row, and each application of the compiled action costs $(C+X)^2$ against the
+walk's $O(C^2+X)$ per site. Samples that bypass the read
+state use the scalar likelihood, including their held-out count scores.
+
+Calibration replaces each hidden site's GL ratio with its normalized ALT-count probability at the observed depth.
+The own classes use their depth-conditioned count laws. A foreign class averages over which read is replaced
+by a donor base and over the library loss probability. The cohort outlier term uses the own-class average.
+The hidden sites have weight one. The visible and visible-plus-hidden bin actions share the visible D5P
+correction; the two actions are contracted between the visible-data forward and backward messages.
+
+
+### Estimating the foreign-read share
+
+After fitting the outlier rate, the automatic calibration scores up to 48 evenly spaced reference
+windows per contig, using the reference-window boundaries of divisor calibration. It reuses
+the fitted library laws from the robustness round and scores the weight-one P9 likelihood.
+P9 carries the own split in every foreign state. Its foreign factor removes one base only in
+homozygous configurations and excludes the sample's two copied labels from donor states.
+
+Each window is scored under the painting's own copy chain, as a prediction from its flanks:
+
+- The window is extended by `share_flank_windows` (two) reference windows of the same panel on
+  each side, fewer at a panel's ends.
+- Over the extended window the label pair is ordered, and its two tracks change label
+  independently by the painting's jump process at its starting rate (`initial_switch_rate`, two
+  changes per Morgan per track on the working map). Across a site gap a track moves to one of the
+  other S − 1 labels, BACKGROUND included, with the painting's probability θ
+  (`painting.transitions`). The pair starts uniform at the extended window's first site.
+- The flanks are scored at the same share as the window, with the same read state.
+- The foreign occupancy is re-drawn from its stationary law at both window edges, so no foreign
+  read crosses an edge.
+
+With α the left flank's forward message and β the right flank's backward message at share $s$,
+both marginal over foreign occupancy, the window scores
+
+$$\log(\alpha\, M_w(s)\, \beta) - \log(\alpha\, B_w\, \beta),$$
+
+where $M_w(s)$ is the window's chain at share $s$ and $B_w$ the same copy and own-class steps with
+the window's data removed (unit factors, no foreign reads). Without flanks and switches the score
+is the block likelihood of one fixed pair under the uniform pair prior, the estimator it replaces.
+A sample is scored in a window only when it has an observation inside the window.
+The read state must hold over the whole extended window: a sample that bypasses it anywhere there
+is not scored.
+
+Why the chain and the flanks. A fixed pair per window lets the foreign class explain a crossover
+inside the window. An unpinned pair lets a homozygous pair plus a foreign read from the sample's
+own other founder explain a stretch where one homologue has few reads. The painting sees neither,
+because its pair switches along the contig and its flanks pin the pair. On saved stage-D inputs the
+fixed-pair blocks gave clean long-read simulations shares of 1.2e-4 to 4.3e-4; the chain with flanks
+gives them 0 to 8e-6. The largest residual (7.9e-6, 3.7 nats) comes from three wrong founder alleles
+in one window; the chain has no panel-error state, so a cluster of panel errors that the pinned
+pair cannot copy around still reads as foreign. On simulations with foreign reads the estimate
+falls by about a sixth (1-41 %). Only a small part of that fall is the removed artefact; most of it
+is a larger penalty per unit share in windows without foreign events, because the flanks pin a
+heterozygous label pair whose two labels are then both excluded as donors. On one design that
+differs only in its true share the estimate is close to proportional to the truth (0.34-0.44 of
+it, with no offset at zero), where the fixed-pair blocks ran at 0.41-0.69 with an offset of about
+1.2e-4. Released pedigree and phase on the foreign gate designs are unchanged at the lower
+estimates. On TroMau the estimate is unchanged.
+
+Cost. Each site's forward or backward action costs $O(X^2 C (C + X))$ per sample and share for
+$X$ labels and $C$ own classes: every ordered pair transports the own class of every foreign column.
+That is the order of the fixed-pair block, over about five times the sites, with both flanks
+recomputed at every evaluated share. Each pair's factors come from per-site tables that do not
+depend on the pair, so memory stays $O(X^2 C X)$ per sample.
+
+Each contig evaluates shares 0, 0.00001, 0.00003, 0.0001, 0.0003, 0.001, 0.003, 0.01 and 0.03
+and one midpoint inside each interval. The gather sums scores by sample before pooling them.
+It refines the pooled grid maximum by golden-section search on the piecewise quadratic through
+the neighbouring evaluated knots and midpoints. Interpolation uses log share on positive intervals
+and linear share at zero. Divisor fitting and painting use the unadjusted estimate.
+
+### Read-state tempering
+
+Each site's read factor is raised to the bin weight $w$, the inverse design effect. The first D5P pass uses a
+backward action to compute the untempered row sums $u_b=M_b(1)\mathbf 1$. The second carries a normalized class
+law $\alpha_b$ for each label pair across bins. It starts at the first bin's entry site, with foreign occupancy
+$1-\exp(-m)$ spread uniformly among the donors. At each bin the tempered action gives $y=\alpha_b M_b(w)$.
+The log correction $w\log(\alpha_b u_b)-\log(\sum y)$ adjusts the bin likelihood and $y/\sum y$ is the next law.
+At unit weight the correction is zero in exact arithmetic. The first pass runs over independent sample and bin
+chunks. The second pass runs over independent sample and label pairs, in bin order for each pair.
+
+The pedigree source chain and map frames receive the own-to-own projection after the extended correction.
+It retains foreign excursions within a bin. The phase likelihood uses the own classes. In divisor
+calibration the visible shift enters both block contractions, with weight
+one on the hidden sites.
 
 The baseline on the nine truth designs is the D5 build, whose pedigree source chain already used the correction.
 The updated model removed a quarter to a third of long-read genotype errors (famhs 2.5x went from 1.92 M to 1.43 M,
@@ -596,7 +715,8 @@ likelihoods (the flags are run-wide); otherwise their evidence path is unchanged
   with the uncorrected rates still recovered every lost edge).
 - Only genotype likelihoods are corrected: the read-state class likelihoods (painting and repaint, the pedigree's
   source chain, map-scale frames, family phase's read matrices) still read the raw counts. Validated with the read
-  state on for short reads, not for long reads.
+  state on for short reads, not for long reads. The corrected libraries carry no uniform foreign-read class
+  ([Foreign-read class](#foreign-read-class-and-bin-operators)): its donor ratios assume uncorrected likelihoods.
 - The empirical null assumes most libraries are clean: with 45 % of a synthetic cohort contaminated 23 of 135 were
   missed, with 60 % all were.
 - The known-truth checks ran at about 10x; a clean control at 1-5x (older simulator) flagged no library.

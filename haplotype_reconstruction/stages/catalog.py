@@ -135,6 +135,12 @@ STAGES = {
         kernel_roots=("science.painting", "science.evidence.likelihoods"), kernels=("painting",),
         steps=("calibrate",), prefix="painting/calibration",
     ),
+    "calibration_share": Stage(
+        "stages.painting.calibration_tasks", "stages.painting.calibration_records", "share",
+        owners=("stages.painting.calibration_tasks", "science.painting.share_estimator"),
+        kernel_roots=("science.painting.share_estimator", "science.evidence.likelihoods"), kernels=("painting",),
+        steps=("calibrate",), prefix="painting/calibration",
+    ),
     "calibration_divisor_fit": Stage(
         "stages.painting.calibration_tasks", "stages.painting.calibration_records", "divisor_fit",
         owners=("stages.painting.calibration_tasks",),

@@ -150,6 +150,18 @@ _OVERLOADS = {
             types.Array(types.float64, 2, "C", False, aligned=True),
         ),
     ),
+    "site_calls": tuple(
+        (
+            types.Array(types.float64, 2, "C"),
+            types.Array(types.float64, 2, "C"),
+            types.float64,
+            types.float64,
+            types.Array(types.int8, 2, "C"),
+            types.Array(types.boolean, 1, "C"),
+            score_type,
+        )
+        for score_type in (types.none, types.Array(types.float32, 2, "C"), types.Array(types.float32, 2, "A"))
+    ),
     "label_pairs": (
         (
             types.Array(types.float64, 3, "C", False, aligned=True),
@@ -578,6 +590,32 @@ def site_posteriors(P, site_bin, alleles, gl, cohort, epsilon, flips, own_state,
     return out
 
 
+@kernel(overloads=_OVERLOADS["site_calls"], cache=True, nogil=True)
+def site_calls(genotype, ordered, tau_g, tau_p, calls, undetermined, scores):
+    """Release one window's calls in one pass, preferring the first genotype on a tie."""
+    for i in range(len(calls)):
+        g, maximum_genotype = 0, genotype[0, i]
+        p_het = genotype[1, i] + genotype[2, i]
+        if p_het > maximum_genotype:
+            g, maximum_genotype = 1, p_het
+        if genotype[3, i] > maximum_genotype:
+            g, maximum_genotype = 2, genotype[3, i]
+        p01, p10 = ordered[1, i], ordered[2, i]
+        maximum_phase = max(p01, p10)
+        called = maximum_genotype >= tau_g
+        undetermined[i] = called and g == 1 and not maximum_phase >= tau_p
+        if called:
+            if g == 1:
+                one_first = int(p10 > p01)
+                calls[i, 0] = one_first
+                calls[i, 1] = 1 - one_first
+            else:
+                calls[i, 0] = calls[i, 1] = g // 2
+        if scores is not None:
+            scores[0, i] = maximum_genotype
+            scores[1, i] = maximum_phase
+
+
 @kernel(overloads=_OVERLOADS["label_pairs"], cache=True, nogil=True)
 def label_pairs(post, labels0, labels1, S):
     """float64 [B, S, S]: the ordered label-pair posteriors from the block-state posteriors post [B, n0, n1], each
@@ -626,4 +664,5 @@ __all__ = [
     "posterior_bins",
     "restricted",
     "site_posteriors",
+    "site_calls",
 ]

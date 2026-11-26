@@ -18,7 +18,7 @@ from .resident import resident
 
 
 def score(prepared, compact, chromosome, panel, eligibility, parameters, offset, last, claim_threads=lambda: None, *,
-          reverse=None, cuts=None):
+          reverse=None, cuts=None, ranked_pieces=None):
     """The contig's pieces from genome coordinate ``offset`` (its first scored bin) with the genome's last nominal
     unit ``last`` (regimes.axis). ``cuts``: the barrier's cut list of this contig (blocks.cut_list), checked."""
     n = len(eligibility.sample_ids)
@@ -43,6 +43,7 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, offset,
     descriptors = []
     reverse = parameters.reverse_conventions if reverse is None else reverse
     start = float(offset)
+    piece_start = 0
     for component in prepared.components:
         axis, description = blocks.pieces(component.selector_switch_probability, start, last, material,
                                           component.component_index)
@@ -50,7 +51,20 @@ def score(prepared, compact, chromosome, panel, eligibility, parameters, offset,
         descriptors.extend(description)
         state = resident(component, parameters, claim_threads, reverse=reverse)
         claim_threads()
-        values = read_block_forward.component_block_scores(state.projection, state.terms, rows, axis, len(description))
+        if ranked_pieces is None:
+            values = read_block_forward.component_block_scores(state.projection, state.terms, rows, axis,
+                                                               len(description), claim_threads)
+        else:
+            piece_slice = slice(piece_start, piece_start + len(description))
+            cached = ranked_pieces[:, piece_slice]
+            reuse = ~np.isnan(cached).any(axis=1)
+            missing = np.concatenate((np.ones(n + len(retained_pairs), dtype=bool), ~reuse))
+            values = np.empty((len(rows), len(description)))
+            values[~missing] = cached[reuse]
+            values[missing] = read_block_forward.component_block_scores(
+                state.projection, state.terms, rows[missing], axis, len(description), claim_threads
+            )
+        piece_start += len(description)
         parts["zero"].append(values[:n].T)
         parts["one_raw"].append(values[n:n + len(retained_pairs)].T)
         parts["two"].append(values[n + len(retained_pairs):].T)

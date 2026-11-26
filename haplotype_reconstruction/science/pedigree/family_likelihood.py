@@ -80,12 +80,12 @@ def _child_fb(tc, cls, known, paths, theta, floor, dm, want_gamma, gamma, inc):
         else:
             th = _switch(theta[t - 1], floor)
             st = 1.0 - th
+            stay_both, switch_one, switch_both = st * st, st * th, th * th
             for q in range(4):
-                s, r = q >> 1, q & 1
                 acc = 0.0
                 for p in range(4):
-                    ps, pr = p >> 1, p & 1
-                    w = (st if ps == s else th) * (st if pr == r else th)
+                    changed = p ^ q
+                    w = stay_both if changed == 0 else (switch_both if changed == 3 else switch_one)
                     acc += fw[t - 1, p] * w
                 fw[t, q] = acc * e[q]
         z = fw[t, 0] + fw[t, 1] + fw[t, 2] + fw[t, 3]
@@ -111,12 +111,12 @@ def _child_fb(tc, cls, known, paths, theta, floor, dm, want_gamma, gamma, inc):
                 e = emissions[t]
                 th = _switch(theta[t - 1], floor)
                 st = 1.0 - th
+                stay_both, switch_one, switch_both = st * st, st * th, th * th
                 for p in range(4):
-                    ps, pr = p >> 1, p & 1
                     acc = 0.0
                     for q in range(4):
-                        s, r = q >> 1, q & 1
-                        w = (st if ps == s else th) * (st if pr == r else th)
+                        changed = p ^ q
+                        w = stay_both if changed == 0 else (switch_both if changed == 3 else switch_one)
                         acc += w * e[q] * bw[q]
                     nb[p] = acc / scale[t]
                 bw, nb = nb, bw

@@ -57,9 +57,11 @@ def _apply_probability_emission(current, emission):
     log_maximum = math.log(maximum)
     for first in range(states):
         for second in range(states):
-            value = emission[first, second] / maximum
-            for c in range(classes):
-                current[c, first, second] *= value
+            emission[first, second] /= maximum
+    for c in range(classes):
+        for first in range(states):
+            for second in range(states):
+                current[c, first, second] *= emission[first, second]
     increment = _normalise(current)
     return increment + log_maximum if np.isfinite(increment) else -np.inf
 
@@ -73,9 +75,11 @@ def _apply_log_emission(current, log_emission):
     states = current.shape[1]
     for first in range(states):
         for second in range(states):
-            value = math.exp(log_emission[first, second] - maximum)
-            for c in range(classes):
-                current[c, first, second] *= value
+            log_emission[first, second] = math.exp(log_emission[first, second] - maximum)
+    for c in range(classes):
+        for first in range(states):
+            for second in range(states):
+                current[c, first, second] *= log_emission[first, second]
     increment = _normalise(current)
     return increment + maximum if np.isfinite(increment) else -np.inf
 
@@ -164,14 +168,20 @@ def _bin_products(
     mismatch,
     common_products,
     first_cached_child,
+    background_row=None,
+    reuse_background_row=False,
 ):
     """The scalar bin emissions of every state pair into ``work`` [S, S] (forward.py's products: the cached ones where
     finite, the site order, likelihood and zero rule otherwise); returns False when a product underflows, ``work``
-    then holding the log emissions of every pair."""
+    then holding the log emissions of every pair. A tile can share the first parent's BACKGROUND by named-state
+    products with the next row for the same child, bin and parent. The two BACKGROUND alleles remain pair-specific."""
     states = work.shape[0]
     stable_product = True
     for first in range(states):
         for second in range(states):
+            if background_row is not None and reuse_background_row and first == states - 1 and second < states - 1:
+                work[first, second] = background_row[second]
+                continue
             if common_products is not None:
                 saved = common_products[child - first_cached_child, block, first, second]
                 if np.isfinite(saved):
@@ -196,7 +206,11 @@ def _bin_products(
                 break
         if not stable_product:
             break
-    if not stable_product:
+    if stable_product:
+        if background_row is not None and not reuse_background_row:
+            for second in range(states - 1):
+                background_row[second] = work[states - 1, second]
+    else:
         for first in range(states):
             for second in range(states):
                 log_emission = 0.0

@@ -230,3 +230,8 @@ OVERLOADS["relatives._full_sib"] = tuple(
     sig[:25] + (_reset, _width) + sig[25:] for sig in OVERLOADS["relatives._full_sib"])
 OVERLOADS["relatives._m1_pairs"] = tuple(
     sig[:25] + (_reset, _width) + sig[25:] for sig in OVERLOADS["relatives._m1_pairs"])
+
+# Parallel wrappers take the live team size from their Python caller.
+for _name in ("_proxy_kernel", "_m1_pairs"):
+    key = f"relatives.{_name}"
+    OVERLOADS[key] = tuple(signature + (types.int64,) for signature in OVERLOADS[key])

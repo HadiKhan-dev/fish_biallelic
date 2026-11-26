@@ -12,9 +12,8 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 
-import numba
 import numpy as np
-from numba import prange
+from numba import get_num_threads, prange
 
 from ...contracts.pedigree import PreparedComponent, RelativeContrasts
 from ...core.kernels import kernel
@@ -25,6 +24,7 @@ from .kernels.relatives import OVERLOADS
 from .parameters import PedigreeParameters
 from .read_forward import read_arguments, score_path
 from .read_transfer import carry_bin
+from .scheduling import balanced_units, chain_work
 
 __all__ = ["aggregate", "component_contrasts", "PROXY_MODEL"]
 PROXY_MODEL = "relative-proxy-v1"
@@ -408,77 +408,87 @@ def _proxy_kernel(
     read_ratio_table,
     class_cache,
     first_child,
+    threads,
 ):
     second = np.empty(len(pairs))
     full = np.empty(len(pairs))
     # The two proxies of a pair are independent chains, each a parallel unit (a batch of 30 pairs yields 60). The
     # marker recursion within each chain is sequential.
-    for unit in prange(2 * len(pairs)):
-        i = unit // 2
-        if unit % 2 == 0:
-            second[i] = _second_degree(
-                pairs[i, 0],
-                pairs[i, 1],
-                pi,
-                candidate_alt,
-                stay,
-                alpha,
-                beta,
-                row_arm,
-                column_arm,
-                pivot,
-                excursion,
-                branch,
-                state_alt,
-                gl,
-                coefficient,
-                site_index,
-                site_start,
-                site_stop,
-                null_diagonal,
-                null_off,
-                null_frequency,
-                mismatch,
-                selector,
-                read_offset,
-                read_initial,
-                read_reset, read_width, read_operator,
-                read_ratio_table,
-                class_cache,
-                first_child,
-            )
-        else:
-            full[i] = _full_sib(
-                pairs[i, 0],
-                pairs[i, 1],
-                pi,
-                candidate_alt,
-                stay,
-                alpha,
-                beta,
-                row_arm,
-                column_arm,
-                pivot,
-                excursion,
-                branch,
-                state_alt,
-                gl,
-                coefficient,
-                site_index,
-                site_start,
-                site_stop,
-                null_diagonal,
-                null_off,
-                null_frequency,
-                mismatch,
-                selector,
-                read_offset,
-                read_initial,
-                read_reset, read_width, read_operator,
-                read_ratio_table,
-                class_cache,
-                first_child,
-            )
+    cost = np.empty(2 * len(pairs), np.int64)
+    child_cost = chain_work(site_start, site_stop, read_width)
+    for i in range(len(pairs)):
+        work = child_cost[pairs[i, 0]]
+        cost[2 * i] = 2 * work        # second degree carries two forward layers
+        cost[2 * i + 1] = 4 * work    # full siblings carry four
+    units, offsets = balanced_units(cost, threads)
+    for tile in prange(len(offsets) - 1):
+        for cell in range(offsets[tile], offsets[tile + 1]):
+            unit = units[cell]
+            i = unit // 2
+            if unit % 2 == 0:
+                second[i] = _second_degree(
+                    pairs[i, 0],
+                    pairs[i, 1],
+                    pi,
+                    candidate_alt,
+                    stay,
+                    alpha,
+                    beta,
+                    row_arm,
+                    column_arm,
+                    pivot,
+                    excursion,
+                    branch,
+                    state_alt,
+                    gl,
+                    coefficient,
+                    site_index,
+                    site_start,
+                    site_stop,
+                    null_diagonal,
+                    null_off,
+                    null_frequency,
+                    mismatch,
+                    selector,
+                    read_offset,
+                    read_initial,
+                    read_reset, read_width, read_operator,
+                    read_ratio_table,
+                    class_cache,
+                    first_child,
+                )
+            else:
+                full[i] = _full_sib(
+                    pairs[i, 0],
+                    pairs[i, 1],
+                    pi,
+                    candidate_alt,
+                    stay,
+                    alpha,
+                    beta,
+                    row_arm,
+                    column_arm,
+                    pivot,
+                    excursion,
+                    branch,
+                    state_alt,
+                    gl,
+                    coefficient,
+                    site_index,
+                    site_start,
+                    site_stop,
+                    null_diagonal,
+                    null_off,
+                    null_frequency,
+                    mismatch,
+                    selector,
+                    read_offset,
+                    read_initial,
+                    read_reset, read_width, read_operator,
+                    read_ratio_table,
+                    class_cache,
+                    first_child,
+                )
     return second, full
 
 
@@ -512,42 +522,47 @@ def _m1_pairs(
     read_reset, read_width, read_operator,
     read_ratio_table,
     class_cache,
+    threads,
 ):
     out = np.empty(len(pairs))
-    for i in prange(len(pairs)):
-        out[i] = score_path(
-            pairs[i, 0],
-            pairs[i, 1],
-            0,
-            1,
-            pi,
-            candidate_alt,
-            stay,
-            alpha,
-            beta,
-            row_arm,
-            column_arm,
-            pivot,
-            excursion,
-            branch,
-            state_alt,
-            gl,
-            coefficient,
-            site_index,
-            site_start,
-            site_stop,
-            null_diagonal,
-            null_off,
-            null_frequency,
-            mismatch,
-            common_products,
-            first_cached_child,
-            read_offset,
-            read_initial,
-            read_reset, read_width, read_operator,
-            read_ratio_table,
-            class_cache,
-        )
+    child_cost = chain_work(site_start, site_stop, read_width)
+    units, offsets = balanced_units(child_cost[pairs[:, 0]], threads)
+    for tile in prange(len(offsets) - 1):
+        for cell in range(offsets[tile], offsets[tile + 1]):
+            i = units[cell]
+            out[i] = score_path(
+                pairs[i, 0],
+                pairs[i, 1],
+                0,
+                1,
+                pi,
+                candidate_alt,
+                stay,
+                alpha,
+                beta,
+                row_arm,
+                column_arm,
+                pivot,
+                excursion,
+                branch,
+                state_alt,
+                gl,
+                coefficient,
+                site_index,
+                site_start,
+                site_stop,
+                null_diagonal,
+                null_off,
+                null_frequency,
+                mismatch,
+                common_products,
+                first_cached_child,
+                read_offset,
+                read_initial,
+                read_reset, read_width, read_operator,
+                read_ratio_table,
+                class_cache,
+            )
     return out
 
 
@@ -598,17 +613,16 @@ def component_contrasts(
         classes = terms.class_cache(projection, child_start, child_stop)
         claim_threads()
         chosen = np.ascontiguousarray(pairs[batch])
-        # a batch holds few pairs of unequal cost: hand the units out one at a time
-        with numba.parallel_chunksize(1):
-            m1[batch] = _m1_pairs(
-                chosen, *model_arguments(projection), *common, products, child_start, *read_arguments(terms), classes,
-            )
-            claim_threads()
-            # the proxies read the batch's class transfers too (read_transfer.carry_bin)
-            proxy_second[batch], proxy_full[batch] = _proxy_kernel(
-                chosen, *model_arguments(projection), *common, selector, *read_arguments(terms), classes,
-                child_start,
-            )
+        m1[batch] = _m1_pairs(
+            chosen, *model_arguments(projection), *common, products, child_start, *read_arguments(terms), classes,
+            get_num_threads(),
+        )
+        claim_threads()
+        # the proxies read the batch's class transfers too (read_transfer.carry_bin)
+        proxy_second[batch], proxy_full[batch] = _proxy_kernel(
+            chosen, *model_arguments(projection), *common, selector, *read_arguments(terms), classes,
+            child_start, get_num_threads(),
+        )
         del products, classes
     second[rows] = m1[rows] - proxy_second[rows]
     full[rows] = m1[rows] - proxy_full[rows]

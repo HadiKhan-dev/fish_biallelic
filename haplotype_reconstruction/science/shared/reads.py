@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from functools import partial
+from functools import lru_cache, partial
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -251,13 +251,33 @@ def split_weights(nmax: int, cls: np.ndarray, n_classes: int) -> tuple[np.ndarra
     return within, class_law
 
 
-def survivor_rows(survival: float, nmax: int) -> list:
-    """[Bin(K, survival) as float64[K + 1] for K = 0..nmax]: the survivors' law of each covering depth, the rows that
-    depth_table and class_table convolve with the arrivals (a function of the survival alone: one set serves every
-    arrival depth)."""
+@lru_cache(maxsize=256)
+def _split_law(nmax: int, minor: int) -> tuple[np.ndarray, int, np.ndarray, np.ndarray]:
+    cls, n_classes = split_class_map(nmax, minor)
+    within, law = split_weights(nmax, cls, n_classes)
+    return cls, n_classes, within, law
+
+
+def _split_tables(nmax: int, minor: int) -> tuple[np.ndarray, int, np.ndarray, np.ndarray]:
+    """(cls, n_classes, within, law) of split_class_map and split_weights at (nmax, minor): the same arrays, computed
+    once per process (their Python loops hold the GIL that concurrent window and batch threads share) and copied for
+    each caller, which owns its arrays."""
+    cls, n_classes, within, law = _split_law(int(nmax), int(minor))
+    return cls.copy(), n_classes, within.copy(), law.copy()
+
+
+def survivor_laws(survival: float, nmax: int) -> np.ndarray:
+    """float64[nmax + 1, nmax + 1]: row K is the survivors' law Bin(K, survival) of covering depth K (zero beyond K),
+    the rows that depth_table and class_table convolve with the arrivals (a function of the survival alone: one set
+    serves every arrival depth)."""
     counts = np.arange(nmax + 1)
-    laws = binom.pmf(counts, counts[:, None], survival)
-    return [law[:k + 1] for k, law in enumerate(laws)]
+    return binom.pmf(counts, counts[:, None], survival)
+
+
+def survivor_rows(survival: float, nmax: int) -> list:
+    """[Bin(K, survival) as float64[K + 1] for K = 0..nmax]: survivor_laws' rows within their support (the reference
+    forms' input)."""
+    return [law[:k + 1] for k, law in enumerate(survivor_laws(survival, nmax))]
 
 
 def depth_table(survival: float, arrivals: float, nmax: int, rows: list | None = None) -> np.ndarray:
@@ -269,7 +289,8 @@ def depth_table(survival: float, arrivals: float, nmax: int, rows: list | None =
 
 
 def _arrival_table(rows: list, new: np.ndarray) -> np.ndarray:
-    """Depth transitions for one or both homologues, given their survivor and Poisson arrival laws."""
+    """Depth transitions for one or both homologues, given their survivor and Poisson arrival laws (the reference form
+    of _arrival_kernel)."""
     table = np.empty((len(rows), len(new)))
     for k, law in enumerate(rows):
         table[k] = np.convolve(law, new)[:len(new)]
@@ -370,21 +391,26 @@ TABLE_CHUNK = 16
 
 def _table_chunk(job):
     """[(depth_table, class_table)] of one chunk of (survival, arrivals, nmax, minor) keys sharing nmax and minor,
-    with the survivor rows of their survivals (``rows``: survival -> survivor_rows)."""
+    with the survivor laws of their survivals (``rows``: survival -> survivor_laws). The convolutions and the class
+    lumping run in nogil kernels (_arrival_kernel, _class_tables_kernel): the chunk's Python work is a fixed few
+    calls, whatever its keys and depths. The tables are views of the chunk's arrays."""
     keys, rows = job
     nmax, minor = keys[0][2], keys[0][3]
-    # One Poisson broadcast for each chunk, with the one- and two-homologue means on the first axis.
+    width, count = nmax + 1, len(keys)
+    # One Poisson broadcast for each chunk: the one-homologue means of every key, then the two-homologue means.
     means = np.asarray([key[1] for key in keys])
-    arrivals = poisson.pmf(np.arange(nmax + 1), np.stack((means, 2.0 * means))[:, :, None])
-    survivors = [rows[key[0]] for key in keys]
-    ones = np.stack([_arrival_table(row, law) for row, law in zip(survivors, arrivals[0], strict=True)])
-    cls, n_classes = split_class_map(nmax, minor)
-    within, _ = split_weights(nmax, cls, n_classes)
-    classes = np.empty((len(keys), nmax + 1, nmax + 1, n_classes, n_classes))
-    with bounded_team(len(keys) * (nmax + 1)):
-        _class_tables_kernel(ones, cls, within, classes)
-    return [(_arrival_table(row, law), cls)
-            for row, law, cls in zip(survivors, arrivals[1], classes, strict=True)]
+    arrivals = poisson.pmf(np.arange(width), np.concatenate((means, 2.0 * means))[:, None])
+    survivals = {f: i for i, f in enumerate(dict.fromkeys(key[0] for key in keys))}
+    laws = np.stack([rows[f] for f in survivals])
+    source = np.asarray([survivals[key[0]] for key in keys] * 2, dtype=np.int64)
+    transitions = np.empty((2 * count, width, width))            # one homologue per key, then both homologues
+    cls, n_classes, within, _ = _split_tables(nmax, minor)
+    classes = np.empty((count, width, width, n_classes, n_classes))
+    with bounded_team(2 * count * width):
+        _arrival_kernel(laws, source, arrivals, transitions)
+    with bounded_team(count * width):
+        _class_tables_kernel(transitions[:count], cls, within, classes)
+    return list(zip(transitions[count:], classes, strict=True))
 
 
 def build_tables(gaps: np.ndarray, survival: ReadSurvival, covering: np.ndarray, nmax: int, minor: int,
@@ -392,7 +418,7 @@ def build_tables(gaps: np.ndarray, survival: ReadSurvival, covering: np.ndarray,
                  map_work: Callable = map) -> ReadTables:
     """Tables for the batch: gaps (bp) between consecutive sites (entry 0 ignored), per-sample covering depth per
     homologue ``covering`` [S]. Each (survival bin, depth value) pair's tables are a function of (f, mu, nmax, minor)
-    alone, and their survivor rows of (f, nmax): ``cache`` (a dict the caller owns, e.g. across a contig's sample
+    alone, and their survivor laws of (f, nmax): ``cache`` (a dict the caller owns, e.g. across a contig's sample
     batches) keeps both by those keys, and the missing ones are computed through ``map_work`` in chunks of
     TABLE_CHUNK keys (independent items; the same tables in any order or chunking). Each item writes its tables into
     the batch's stacked arrays at once (no second copy of the batch's tables); copies of the new tables then enter
@@ -428,7 +454,7 @@ def build_tables(gaps: np.ndarray, survival: ReadSurvival, covering: np.ndarray,
     missing = [key for key in slots if key not in cache]
     cached = [key for key in slots if key in cache]
     survivals = list(dict.fromkeys(k[0] for k in missing if ("rows", k[0], int(nmax)) not in cache))
-    for f, rows in zip(survivals, map_work(partial(survivor_rows, nmax=int(nmax)), survivals), strict=True):
+    for f, rows in zip(survivals, map_work(partial(survivor_laws, nmax=int(nmax)), survivals), strict=True):
         cache[("rows", f, int(nmax))] = rows
 
     # Cache admission follows key order and the byte bound. Workers copy only
@@ -449,7 +475,7 @@ def build_tables(gaps: np.ndarray, survival: ReadSurvival, covering: np.ndarray,
         for key, (depth, classes) in zip(chunk, _table_chunk((chunk, rows)), strict=True):
             place(key, depth, classes)
             if key in keep:
-                additions.append((key, (depth, classes.copy())))
+                additions.append((key, (depth.copy(), classes.copy())))
         return additions
 
     threads = live_threads()
@@ -590,8 +616,7 @@ def _conditional_offsets(called: np.ndarray, posterior: np.ndarray, tables: Read
     """(cls, within, conditional [S, L, O, C]): the split classes and within-class laws of the tables' depths, and
     the offsets weighted CONDITIONALLY on the class, P(o | class, depths) ~ posterior(o) P(class | N = n + o),
     normalised over o for each class (an offset at which the class is impossible gets no weight)."""
-    cls, n_classes = split_class_map(tables.nmax, tables.minor)
-    within, class_law = split_weights(tables.nmax, cls, n_classes)
+    cls, n_classes, within, class_law = _split_tables(tables.nmax, tables.minor)
     called = np.ascontiguousarray(called, dtype=np.int64)
     conditional = np.empty(called.shape + (posterior.shape[2], n_classes))                              # [S, L, O, C]
     with bounded_team(called.shape[0] * _site_blocks(called.shape[1])):
@@ -705,6 +730,7 @@ _OVERLOADS = {
     "_deep_site": tuple((_F4, index, _I64, _I64, _I64, _LOG_PAIR, _LOG_PAIR, _I64) for index in (_I64, types.uint64)),
     "_class_likelihoods_kernel": ((_I2, _I2, _F1, _F4, _I2, _F2, _I64, _I64, _F4),),
     "_class_tables_kernel": ((_F3, _I2, _F2, _F5),),
+    "_arrival_kernel": ((_F3, _I1, _F2, _F3),),
     "_offset_messages": ((_F2, _F3, _I3, _I1, _I1, _F4, _I2, _F3, _F3),),
     "_offset_edges": ((_F3, _I3, _I1, _I1, _F4, _I2, _F3, _F3, _F3, _F4, _F6, _F2, _F4),),
     "_site_laws_kernel": ((_F3, _I3, _I1, _F2, _F3),),
@@ -751,6 +777,24 @@ def _class_tables_kernel(ones, cls, within, out):
                     result[x, y] = result[x, y] / mass if mass > 0.0 else 1.0 / n_classes
 
 
+@kernel(overloads=_OVERLOADS["_arrival_kernel"], cache=True, parallel=True, nogil=True)
+def _arrival_kernel(laws, source, arrivals, out):
+    """_arrival_table for every row of ``arrivals`` [A, N] at once: out[a, k, m] = sum over j <= min(k, m) of
+    laws[source[a], k, j] arrivals[a, m - j], the first N terms of the convolution of covering depth k's survivor law
+    (survivor_laws) with the arrival law, summed over the survivors in ascending order."""
+    width = out.shape[1]
+    for task in prange(out.shape[0] * width):
+        a, k = task // width, task % width
+        law = laws[source[a], k]
+        new = arrivals[a]
+        row = out[a, k]
+        for m in range(width):
+            total = 0.0
+            for j in range(min(k, m) + 1):
+                total += law[j] * new[m - j]
+            row[m] = total
+
+
 @kernel(overloads=_OVERLOADS["_site_laws_kernel"], cache=True, parallel=True, nogil=True)
 def _site_laws_kernel(posterior, covering_depth, sites, law, out):
     n_samples = covering_depth.shape[0]
@@ -768,8 +812,7 @@ def _site_laws_kernel(posterior, covering_depth, sites, law, out):
 
 def site_laws_fast(posterior, covering_depth, sites, tables):
     """Class laws at selected sites, contracting the offset posterior in offset order."""
-    cls, n_classes = split_class_map(tables.nmax, tables.minor)
-    _, law = split_weights(tables.nmax, cls, n_classes)
+    _, n_classes, _, law = _split_tables(tables.nmax, tables.minor)
     n_samples = covering_depth.shape[0]
     out = np.empty((len(sites), n_samples, n_classes))
     with bounded_team(n_samples * _site_blocks(len(sites))):
@@ -1114,8 +1157,7 @@ def _fit_offsets(depth, covering, loss, tables, minimum_offsets, span_tail, *, b
             _offset_support(pilot, minimum_offsets, span_tail, support)
         del pilot
     if build_operators:
-        cls, n_classes = split_class_map(tables.nmax, tables.minor)
-        _, law = split_weights(tables.nmax, cls, n_classes)
+        _, n_classes, _, law = _split_tables(tables.nmax, tables.minor)
         operators = np.empty((n_sites, n_samples, n_classes, n_classes))
         # Depths still use the pilot's table clip. The subsequent kernels need only the retained offsets.
         width = int(support.max()) if adaptive else tables.offsets
@@ -1179,8 +1221,7 @@ def class_operators_fast(pairwise: np.ndarray, covering_depth: np.ndarray, table
     n_sites, n_samples = pairwise.shape[:2]
     if n_sites < 2:
         return class_operators(pairwise, covering_depth, tables)
-    cls, n_classes = split_class_map(tables.nmax, tables.minor)
-    _, law = split_weights(tables.nmax, cls, n_classes)
+    _, n_classes, _, law = _split_tables(tables.nmax, tables.minor)
     sindex, _, ctab = _stacked_tables(tables, depth=False)
     out = np.empty((n_sites, n_samples, n_classes, n_classes))
     with bounded_team(n_samples * _site_blocks(n_sites)):
@@ -1342,8 +1383,7 @@ def class_likelihoods_fast(ref, alt, error, posterior, tables):
     alt = np.ascontiguousarray(alt, dtype=np.int64)
     n_samples, n_sites = called.shape
     error = np.array(np.broadcast_to(np.asarray(error, dtype=np.float64), (n_samples,)))
-    cls, n_classes = split_class_map(tables.nmax, tables.minor)
-    within, law = split_weights(tables.nmax, cls, n_classes)
+    cls, n_classes, within, law = _split_tables(tables.nmax, tables.minor)
     deep = int(tables.deep)
     slots = np.zeros((n_samples, deep * deep), dtype=np.int64)
     with bounded_team(n_samples):

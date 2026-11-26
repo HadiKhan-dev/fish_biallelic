@@ -40,14 +40,14 @@ KEY = "pedigree/prepared"
 
 
 class PreparedAdapter:
-    """Lossless schema-7 prepared record (4.21: the source laws and the children's read state; 4.22: no information
-    exponent) with a small layout header (selectors, their fallback-rate lengths, bins, markers) and the contig's
-    configured material."""
+    """Schema-8 source laws and structured child gaps, with the contig's compact layout header."""
 
-    schema = 7
+    schema = 8
 
     def encode(self, value: PreparedChromosome) -> Mapping[str, Any]:
-        return {"schema": self.schema, **to_payload(value), "layout": [
+        payload = to_payload(value)
+        payload["schema"] = self.schema
+        return {**payload, "layout": [
             dict(selector=c.selector_switch_probability, fallback=c.selector_fallback_bp, bins=c.n_bins,
                  markers=c.informative_markers)
             for c in value.components]}
@@ -55,7 +55,11 @@ class PreparedAdapter:
     def decode(self, payload: Mapping[str, Any]) -> PreparedChromosome:
         require_schema(payload, self.schema)
         names = {f.name for f in fields(PreparedChromosome)}
-        return from_payload(PreparedChromosome, {k: v for k, v in payload.items() if k in names})
+        data = {k: v for k, v in payload.items() if k in names}
+        # The contract's dataclass still describes the schema-7 payload. This adapter owns
+        # the on-disk version and selects the structured gap representation before decoding.
+        data["schema"] = PreparedChromosome.schema
+        return replace(from_payload(PreparedChromosome, data), schema=self.schema)
 
 
 # Prepared header items the material axis and the chromosome summary read (no component arrays).
@@ -119,16 +123,18 @@ def run(
     return adapter.decode(adapter.encode(product))
 
 
-def read_state_builder(painting: Painting, evidence: ContigEvidence, file: CheckpointFile, evidence_identity: str):
+def read_state_builder(painting: Painting, evidence: ContigEvidence, file: CheckpointFile, evidence_identity: str,
+                       corrected_rows: tuple[int, ...] = ()):
     """The source chain's emission builder with the painting's read state (stages.painting.read_state over
-    science.pedigree.prepare.scalar_emissions, at the path strength only), or None when the painting has none."""
+    science.pedigree.prepare.scalar_emissions, at the path strength only), or None when the painting has none.
+    ``corrected_rows``: QC A's corrected samples of ``evidence``, which carry no uniform foreign class."""
     if painting.parameters.read_classes == 1:
         return None
     from ..painting.read_state import stage_builder
 
     cohort = evidence.cohort_frequencies
     return stage_builder(partial(science.scalar_emissions, cohort=cohort), file, evidence_identity, cohort, None,
-                         painting.parameters, unit_batches=True)
+                         painting.parameters, unit_batches=True, corrected_rows=corrected_rows)
 
 
 @dataclass(frozen=True)
@@ -210,7 +216,7 @@ def prepare_stored(
     # run's contamination decision through the painting it reads (the repaint's identity includes it).
     from ..painting import contamination as contamination_stage
 
-    evidence = contamination_stage.corrected_evidence(
+    evidence, corrected_rows = contamination_stage.corrected_evidence_with_rows(
         store, manifest, contig, evidence, evidence_identity=observed.identity
     )
     product = run(
@@ -221,7 +227,7 @@ def prepare_stored(
         threads=threads,
         file=file,
         identity=identity,
-        read_builder=read_state_builder(painting, evidence, file, observed.identity),
+        read_builder=read_state_builder(painting, evidence, file, observed.identity, corrected_rows),
     )
     return PreparedReference(contig, identity, product.omitted_reason)
 
@@ -251,8 +257,10 @@ def _bound_stored(
     root: str,
     reference: PreparedReference,
     screen_identity: str,
+    eligibility: ParentEligibility,
     parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
+    placement: ScorePlacement,
     *,
     threads: int = 1,
 ) -> tuple[str, str]:
@@ -270,10 +278,9 @@ def _bound_stored(
     record = load_product(store.run, screen.SCREEN, screen_identity, screen.ScreenAdapter())
     if record is None:
         raise InputError("pair bounds require the complete selective screen")
-    # Bounds advance through ordered bins inside each row piece. TroMau chr19 at 19 and 38 threads used
-    # .833 and .733 with wall 1.85 and 1.16 s respectively. The dynamic grant keeps the shorter wall available.
     screen.bound_run(
-        _required_prepared(store, reference), record.compact, parameters, threads=threads, file=file, identity=identity
+        _required_prepared(store, reference), record.compact, parameters, threads=threads, eligibility=eligibility,
+        placement=placement, file=file, identity=identity,
     )
     return reference.contig, identity
 
@@ -293,6 +300,7 @@ def _scores_stored(
     chromosome: int,
     screen_identity: str,
     panel_identity: str,
+    bound_identity: str,
     placement: ScorePlacement,
     sample_ids: tuple[str, ...],
     parameters: PedigreeParameters,
@@ -328,6 +336,7 @@ def _scores_stored(
         parameters,
         placement,
         threads=threads,
+        ranked=screen.load_ranked_pieces(file, bound_identity),
         file=file,
         identity=identity,
     )
@@ -344,6 +353,7 @@ def _after_bounds(
     parameters: PedigreeParameters,
     numerical_policy: NumericalPolicy,
     maximum_cores: int,
+    costs: tuple[int, ...],
     *,
     threads: int = 1,
 ) -> Expansion:
@@ -388,17 +398,19 @@ def _after_bounds(
                 k,
                 screen_identity,
                 identity,
+                bound_identity,
                 placement,
                 tuple(manifest["sample_ids"]),
                 parameters,
                 numerical_policy,
             ),
-            resources=ResourceRequest(max_cores=maximum_cores),
-            affinity=reference.contig,
+            resources=ResourceRequest(max_cores=maximum_cores, width=maximum_cores, cost=cost),
             outputs=(RecordKey(reference.contig, "pedigree/floored_scores"),),
             thread_argument="threads",
         )
-        for k, (reference, placement) in enumerate(zip(references, placed, strict=True))
+        for k, (reference, (_, bound_identity), placement, cost) in enumerate(
+            zip(references, bounds, placed, costs, strict=True)
+        )
     )
     return Expansion(
         tasks, decision.task_stored(root, manifest, cores=maximum_cores, depends_on=tuple(t.key for t in tasks))
@@ -484,17 +496,20 @@ def _after_prepared(
     from ..painting.records import reference_key
 
     reference_key(from_payload(PaintingParameters, manifest["parameters"]["painting"]))  # validates the payload
+    # These tasks load immutable checkpoint inputs and have no resident state.
+    # Independent contigs share the allocator, including when there are more than
+    # the ordinary number of lanes. Publish exactly one record per contig.
+    costs = tuple(summary.informative_markers for summary in summaries if summary.omitted_reason is None)
     tasks = tuple(
         Task(
             TaskKey("pedigree", "pair_bounds", r.contig),
             _bound_stored,
-            args=(root, r, identity, parameters, numerical_policy),
-            resources=ResourceRequest(max_cores=maximum_cores),
-            affinity=r.contig,
+            args=(root, r, identity, eligibility, parameters, numerical_policy, placement),
+            resources=ResourceRequest(max_cores=maximum_cores, width=maximum_cores, cost=cost),
             outputs=(RecordKey(r.contig, screen.BOUNDS),),
             thread_argument="threads",
         )
-        for r in informative
+        for r, cost, placement in zip(informative, costs, placed, strict=True)
     )
     gather = Task(
         TaskKey("pedigree", "panel.barrier"),
@@ -509,6 +524,7 @@ def _after_prepared(
             parameters,
             numerical_policy,
             maximum_cores,
+            costs,
         ),
         depends_on=tuple(t.key for t in tasks),
         resources=ResourceRequest(max_cores=maximum_cores),

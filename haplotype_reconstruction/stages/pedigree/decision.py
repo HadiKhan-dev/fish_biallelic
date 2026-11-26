@@ -832,8 +832,7 @@ def _transmission_task(
         _transmission_stored,
         args=(prepared, parameters, request),
         inputs=(RecordKey(prepared.contig, PREPARED),),
-        resources=ResourceRequest(max_cores=cores),
-        affinity=prepared.contig,
+        resources=ResourceRequest(max_cores=cores, width=cores),
         thread_argument="threads",
     )
 

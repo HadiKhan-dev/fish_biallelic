@@ -41,10 +41,14 @@ import numpy as np
 from numba import prange, types
 
 from ...contracts.roles import freeze_record_arrays, record_field
+from ...core.errors import InvariantError
 from ...core.kernels import kernel
 from ...core.numerics import ordered_sum
 from . import hmm
-from .parameters import ENTRY_BOUNDS, EXIT_BOUNDS, GOLDEN_STEPS, RATE_BOUNDS, RATE_GRID_POINTS, VITERBI_TIE
+from .parameters import (
+    EM_DECREASE_NATS, EM_DECREASE_RELATIVE, ENTRY_BOUNDS, EXIT_BOUNDS, GOLDEN_STEPS, RATE_BOUNDS, RATE_GRID_POINTS,
+    VITERBI_TIE,
+)
 from .transitions import MINIMUM_SWITCH_PROBABILITY, switch_probabilities
 
 @dataclass(frozen=True)
@@ -269,6 +273,74 @@ _OVERLOADS = {
             types.float64,
             types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+        ),
+    ),
+    "_sum_stage_probabilities": (
+        (
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.float64,
+            types.float64,
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+        ),
+        (
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=True, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=True, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=True, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.float64,
+            types.float64,
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+        ),
+    ),
+    "_transposed_parts_probabilities": (
+        (
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.float64,
+            types.float64,
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+        ),
+        (
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=True, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=True, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=True, aligned=True),
+            types.Array(types.int64, 1, "C", readonly=False, aligned=True),
+            types.float64,
+            types.float64,
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 1, "C", readonly=False, aligned=True),
+            types.Array(types.float64, 2, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
             types.Array(types.float64, 1, "C", readonly=False, aligned=True),
@@ -653,43 +725,41 @@ def viterbi_track_states(
     )
 
 
-@kernel(overloads=_OVERLOADS["_sum_stage"], cache=True, inline="always", nogil=True)
-def _sum_stage(values, labels, fids, error_of, capable, n_labels, log_stay, log_move, fidelity, stationary, out):
+@kernel(overloads=_OVERLOADS["_sum_stage_probabilities"], cache=True, inline="always", nogil=True)
+def _sum_stage_probabilities(values, labels, fids, error_of, capable, stay, move, fidelity, stationary, per_label, out):
     """out[z] = sum_y values[y] T(y -> z) (probabilities, values scaled), O(S')."""
     n = len(values)
     total = 0.0
-    per_label = np.zeros(n_labels)
+    per_label[:] = 0.0
     for y in range(n):
         total += values[y]
         per_label[labels[y]] += values[y]
-    stay = math.exp(log_stay)
-    move = math.exp(log_move)
     for z in range(n):
         label = labels[z]
         fid = fids[z]
         if capable[label]:
             faithful = values[label]
             error = values[error_of[label]]
-            same = stay * (faithful * math.exp(fidelity[0, fid]) + error * math.exp(fidelity[1, fid]))
-            moved = move * (total - per_label[label]) * math.exp(stationary[fid])
+            same = stay * (faithful * fidelity[0, fid] + error * fidelity[1, fid])
+            moved = move * (total - per_label[label]) * stationary[fid]
         else:
             same = stay * values[label] if fid == 0 else 0.0
             moved = move * (total - per_label[label]) if fid == 0 else 0.0
         out[z] = same + moved
 
 
-@kernel(overloads=_OVERLOADS["_transposed_parts"], cache=True, inline="always", nogil=True)
-def _transposed_parts(
+@kernel(overloads=_OVERLOADS["_transposed_parts_probabilities"], cache=True, inline="always", nogil=True)
+def _transposed_parts_probabilities(
     values,
     labels,
     fids,
     error_of,
     capable,
-    n_labels,
-    log_stay,
-    log_move,
+    stay,
+    move,
     fidelity,
     stationary,
+    scratch,
     total,
     moved,
     started,
@@ -703,18 +773,15 @@ def _transposed_parts(
     anchored label), and of moved the parts into an anchored label's error state (moved_error) and faithful state
     (moved_faithful). O(S')."""
     n = len(values)
-    stay = math.exp(log_stay)
-    move = math.exp(log_move)
     weighted = 0.0  # sum_z pi(z) values[z]
     weighted_error = 0.0  # the same over anchored labels' error states
     weighted_faithful = 0.0  # and over anchored labels' faithful states
-    per_label = np.zeros(n_labels)
-    per_label_error = np.zeros(n_labels)
-    per_label_faithful = np.zeros(n_labels)
+    scratch[:, :] = 0.0
+    per_label, per_label_error, per_label_faithful = scratch[0], scratch[1], scratch[2]
     for z in range(n):
         label = labels[z]
         if capable[label]:
-            value = math.exp(stationary[fids[z]]) * values[z]
+            value = stationary[fids[z]] * values[z]
             if fids[z] == 1:
                 weighted_error += value
                 per_label_error[label] += value
@@ -737,8 +804,8 @@ def _transposed_parts(
         if capable[label]:
             faithful = values[label]
             error = values[error_of[label]]
-            keep = stay * math.exp(fidelity[fid, fid]) * (faithful if fid == 0 else error)
-            flip = stay * math.exp(fidelity[fid, 1 - fid]) * (error if fid == 0 else faithful)
+            keep = stay * fidelity[fid, fid] * (faithful if fid == 0 else error)
+            flip = stay * fidelity[fid, 1 - fid] * (error if fid == 0 else faithful)
             if fid == 0:
                 started[y] = flip
             else:
@@ -747,6 +814,43 @@ def _transposed_parts(
             total[y] = moved[y] + keep + flip
         else:
             total[y] = moved[y] + stay * values[label]
+
+
+@kernel(
+    overloads=((types.float64[:, ::1], types.float64[::1]),),
+    cache=True, inline="always", nogil=True,
+)
+def _legacy_fidelity_probabilities(fidelity, stationary):
+    probabilities, law = np.empty((2, 2)), np.empty(2)
+    for fid in range(2):
+        law[fid] = math.exp(stationary[fid])
+        for target in range(2):
+            probabilities[fid, target] = math.exp(fidelity[fid, target])
+    return probabilities, law
+
+
+# The archived scalar-chain oracle uses the original log-probability contractions. Its wrappers share
+# the contraction arithmetic with the current chain, which supplies probabilities and scratch directly.
+@kernel(overloads=_OVERLOADS["_sum_stage"], cache=True, inline="always", nogil=True)
+def _sum_stage(values, labels, fids, error_of, capable, n_labels, log_stay, log_move, fidelity, stationary, out):
+    probabilities, law = _legacy_fidelity_probabilities(fidelity, stationary)
+    _sum_stage_probabilities(
+        values, labels, fids, error_of, capable, math.exp(log_stay), math.exp(log_move),
+        probabilities, law, np.empty(n_labels), out,
+    )
+
+
+@kernel(overloads=_OVERLOADS["_transposed_parts"], cache=True, inline="always", nogil=True)
+def _transposed_parts(
+    values, labels, fids, error_of, capable, n_labels, log_stay, log_move, fidelity, stationary,
+    total, moved, started, ended, kept, moved_error, moved_faithful,
+):
+    probabilities, law = _legacy_fidelity_probabilities(fidelity, stationary)
+    _transposed_parts_probabilities(
+        values, labels, fids, error_of, capable, math.exp(log_stay), math.exp(log_move),
+        probabilities, law, np.empty((3, n_labels)),
+        total, moved, started, ended, kept, moved_error, moved_faithful,
+    )
 
 
 @kernel(overloads=_OVERLOADS["_chain_kernel"], cache=True, parallel=True, nogil=True)
@@ -780,6 +884,20 @@ def _chain_kernel(
         (n_samples if want_masses or emission_masses else 0, n_labels * n_labels * (2 if label_masses else 1), n_bins)
     )
     bin_log_likelihood = np.zeros((n_samples if bin_likelihood else 0, n_bins))
+    # Both sweeps and every sample use the same probabilities. Keep the original log-to-probability
+    # conversion so this change only moves work out of the recurrent bin and track-pair loops.
+    _, _, log_fidelity, log_stationary = _log_terms(0.5, n_labels, a, b)
+    fidelity, stationary = np.empty((2, 2)), np.empty(2)
+    for fid in range(2):
+        stationary[fid] = math.exp(log_stationary[fid])
+        for target in range(2):
+            fidelity[fid, target] = math.exp(log_fidelity[fid, target])
+    stays, moves = np.empty(len(theta)), np.empty(len(theta))
+    log_labels = math.log(n_labels - 1.0) if n_labels > 1 else 0.0
+    for edge in prange(len(theta)):
+        stays[edge] = math.exp(math.log1p(-theta[edge]))
+        moves[edge] = math.exp(math.log(theta[edge]) - log_labels) if n_labels > 1 else 0.0
+    # Each sample's bin message depends on the preceding bin in that sweep.
     for sample in prange(n_samples):
         if not eligible[sample]:
             continue
@@ -793,6 +911,8 @@ def _chain_kernel(
         moved_error = np.empty(n)
         moved_faithful = np.empty(n)
         stage = np.empty((n, n))
+        scratch = np.empty((3, n_labels))
+        per_label = scratch[0]
         top = -np.inf
         for p in range(n_pairs):
             value = emissions[sample, p, 0] + initial[p // n] + initial[p % n]
@@ -808,12 +928,12 @@ def _chain_kernel(
             bin_log_likelihood[sample, 0] = term
         forward[0] /= scale
         for bin_index in range(1, n_bins):
-            log_stay, log_move, fidelity, stationary = _log_terms(theta[bin_index - 1], n_labels, a, b)
+            stay, move = stays[bin_index - 1], moves[bin_index - 1]
             for y2 in range(n):
                 for y1 in range(n):
                     column[y1] = forward[bin_index - 1, y1 * n + y2]
-                _sum_stage(
-                    column, labels, fids, error_of, capable, n_labels, log_stay, log_move, fidelity, stationary, out
+                _sum_stage_probabilities(
+                    column, labels, fids, error_of, capable, stay, move, fidelity, stationary, per_label, out
                 )
                 for z1 in range(n):
                     stage[z1, y2] = out[z1]
@@ -821,8 +941,8 @@ def _chain_kernel(
             for z1 in range(n):
                 for y2 in range(n):
                     column[y2] = stage[z1, y2]
-                _sum_stage(
-                    column, labels, fids, error_of, capable, n_labels, log_stay, log_move, fidelity, stationary, out
+                _sum_stage_probabilities(
+                    column, labels, fids, error_of, capable, stay, move, fidelity, stationary, per_label, out
                 )
                 for z2 in range(n):
                     forward[bin_index, z1 * n + z2] = out[z2] * math.exp(
@@ -871,7 +991,7 @@ def _chain_kernel(
             if bin_index == 0:
                 continue
             edge = bin_index - 1
-            log_stay, log_move, fidelity, stationary = _log_terms(theta[edge], n_labels, a, b)
+            stay, move = stays[edge], moves[edge]
             top = np.max(emissions[sample, :, bin_index])
             for p in range(n_pairs):
                 weight[p] = math.exp(emissions[sample, p, bin_index] - top) * backward[p]
@@ -879,17 +999,17 @@ def _chain_kernel(
             for z1 in range(n):
                 for z2 in range(n):
                     column[z2] = weight[z1 * n + z2]
-                _transposed_parts(
+                _transposed_parts_probabilities(
                     column,
                     labels,
                     fids,
                     error_of,
                     capable,
-                    n_labels,
-                    log_stay,
-                    log_move,
+                    stay,
+                    move,
                     fidelity,
                     stationary,
+                    scratch,
                     out,
                     moved,
                     started,
@@ -910,17 +1030,17 @@ def _chain_kernel(
             for y2 in range(n):
                 for z1 in range(n):
                     column[z1] = stage[z1, y2]
-                _transposed_parts(
+                _transposed_parts_probabilities(
                     column,
                     labels,
                     fids,
                     error_of,
                     capable,
-                    n_labels,
-                    log_stay,
-                    log_move,
+                    stay,
+                    move,
                     fidelity,
                     stationary,
+                    scratch,
                     out,
                     moved,
                     started,
@@ -945,17 +1065,17 @@ def _chain_kernel(
             for z2 in range(n):
                 for z1 in range(n):
                     column[z1] = weight[z1 * n + z2]
-                _transposed_parts(
+                _transposed_parts_probabilities(
                     column,
                     labels,
                     fids,
                     error_of,
                     capable,
-                    n_labels,
-                    log_stay,
-                    log_move,
+                    stay,
+                    move,
                     fidelity,
                     stationary,
+                    scratch,
                     out,
                     moved,
                     started,
@@ -969,17 +1089,17 @@ def _chain_kernel(
             for y1 in range(n):
                 for z2 in range(n):
                     column[z2] = stage[y1, z2]
-                _transposed_parts(
+                _transposed_parts_probabilities(
                     column,
                     labels,
                     fids,
                     error_of,
                     capable,
-                    n_labels,
-                    log_stay,
-                    log_move,
+                    stay,
+                    move,
                     fidelity,
                     stationary,
+                    scratch,
                     out,
                     moved,
                     started,
@@ -1343,6 +1463,30 @@ def model_for(
     )
 
 
+def check_em_log_likelihoods(log_likelihoods, *, site_correlation: float = math.nan, first_update: int = 0) -> None:
+    """Fail fast on a corrupted copying-model EM (AGENTS 5.3): raise InvariantError when a log-likelihood of the
+    sequence (the k-th after ``first_update`` + k updates) is not finite, or is below its predecessor by more than
+    EM_DECREASE_RELATIVE x |log-likelihood| + EM_DECREASE_NATS. estimate_chain's updates never lower it beyond rounding
+    (parameters.EM_DECREASE_RELATIVE)."""
+    values = [float(value) for value in log_likelihoods]
+    for k, current in enumerate(values):
+        updates = first_update + k
+        if not math.isfinite(current):
+            raise InvariantError(
+                f"copying-model EM (site correlation {site_correlation:g}): the log-likelihood after {updates} "
+                f"updates is {current}"
+            )
+        if k:
+            previous = values[k - 1]
+            tolerance = EM_DECREASE_RELATIVE * max(abs(previous), abs(current)) + EM_DECREASE_NATS
+            if previous - current > tolerance:
+                raise InvariantError(
+                    f"copying-model EM (site correlation {site_correlation:g}): update {updates} lowered the "
+                    f"log-likelihood by {previous - current:.6g} nats ({previous:.12g} -> {current:.12g}; tolerance "
+                    f"{tolerance:.3g}), so its E-step is numerically corrupted; the fit is not returned"
+                )
+
+
 def estimate_chain(
     raw_batches, capable: np.ndarray, morgans: np.ndarray, config, *, site_correlation: float, final_likelihood: bool = False
 ) -> ChainModel:
@@ -1357,7 +1501,8 @@ def estimate_chain(
     starts: a deterministic, truncated estimator, not a convergence test. The results are clipped to their bounds and
     rounded to ``estimate_grid`` in natural-log space. The trajectory records, per update, the new values and the
     log-likelihood of the tempered emissions under the values before it (up to the constant 2 log S per sample of
-    the uniform label law).
+    the uniform label law). A log-likelihood that is not finite or falls beyond rounding raises InvariantError
+    (check_em_log_likelihoods).
     """
     capable = np.ascontiguousarray(capable, dtype=np.int64)
     n_labels = len(capable)
@@ -1374,7 +1519,7 @@ def estimate_chain(
         sample_statistics = []
         tracks = 0
         for raw, eligible in raw_batches():
-            if hasattr(raw, "read"):          # read state carried (painting.read_decode)
+            if hasattr(raw, "path_only"):          # read state carried (painting.read_decode)
                 from .read_decode import chain_statistics as read_chain_statistics
                 statistics = read_chain_statistics(raw, tracks_states, capable, theta, entry, exit_, eligible)
                 (c, s, e, kf, ke, into_error, into_faithful, first_error, first_faithful, ll, _) = statistics
@@ -1403,6 +1548,8 @@ def estimate_chain(
             ordered_sum(np.concatenate((into_faithful, first_faithful))),
         )
         log_likelihood = ordered_sum(ll)
+        check_em_log_likelihoods((trajectory[-1][3], log_likelihood) if trajectory else (log_likelihood,),
+                                 site_correlation=site_correlation, first_update=max(0, len(trajectory) - 1))
         rate = rate_update(changes, float(tracks), morgans, n_labels, previous=rate)
         if np.any(capable):
             entry, exit_ = fidelity_update(tuple(counts), (entry, exit_))
@@ -1423,7 +1570,7 @@ def estimate_chain(
     parts, regime, bins = [], [], []
     theta = switch_probabilities(morgans, model.rate, n_labels)  # writable, as in the updates
     for raw, eligible in raw_batches():
-        if hasattr(raw, "read"):
+        if hasattr(raw, "path_only"):
             from .read_decode import chain_statistics as read_chain_statistics
             statistics = read_chain_statistics(
                 raw, tracks_states, capable, theta, model.entry, model.exit, eligible, bin_likelihood=True
@@ -1464,7 +1611,7 @@ def label_paths(
     """int32[N, 2, B] Viterbi labels of the (tempered) label emissions ``raw`` [N, S*S, B] under ``model``. The mirrored
     convention expands the reversed label emissions directly, so one expanded table (8 S'^2 B bytes per sample) is
     alive at a time (viterbi_track_states would copy the expanded table)."""
-    if hasattr(raw, "read"):
+    if hasattr(raw, "path_only"):
         # a read-state batch reaching label continuity's painted-switch comparison: label continuity compares
         # relabellings on the emissions without read state throughout (its part emissions are built without it), so
         # its check uses the batch's scalar part too; the painting's own decode goes through painting.read_decode

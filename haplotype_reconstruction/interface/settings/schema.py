@@ -230,6 +230,13 @@ class PaintingSection:
         "5 matched 7 and 9 on every simulated design measured (paired-end, long reads, 1x to 10,000x).",
         (1, 3, 5, 7, 9),
     )
+    foreign_read_share: float | str = setting(
+        "auto",
+        "auto_float",
+        "Fraction of reads in the painting's foreign-read class. Auto estimates the fraction from held-out "
+        "calibration blocks. A number in [0, 1) declares the fraction and skips its estimation. Each foreign read "
+        "keeps a uniformly chosen donor label while it spans sites.",
+    )
     pair_sharing: bool = setting(
         False,
         "bool",

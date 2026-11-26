@@ -150,8 +150,11 @@ def run(
             genetic_map = working_maps(store, reader.manifest, maps).for_contig(contig)
             continuity = tuple(replace(outcome, accepted=False, row_maps=None) for outcome in painted.label_continuity)
             batch = max(1, team, cores)
+            read_setup = (
+                calibration_records.read_setup(store, reader.manifest, contig) if parameters.read_classes > 1 else None
+            )
 
-            def compute(source: ContigEvidence | WindowEvidence) -> Painting:
+            def compute(source: ContigEvidence | WindowEvidence, corrected_rows: tuple[int, ...] = ()) -> Painting:
                 if source.payload_identity != payload_identity:
                     raise InvariantError("refit painting evidence payload binding differs")
                 return paint_chromosome(
@@ -166,7 +169,8 @@ def run(
                             batch,
                         ),
                         file, evidence_identity, source.cohort_frequencies, calibration["confidence_correlation"],
-                        parameters, unit_batches=True, label_correlation=LABEL_ERROR_CORRELATION,
+                        parameters, unit_batches=True, label_correlation=LABEL_ERROR_CORRELATION, read_setup=read_setup,
+                        corrected_rows=corrected_rows,
                     ),
                     progress=_Progress(file, identity), label_continuity=continuity,
                     label_errors=True,  # as the reference painting: the pedigree's painting carries the label errors
@@ -180,11 +184,12 @@ def run(
             _, decided = contamination_stage.decision(store, reader.manifest)
             if np.any(decided["flagged"]):
                 # 4.22 QC A: the flagged libraries' rows corrected; a dense projection replaces the windows
-                # (the uncorrected projection is not kept alive beside the corrected one during the decode)
-                source = contamination_stage.corrected_evidence(
+                # (the uncorrected projection is not kept alive beside the corrected one during the decode). The
+                # corrected rows carry no uniform foreign class (stage_builder): their likelihoods hold QC A's model
+                source, corrected_rows = contamination_stage.corrected_evidence_with_rows(
                     store, reader.manifest, contig, evidence_records.load_dense(file, expected_identity=evidence_identity),
                     evidence_identity=evidence_identity)
-                result = compute(source)
+                result = compute(source, corrected_rows)
                 del source
             else:
                 with read_evidence(file, evidence_identity) as source:

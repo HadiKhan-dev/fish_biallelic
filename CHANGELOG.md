@@ -1,5 +1,48 @@
 # Changelog
 
+## 4.23.0 (26 November 2026)
+
+4.23 adds a foreign-read class to the read state for reads from another sample of the cross that entered a sample's
+library. It restores the pedigree edges 4.22 lost on long-read crosses with foreign reads, estimates the foreign-read
+share per run, and makes the pedigree, painting and calibration stages faster without changing their decisions.
+Released results change at every positive estimated share, and family phase changes at every share.
+
+- Painting (LRP): the read state has a uniform foreign-read class. A foreign read keeps one donor label (a founder
+  label or BACKGROUND, never the pair's own labels) while it spans sites, and arrives and ends with the library's
+  fitted read survival. The class is one route everywhere: painting, calibration, the pedigree's source and child
+  chains and map-scale frames, and family phase. Family phase scores fixed pairs with the read state's predictive
+  score. [Painting methods](docs/methods/painting.md#foreign-read-class-and-bin-operators)
+- Only an allele the sample's genotype does not carry identifies a foreign read. A donor read whose allele one
+  homologue carries counts as no evidence, so the foreign class no longer stands in for the read state's lumped
+  'balanced' class (a persistent uneven long-read split). Without this rule a share as small as 1e-15 moved the
+  calibration and the painting; with it the held-out effect of a vanishing share vanishes (famhs_d chr18: +555 nats at
+  1e-15 before, -0.1 after).
+- `[painting] foreign_read_share` is estimated by default; a declared value in [0, 1) fixes it. The estimator scores
+  windows with a switching label pair at the painting's rate, conditioned on both flanks, so clean designs estimate
+  zero. [Estimating the foreign-read share](docs/methods/painting.md#estimating-the-foreign-read-share)
+- Libraries that QC A corrected carry no uniform foreign class: their corrected likelihood already models their
+  contamination. Their unreachable foreign classes are zero, so they no longer set the backward normalisation.
+- The copying-model EM raises an invariant error when its log-likelihood falls beyond rounding (a numerically
+  corrupted E-step) instead of returning a collapsed fit.
+- Speed, with identical decisions: pedigree stage wall within 1.5x of 4.22's with the foreign class (lanes, exact
+  map-scale frames, a scores cache); painting and calibration compile the extended bin action at every label count;
+  calibration fold tasks and the share round use their cores (about 0.1 -> 0.86); family phase 14-17 % faster;
+  full-depth repaint 3.88 -> 2.58 s; read-state table builds release the GIL.
+- Engine: a retiring worker is reaped after its tasks finish (a race could fail a run).
+
+Release validation (24 known-truth and real arms against 4.22.0, true Tier B edges / false):
+ad_foreign 1 -> 79 / 0, fr_len10k 24 / 1 -> 98 / 0, d3f_famhs_real 34 -> 92, d3p_famhs_real 15 -> 90, fr_f003 19 -> 91,
+fr_f001 76 -> 96; the QC A contamination simulation 41 -> 85. Clean and share-zero designs keep their edges; famhs
+designs' genotype error falls (famhs_d 0.104 -> 0.006 %, famhs_h 1.02 -> 0.039 %). TroMau releases 57 of 4.22's 58
+edges (one near the cutoff) at an estimated share of 1.2e-4.
+
+Known limitations (for 4.24): on the ad_foreign designs family phase's joins give more switches and minority sites
+than 4.22 (ad_foreign 125 -> 186 switches); a parentless sample's whole-chromosome phase set and some G0 -> F1 edges
+are released or withheld on a knife edge; on famhs designs the read-aware divisor criterion is a near-tie at share
+zero, so a tiny declared share can change the chosen divisor.
+
+Start a fresh checkpoint root from the original inputs when moving to 4.23.
+
 ## 4.22.0 (24 November 2026)
 
 4.22 detects and corrects cross-sample contamination, improves sample and site QC, and changes how shared reads and birth order inform pedigree inference. It also adds realistic read simulations, lets painting calibration run across nodes, and makes released results consistent under REF/ALT exchange. Scientific results change.

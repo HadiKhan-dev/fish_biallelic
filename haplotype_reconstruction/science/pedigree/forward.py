@@ -100,8 +100,9 @@ def _common_products(
 ):
     """Emission products of called-founder state pairs per child and bin; NaN = the general path.
 
-    Missing named alleles (BACKGROUND's frequency) and BACKGROUND (candidate-specific) take the general path, whose
-    site order, likelihood and underflow fallback stay authoritative.
+    A named state has the same ALT probability in every projection, even where a panel allele is missing.
+    BACKGROUND (candidate-specific) takes the general path. Its site order, likelihood and underflow rule also
+    apply here, so a finite cached product is the exact value the general path would have computed.
     """
     bins = site_start.shape[1]
     states = state_alt.shape[0]
@@ -117,12 +118,9 @@ def _common_products(
                 for slot in range(site_start[child, block], site_stop[child, block]):
                     site = site_index[slot]
                     a, b = state_alt[first, site], state_alt[second, site]
-                    if not ((a == 0.0 or a == 1.0) and (b == 0.0 or b == 1.0)):
-                        valid = False
-                        break
                     value = site_likelihood(child_gl[child, site], coefficient[child, site], a, b, mismatch)
                     if value <= 0.0:
-                        valid = False
+                        product = 0.0
                         break
                     product *= value
                     if not np.isfinite(product) or product < _SMALLEST_NORMAL:
@@ -479,18 +477,30 @@ class ChildTerms:
         self.read_offset, self.read_initial, self.read_operator, self.read_ratio = resident_terms(
             reads, children, self.site_start, self.site_stop
         )
-        self.read_reset, self.read_width = class_layout(
-            self.read_operator, self.read_offset, self.site_start, self.site_stop)
         self.n_classes = int(self.read_initial.shape[1])
+        self.read_reset, self.read_width = class_layout(
+            self.read_operator, self.read_offset, self.site_start, self.site_stop, self.n_classes)
         cache_children = COMMON_EMISSION_CACHE_BYTES // max(1, bins * states * states * 8)
         self.cached = cache_children > 0
         self.batch = min(children, cache_children) if cache_children else children
         # the read state's class-transfer cache (class_cache): one child batch within CLASS_TRANSFER_CACHE_BYTES, the
         # batch then shared with the scalar caches; none when one child's would not fit (scored per site)
         class_bytes = bins * states * states * self.n_classes * self.n_classes * 8 if self.n_classes > 1 else 0
-        self.class_cached = 0 < class_bytes <= CLASS_TRANSFER_CACHE_BYTES
+        # Only the fixed-width own block admits a class matrix per state pair. The extended
+        # chain keeps its O(C^2 + K) gap and ratio descriptors at each observed slot.
+        fixed_width = self.read_operator.shape[1] == self.read_operator.shape[2]
+        self.class_cached = fixed_width and 0 < class_bytes <= CLASS_TRANSFER_CACHE_BYTES
         if self.class_cached:
             self.batch = max(1, min(self.batch, CLASS_TRANSFER_CACHE_BYTES // class_bytes))
+        # Dense reuse for short structured vectors, with bounded foreign width relative to the own block.
+        # Wider chains keep structured gap actions, so the cache never adds a fourth power of founder count.
+        compact_width = self.n_classes <= 2 * self.read_operator.shape[1]
+        self.trio_batch = self.batch
+        self.trio_class_cached = self.class_cached or (
+            not fixed_width and compact_width and 0 < class_bytes <= CLASS_TRANSFER_CACHE_BYTES
+        )
+        if self.trio_class_cached:
+            self.trio_batch = max(1, min(self.batch, CLASS_TRANSFER_CACHE_BYTES // class_bytes))
 
     def common(self, projection: Projection, child_start: int, child_stop: int):
         """The cached emission products of a child batch, or None without a cache."""
@@ -508,10 +518,12 @@ class ChildTerms:
             child_stop,
         )
 
-    def class_cache(self, projection: Projection, child_start: int, child_stop: int):
-        """The read state's class-transfer cache of a child batch (read_transfer.class_transfers), or None without
-        read state or when it does not fit (the chains then carry every pair site by site)."""
-        if not self.class_cached:
+    def class_cache(self, projection: Projection, child_start: int, child_stop: int, *, trios: bool = False):
+        """The read-class transfer cache of this child batch, or None when it is disabled for this width.
+
+        Ranking and block scoring can also request a bounded bank for short structured vectors (trios=True).
+        """
+        if not (self.trio_class_cached if trios else self.class_cached):
             return None
         from .read_transfer import class_transfers
 

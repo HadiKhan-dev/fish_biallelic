@@ -33,6 +33,7 @@ import numpy as np
 
 from ..painting import api as painting_hmm
 from .map_scale_chains import frame_loglik, target_loglik, target_posterior
+from .map_scale_operators import FrameOperators, full_sib, join_emissions
 from .map_scale_kernels import (
     pair_alternative_loglik,
     pair_fullsib_loglik,
@@ -92,7 +93,7 @@ class Frames:
     family: list[int] = field(default_factory=list)
     target: list[int] = field(default_factory=list)
     positions: list[np.ndarray] = field(default_factory=list)
-    emissions: list[np.ndarray] = field(default_factory=list)
+    emissions: list[np.ndarray | FrameOperators] = field(default_factory=list)
     entry: list[np.ndarray] = field(default_factory=list)
 
     def __len__(self) -> int:
@@ -102,7 +103,7 @@ class Frames:
         offsets = np.zeros(len(self.positions) + 1, np.int64)
         offsets[1:] = np.cumsum([len(p) for p in self.positions])
         pos = np.ascontiguousarray(np.concatenate(self.positions), dtype=np.float64)
-        em = np.ascontiguousarray(np.concatenate(self.emissions), dtype=np.float64)
+        em = join_emissions(self.emissions)
         entry = np.ascontiguousarray(np.concatenate(self.entry), dtype=np.float64)
         return offsets, pos, em, entry
 
@@ -312,7 +313,7 @@ def build_frames(components: Sequence[ComponentInput], families: Families, activ
             frames.family.append(f)
             frames.target.append(int(rows[a]))
             frames.positions.append(comp.centers[fb[a:z]])
-            frames.emissions.append(np.ascontiguousarray(em25[a:z][:, list(FULL_SIB_COLUMNS)]))
+            frames.emissions.append(full_sib(em25[a:z]))
             frames.entry.append(entry[a:z])
             if want25:
                 em25s.append(em25[a:z])
@@ -366,9 +367,22 @@ def _pair_test(components: Sequence[ComponentInput], families: Families, p: MapS
     tables: dict[tuple[int, int], list[np.ndarray]] = {}
     units = [(index, f) for index in range(len(components)) for f in families.members]
     work = partial(_pair_tables, components=components, families=families, r_coarse=r_coarse, eps=eps)
-    for rows in map_work(work, units):
+    if map_work is map:
+        results = map(work, units)
+    else:
+        # The observations and likelihood chains grow with bins times member pairs.
+        # Start the longest units first and restore the original reduction order.
+        order = sorted(range(len(units)), key=lambda k: (
+            len(components[units[k][0]].centers) * len(families.members[units[k][1]]) ** 2
+        ), reverse=True)
+        ordered = map_work(work, (units[k] for k in order))
+        by_unit = dict(zip(order, ordered, strict=True))
+        results = (by_unit[k] for k in range(len(units)))
+    for rows in results:
         for pair, fs, hs, po in rows:
-            acc = tables.setdefault(pair, [np.zeros(fs.shape), np.zeros(hs.shape), np.zeros(po.shape)])
+            if pair not in tables:
+                tables[pair] = [np.zeros(fs.shape), np.zeros(hs.shape), np.zeros(po.shape)]
+            acc = tables[pair]
             acc[0] += fs
             acc[1] += hs
             acc[2] += po
@@ -413,7 +427,7 @@ def target_guard(frames: Frames, em25s, prev: GuardResult, iteration: int, p: Ma
     pos = np.ascontiguousarray(np.concatenate(frames.positions))
     entry = np.ascontiguousarray(np.concatenate(frames.entry))
     # the 25-symbol matrices are joined one family at a time (memory: 26 C^2 values per frame)
-    em5 = np.ascontiguousarray(np.concatenate(frames.emissions))
+    em5 = join_emissions(frames.emissions)
     ll4 = frame_loglik(offsets, pos, em5, entry, r_coarse, deltas)
     del em5
     famk = np.asarray(frames.family)
@@ -425,7 +439,7 @@ def target_guard(frames: Frames, em25s, prev: GuardResult, iteration: int, p: Ma
         sub_off = np.zeros(len(idx) + 1, np.int64)
         sub_off[1:] = np.cumsum([offsets[k + 1] - offsets[k] for k in idx])
         sel = np.concatenate([np.arange(offsets[k], offsets[k + 1]) for k in idx])
-        em25 = np.ascontiguousarray(np.concatenate([em25s[k] for k in idx]))      # rows: sel's frames
+        em25 = join_emissions([em25s[k] for k in idx])      # rows: sel's frames
         rl = target_loglik(sub_off, np.ascontiguousarray(pos[sel]), em25, np.ascontiguousarray(entry[sel]),
                            float(rf), float(deltas[di]), ein, eout)
         tn = names[idx]
@@ -442,7 +456,7 @@ def target_guard(frames: Frames, em25s, prev: GuardResult, iteration: int, p: Ma
                 so = np.zeros(int(m.sum()) + 1, np.int64)
                 so[1:] = np.cumsum([offsets[k + 1] - offsets[k] for k in idx[m]])
                 share = float(np.mean(target_posterior(so, np.ascontiguousarray(pos[sel_t]),
-                                                       np.ascontiguousarray(em25[local_t]),
+                                                       em25[local_t],
                                                        np.ascontiguousarray(entry[sel_t]), float(rf),
                                                        float(deltas[di]), float(ein[ii]), float(eout[jj]))))
             if lr > best[1] and share >= p.target_share:

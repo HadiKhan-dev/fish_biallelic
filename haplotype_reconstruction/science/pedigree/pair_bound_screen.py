@@ -1,13 +1,14 @@
-"""Batch retained parent pairs and run their bounds on prepared chromosome components."""
+"""Rank capped retained parent pairs on prepared chromosome components."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import numba
 import numpy as np
+from numba import get_num_threads
 
-from . import read_bounds
+from ...core.errors import InvariantError
+from . import blocks, read_bounds, read_m2
 from .forward import ChildTerms
 from .numerical_parameters import PAIR_NULL_RELATIVE_GUARD
 from .pair_bound import emission_bound, pair_bounds, partner_bound, scaled_emissions, slot_groups
@@ -214,15 +215,15 @@ def component_bounds(context: ComponentContext, batch: PairBatch, claim_threads=
         change = np.flatnonzero((trios[1:, 0] != trios[:-1, 0]) | (trios[1:, 1] != trios[:-1, 1])) + 1
         run_start = np.concatenate(([0], change, [len(trios)])).astype(np.int64)
         # long runs cut into pieces of at most PAIR_BOUND_RUN_ROWS rows (each piece forms its first parent's
-        # partial maxima again: the same values) so that no run outlasts the others; then handed out one at a time
+        # partial maxima again: the same values). The kernel balances the pieces across its team.
         run_start = np.unique(np.concatenate([np.arange(a, b, PAIR_BOUND_RUN_ROWS)
                                               for a, b in zip(run_start[:-1], run_start[1:], strict=True)]
                                              + [run_start[-1:]])).astype(np.int64)
-        with numba.parallel_chunksize(1):
-            return read_bounds.pair_bounds_classes(
-                trios, batch.row_child, log_emission, scaled, top, offset, context.group, context.count,
-                context.initial, context.transfer, matrices, terms.read_initial, terms.read_width, run_start,
-            )
+        return read_bounds.pair_bounds_classes(
+            trios, batch.row_child, log_emission, scaled, top, offset, context.group, context.count,
+            context.initial, context.transfer, matrices, terms.read_initial, terms.read_width, run_start,
+            get_num_threads(),
+        )
     return pair_bounds(
         batch.trios,
         batch.row_child,
@@ -241,31 +242,146 @@ def component_bounds(context: ComponentContext, batch: PairBatch, claim_threads=
     )
 
 
-def chromosome_bounds(
-    prepared, compact, config, claim_threads=lambda: None, *, reverse: bool | None = None
-) -> np.ndarray:
-    """float32 [P]: per retained pair (canonical row order) the chromosome's M2 bound, the sum over its components,
-    rounded up to float32 (never below the float64 bound)."""
-    from . import resident
+def retained_pair_offsets(compact) -> np.ndarray:
+    """The complete canonical pair axis, including children needing no ranking."""
+    counts = np.diff(compact.indptr).astype(np.int64)
+    return np.concatenate(([0], np.cumsum(counts * (counts - 1) // 2)))
 
-    high_mass = config.panel.pair_bound_high_mass
-    contexts = []
+
+def ranking_child_ranges(compact, cap: int, parts: int) -> tuple[tuple[int, int], ...]:
+    """Contiguous ranges of children with approximately equal retained-pair work."""
+    counts = np.diff(retained_pair_offsets(compact))
+    work = np.concatenate(([0], np.cumsum(np.where(counts > cap, counts, 0))))
+    # Keep a child together even when its own pairs exceed the mean work per part.
+    cuts = np.searchsorted(work, np.linspace(0, work[-1], max(1, parts) + 1)[1:-1])
+    edges = np.unique(np.concatenate(([0], cuts, [compact.n_samples])))
+    return tuple((int(a), int(b)) for a, b in zip(edges[:-1], edges[1:], strict=True))
+
+
+def _ranking_rows(compact, cap, eligibility, first_child, stop_child):
+    """Eligible rows of capped children, indexed relative to their range's start."""
+    offset = 0
+    for child in range(first_child, stop_child):
+        a, b = compact.indptr[child : child + 2]
+        parents = compact.parents[a:b]
+        count = len(parents) * (len(parents) - 1) // 2
+        if count > cap:
+            i, j = np.triu_indices(len(parents), 1)
+            first, second = parents[i], parents[j]
+            allowed = (first != child) & (second != child)
+            if eligibility is not None:
+                allowed &= eligibility.pair_mask(child, first, second)
+            ids = np.flatnonzero(allowed)
+            if len(ids) > cap:
+                for start in range(0, len(ids), BATCH_ROWS):
+                    chunk = ids[start:start + BATCH_ROWS]
+                    trios = np.column_stack((np.full(len(chunk), child, np.int64), first[chunk], second[chunk]))
+                    yield offset + chunk, trios
+        offset += count
+
+
+@dataclass(frozen=True)
+class RankedPieces:
+    """Scores indexed by canonical ordered trios and the contig's material cuts."""
+
+    trios: np.ndarray
+    cuts: np.ndarray
+    values: np.ndarray
+
+    def for_panel(self, trios: np.ndarray, cuts: np.ndarray) -> np.ndarray | None:
+        if not len(self.trios) or not np.array_equal(self.cuts, cuts):
+            return None
+        key = np.dtype([(label, np.int64) for label in ("child", "first", "second")])
+        saved = np.ascontiguousarray(self.trios).view(key).reshape(-1)
+        want = np.ascontiguousarray(trios).view(key).reshape(-1)
+        positions = np.minimum(np.searchsorted(saved, want), len(saved) - 1)
+        matched = saved[positions] == want
+        result = np.full((len(trios), len(cuts)), np.nan)
+        result[matched] = self.values[positions[matched]]
+        return result
+
+
+def _round_up(values: np.ndarray) -> np.ndarray:
+    rounded = values.astype(np.float32)
+    below = rounded.astype(np.float64) < values
+    rounded[below] = np.nextafter(rounded[below], np.float32(np.inf))
+    return rounded
+
+
+def chromosome_ranking(
+    prepared, compact, config, claim_threads=lambda: None, *, reverse: bool | None = None, eligibility=None,
+    child_range: tuple[int, int] | None = None, placement: blocks.ScorePlacement | None = None,
+) -> tuple[np.ndarray, RankedPieces | None]:
+    """Store the full-data M2 ranking key of each relevant row, rounded up once per chromosome.
+
+    An optional child range scores a contiguous slice for an independent task.
+    Joining adjacent ranges in child order gives the full canonical array.
+    """
+    from . import read_score, resident
+
+    first_child, stop_child = (0, compact.n_samples) if child_range is None else child_range
+    if not 0 <= first_child <= stop_child <= compact.n_samples:
+        raise ValueError("M2 ranking child range is outside the compact sample axis")
+    offsets = retained_pair_offsets(compact)
+    out = np.zeros(offsets[stop_child] - offsets[first_child], dtype=np.float32)
+    batches = tuple(_ranking_rows(compact, int(config.panel.max_pairs_per_child), eligibility, first_child, stop_child))
+    if not batches:
+        return out, None
+    indices, trios = (np.concatenate(parts) for parts in zip(*batches, strict=True))
+    del batches
+    totals = np.zeros(len(trios))
+    rounding_work = np.zeros(compact.n_samples)
+    parts = []
+    if placement is not None:
+        offset = placement.offset
+        selectors = tuple(c.selector_switch_probability for c in prepared.components)
+        if not np.array_equal(blocks.cut_list(selectors, offset, placement.last, config.material), placement.cuts):
+            raise InvariantError(f"{prepared.contig}: prepared pieces differ from the genome cut list")
     for component in prepared.components:
-        state = resident.resident(component, config, claim_threads, reverse=reverse)
-        contexts.append(component_context(state.projection, state.terms, high_mass, claim_threads))
-        del state
-    out = np.zeros(retained_pair_count(compact), dtype=np.float32)
-    bins = max((component.n_bins for component in prepared.components), default=1)
-    n_states = max((component.n_states for component in prepared.components), default=1)
-    classes = max((context.terms.n_classes for context in contexts), default=1)
-    cursor = 0
-    for batch in retained_batches(compact, bins, n_states, classes):
-        value = np.zeros(len(batch.trios))
-        for context in contexts:
-            value += component_bounds(context, batch, claim_threads)
-        rounded = value.astype(np.float32)
-        below = rounded.astype(np.float64) < value
-        rounded[below] = np.nextafter(rounded[below], np.float32(np.inf))
-        out[cursor : cursor + len(value)] = rounded
-        cursor += len(value)
-    return out
+        state = resident.resident(component, config, claim_threads, reverse=reverse, include_pair_masses=False)
+        axis, n_pieces = np.empty(0, dtype=np.int64), 0
+        if placement is not None:
+            switch = component.selector_switch_probability
+            axis, description = blocks.pieces(switch, offset, placement.last, config.material,
+                                              component.component_index)
+            offset += blocks.component_length(switch, config.material)
+            n_pieces = len(description)
+        full, pieces = read_m2.component_scores(state.projection, state.terms, trios, axis, n_pieces, claim_threads)
+        totals += full
+        terms = state.terms
+        # A bin normalization sums S*S*D cells. Include per-site class movement and emission in
+        # the numerical guard, and rescore near float32 boundaries using the original evaluation.
+        rounding_work += (state.projection.n_bins * state.projection.n_states**2 * terms.n_classes
+                          + (terms.site_stop[:, -1] - terms.site_start[:, 0]) * (terms.n_classes + 4))
+        if placement is not None:
+            parts.append(pieces)
+    finite = np.flatnonzero(np.isfinite(totals))
+    value = totals[finite]
+    upper = _round_up(value)
+    lower = np.nextafter(upper, np.float32(-np.inf))
+    distance = np.minimum(upper.astype(np.float64) - value, value - lower.astype(np.float64))
+    guard = 32.0 * np.finfo(np.float64).eps * (rounding_work[trios[finite, 0]] + np.abs(value))
+    uncertain = finite[distance <= guard]
+    if len(uncertain):
+        totals[uncertain] = 0.0
+        for component in prepared.components:
+            state = resident.resident(component, config, claim_threads, reverse=reverse, include_pair_masses=False)
+            totals[uncertain] += read_score.component_m2(
+                state.projection, state.terms, trios[uncertain], claim_threads=claim_threads
+            )
+        for part in parts:
+            part[uncertain] = np.nan
+    out[indices] = _round_up(totals)
+    ranked = (RankedPieces(trios, placement.cuts, np.concatenate(parts, axis=1))
+              if placement is not None and parts else None)
+    return out, ranked
+
+
+def chromosome_bounds(
+    prepared, compact, config, claim_threads=lambda: None, *, reverse: bool | None = None, eligibility=None,
+    child_range: tuple[int, int] | None = None,
+) -> np.ndarray:
+    """The rounded chromosome keys alone for callers without a material placement."""
+    keys, _ = chromosome_ranking(prepared, compact, config, claim_threads, reverse=reverse,
+                                 eligibility=eligibility, child_range=child_range)
+    return keys

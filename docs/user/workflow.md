@@ -171,18 +171,24 @@ in a round before starting the next.
    to fit the rates chosen from the pooled robustness grid.
 3. Run `haplotypes calibrate cross.toml --stage outlier` once to publish the
    run-wide outlier estimate.
-4. List the fit jobs with `haplotypes calibrate cross.toml --stage divisor --list-fits`.
-   Run `haplotypes calibrate cross.toml --contig chrN --stage divisor --fold F --divisor D`
-   for each listed chromosome, zero-based fold and candidate. The list includes
-   the core count for each fit. For a read-state fit you can omit `--divisor`
-   to fit every candidate in the fold with one shared emission builder.
-   With read-aware confidence calibration, fits use the chromosome prefix
-   reaching `calibration_morgans` in configured order.
-5. For every analysed chromosome, run
+4. With `[painting] foreign_read_share = "auto"` and multiple read classes, run
+   `haplotypes calibrate cross.toml --contig chrN --stage share` for every
+   analysed chromosome. Then run `haplotypes calibrate cross.toml --stage share`
+   once to pool the likelihood profiles. A numerical share skips this round.
+5. List the fit jobs with `haplotypes calibrate cross.toml --stage divisor --list-fits`.
+   For read-state calibration, use `fold_fits` and run
+   `haplotypes calibrate cross.toml --contig chrN --stage divisor --fold F`
+   for each listed chromosome and zero-based fold. Each fold fits its candidates
+   concurrently within the listed core count, sharing one emission builder.
+   The `fits` list describes individual candidates. To run one, supply
+   `--divisor D` in addition to the chromosome and fold. Single-class
+   calibration uses these individual fits. Read-aware confidence calibration
+   uses the chromosome prefix reaching `calibration_morgans` in configured order.
+6. For every analysed chromosome, run
    `haplotypes calibrate cross.toml --contig chrN --stage divisor`.
    This gathers finished divisor fits and publishes an empty record for
    chromosomes outside the read-aware calibration prefix.
-6. Run `haplotypes calibrate cross.toml` once to publish the pooled calibration.
+7. Run `haplotypes calibrate cross.toml` once to publish the pooled calibration.
    This command can also schedule the entire calibration on one node after assembly.
 
 Run `haplotypes reconstruct cross.toml --contig chrN` again to paint and

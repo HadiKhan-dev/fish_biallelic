@@ -251,6 +251,19 @@ Source: [`CALIBRATION_DIVISOR_COLUMNS`](../../haplotype_reconstruction/outputs/r
 | 7 | `selected` | selected run-level confidence divisor (bool). |
 | 8 | `selected_path` | selected run-level path divisor (bool). |
 
+## painting/calibration_share.csv
+
+Source: [`CALIBRATION_SHARE_COLUMNS`](../../haplotype_reconstruction/outputs/reports/painting.py).
+
+| Position | Column | Meaning and unit |
+|---|---|---|
+| 1 | `contig` | contig identifier (text). |
+| 2 | `sample` | sample ID, or empty for the pooled objective (text). |
+| 3 | `foreign_read_share` | candidate fraction of reads assigned to the foreign class (probability). |
+| 4 | `delta_log_likelihood` | held-out log likelihood relative to share zero (nats). |
+| 5 | `grid` | whether the candidate belongs to the coarse grid (bool). |
+| 6 | `selected` | whether the candidate is the estimated share or the declared value (bool). |
+
 ## painting/pair_sharing.csv
 
 Source: [`PAIR_SHARING_COLUMNS`](../../haplotype_reconstruction/outputs/reports/pair_sharing.py).

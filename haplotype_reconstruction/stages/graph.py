@@ -112,6 +112,7 @@ def build_graph(
     output_nodes: Sequence[Node] = (),
     analysis: AnalysisContigs | None = None,
     adopt_rate: bool = False,
+    estimate_share: bool = False,
     divisor_fit: TaskKey | None = None,
 ) -> RunGraph:
     """Carry ENG-03/05 as model edges; context assemblies share contig affinity.
@@ -178,14 +179,20 @@ def build_graph(
     for c in calibrated:
         nodes.append(Node(_key("calibration_refine", c), robustness))
     nodes.append(Node(_key("calibration_outlier"), tuple(_key("calibration_refine", c) for c in calibrated)))
+    calibration_input = _key("calibration_outlier")
+    if estimate_share:
+        for c in calibrated:
+            nodes.append(Node(_key("calibration_share", c), (calibration_input, _key("assembly", c))))
+        calibration_input = _key("calibration_share")
+        nodes.append(Node(calibration_input, tuple(_key("calibration_share", c) for c in calibrated)))
     for c in calibrated:
-        dependencies = (_key("calibration_outlier"), _key("assembly", c))
+        dependencies = (calibration_input, _key("assembly", c))
         if divisor_fit is not None and divisor_fit.scope == c:
             nodes.append(Node(divisor_fit, dependencies))
         # The calibrate gather and the full-run expansion share this publication.
         nodes.append(Node(_key("calibration_divisor", c), dependencies))
     nodes.append(
-        Node(_key("calibration"), (_key("calibration_outlier"),) + tuple(_key("calibration_divisor", c) for c in calibrated))
+        Node(_key("calibration"), (calibration_input,) + tuple(_key("calibration_divisor", c) for c in calibrated))
     )
     # the founder refit's class priors pool every analysed contig's gain histogram (ADVICE2 16.2, N0run frozen by G7')
     nodes.append(Node(_key("refit_priors"), tuple(_key("refit_histogram", c) for c in calibrated)))
@@ -316,6 +323,12 @@ def workflow_cut(
             if contig is not None:
                 raise SettingsError("calibration stage outlier is run-wide and does not accept --contig")
             target = _key(stage)
+        elif stage == "calibration_share":
+            if _key(stage) not in keys:
+                raise SettingsError("share calibration requires auto foreign_read_share and multiple read classes")
+            target = _key(stage, contig or "run")
+            if target not in keys:
+                raise SettingsError(f"{contig}: excluded from the final analysis")
         else:
             if contig is None:
                 raise SettingsError(f"calibration stage {calibration_stage} requires --contig")
@@ -348,7 +361,8 @@ def workflow_cut(
 
 # The calibration fits are independent across contigs and do not need a resident worker.
 UNPINNED_STAGES = frozenset({
-    "report", "recombination", "export", "calibration_robustness", "calibration_divisor", "calibration_divisor_fit",
+    "report", "recombination", "export", "calibration_robustness", "calibration_share",
+    "calibration_divisor", "calibration_divisor_fit",
 })
 
 def bind_tasks(

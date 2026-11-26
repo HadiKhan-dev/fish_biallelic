@@ -224,17 +224,29 @@ def run(root: str, resolved: ResolvedConfiguration, *, team: int = 1) -> str:
 
 def corrected_evidence(store: CheckpointStore, manifest: Mapping[str, Any], contig: str, evidence: ContigEvidence,
                        *, evidence_identity: str | None = None) -> ContigEvidence:
-    """The evidence with every flagged library's likelihood rows replaced by the contamination model; the same object
-    when no library is flagged. The donor law reads the donor's painted genotype on this contig (the painting product)
-    and, where it is unpainted, the donor's own likelihood row. ``evidence_identity``: the evidence record's identity,
-    derived here (only when a library is flagged) when the caller does not hold it."""
+    """Replace flagged likelihood rows, or return the original evidence when there are no flags."""
+    corrected, _ = corrected_evidence_with_rows(
+        store, manifest, contig, evidence, evidence_identity=evidence_identity,
+    )
+    return corrected
+
+
+def corrected_evidence_with_rows(
+    store: CheckpointStore, manifest: Mapping[str, Any], contig: str, evidence: ContigEvidence,
+    *, evidence_identity: str | None = None,
+) -> tuple[ContigEvidence, tuple[int, ...]]:
+    """Return corrected evidence and the sample indices whose likelihoods were replaced.
+
+    The donor law uses the donor's painted genotype, or its likelihood row where unpainted.
+    Derive the evidence record identity here when correction needs it and the caller lacks it.
+    """
     from ..evidence import records as evidence_records
     from . import records as painting_records
 
     _, product = decision(store, manifest)
     flagged = np.flatnonzero(np.asarray(product["flagged"], dtype=bool))
     if flagged.size == 0:
-        return evidence
+        return evidence, ()
     if tuple(product["sample_ids"]) != tuple(evidence.sample_ids):
         raise InvariantError("contamination decision and evidence sample axes differ")
     if evidence_identity is None:
@@ -277,7 +289,7 @@ def corrected_evidence(store: CheckpointStore, manifest: Mapping[str, Any], cont
             alpha, error = float(product["alpha"][i]), float(product["error"][i])
         corrected = science.corrected_likelihoods(alt, depth, error, float(product["heterozygote"][i]), alpha, q)
         likelihoods[i] = corrected[:, ::genotype_step]
-    return replace(evidence, likelihoods=likelihoods)
+    return replace(evidence, likelihoods=likelihoods), tuple(flagged.tolist())
 
 
 def cells_task(key, context: StageRun) -> Task:

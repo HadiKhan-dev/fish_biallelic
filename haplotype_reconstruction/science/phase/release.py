@@ -343,23 +343,10 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
                 posts, site_bin, alleles, gl, uniform, config.set_site_deviation, flips, left, right, shared=shared
             )
             orientation[first:last] = bin_orientation(oriented, bins - first, tau_g, last - first)
-        pg = np.stack([genotype[0], genotype[1] + genotype[2], genotype[3]])
-        g = pg.argmax(axis=0)
-        maximum_genotype = pg.max(axis=0)
-        called = maximum_genotype >= tau_g
-        p01, p10 = ordered[1], ordered[2]
-        het = called & (g == 1)
-        maximum_phase = np.maximum(p01, p10)
-        local_calls = calls[left:right]
-        hom = called & (g != 1)
-        local_calls[hom, 0] = local_calls[hom, 1] = (g[hom] // 2).astype(np.int8)
-        one_first = p10 > p01
-        local_calls[het, 0] = np.where(one_first[het], 1, 0)
-        local_calls[het, 1] = np.where(one_first[het], 0, 1)
-        undetermined[left:right] = het & ~(maximum_phase >= tau_p)
-        if scores is not None:
-            scores[0, left:right] = maximum_genotype
-            scores[1, left:right] = maximum_phase
+        kernels.site_calls(
+            genotype, ordered, tau_g, tau_p, calls[left:right], undetermined[left:right],
+            None if scores is None else scores[:, left:right],
+        )
 
     # Windows contain complete bins, so every output slice and median is independent.
     windows = (

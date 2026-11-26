@@ -63,10 +63,20 @@ from haplotype_reconstruction.science.painting.parameters import READ_STATE_BATC
 
 from ...core.errors import InputError
 from ...core.kernels import kernel
+from .map_scale_operators import (
+    FrameOperators,
+    FrameSource,
+    bin_gaps,
+    cache_frames,
+    frame_gaps,
+    frame_weights,
+    join_emissions,
+)
+from .read_gaps import foreign_reads
 from ..painting import api as painting_hmm
 
 __all__ = ["FrameSites", "ContigReads", "ScalarFrames", "ReadFrames", "frame_matrices", "bin_operators",
-           "link_frames", "canonical_split", "FRAME_COLUMNS"]
+           "link_frames", "canonical_split", "dense_frames", "FRAME_COLUMNS"]
 
 FRAME_COLUMNS = 26     # 25 track-symbol pairs, then misfit
 _CLIP = 300.0          # today's overflow guard on a frame's scalar ratios (nats above the configurations' best)
@@ -269,6 +279,16 @@ def link_frames(operators, entering, slot, bins, first, em, entry):
                     em[x, column, i, j] = work[i, j]
 
 
+def dense_frames(operators: FrameOperators, classes: int) -> np.ndarray:
+    """The frames' 26 matrices [n, 26, classes, classes] (map_scale_operators.cache_frames), at every width. A frame's
+    matrices cost local x states^2 bin actions once; the chains then apply them at every rate, misfit weight and
+    nuisance cell (about 23,000 actions per frame in the fit and 2,300 per guard round), where each structured action
+    repeated states^2 bin actions (on cs_tl, width 14 with 100 sites per bin, the structured gather ran for hours)."""
+    out = np.zeros((len(operators.index), FRAME_COLUMNS, classes, classes))
+    cache_frames(operators.native(), out)
+    return out
+
+
 def canonical_split(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """(canonical labels [n, 4], column map [n, 26]) of frames' labels [n, 4] (parent 0's two, parent 1's two): each
     parent's pair sorted, the parent holding the smaller label first. A frame's 26 matrices are the canonical
@@ -377,7 +397,7 @@ class ReadFrames:
         self.batch_bytes = int(batch_bytes)
         self.concurrent = concurrent
         self._index: dict[tuple, tuple[int, int]] = {}      # (component, row, bin, canonical labels) -> block, offset
-        self._blocks: list[np.ndarray] = []                   # [n, 26, C_b, C_b]
+        self._blocks: list[np.ndarray | FrameOperators] = []                   # [n, 26, C_b, C_b]
         self._links: dict[tuple[int, int], tuple] = {}        # (component, row) -> (operators | None, entering)
         self._classes = 1
         self._statistics = dict(loads=0, requests=0, computed=0)
@@ -446,9 +466,7 @@ class ReadFrames:
                 self._links.update(links)
         classes = 1
         for key in used:
-            operators = self._links[key][0]
-            if operators is not None:
-                classes = max(classes, operators.shape[-1])
+            classes = max(classes, self._links[key][1].shape[1])
         self._classes = max(self._classes, classes)
         return classes
 
@@ -474,6 +492,8 @@ class ReadFrames:
         # frame matrices and bin operators of the batch's rows
         frames_per_row = len(rows) / max(1, len(wanted))
         classes = 2 * int(builder.minor) + 3
+        if builder.foreign_read_share:
+            classes += S
         own = 8 * classes * classes * (FRAME_COLUMNS * frames_per_row + n_bins) + 8 * S * S * n_bins
         per_sample = int(builder.sample_bytes(columns, S, n_bins, False)) + int(own)
         step = max(1, min(max(16, numba.get_num_threads()), batch_bytes // max(1, per_sample)))
@@ -492,43 +512,96 @@ class ReadFrames:
             bypassed, composed, laws, _ = builder.site_parts(columns, batch)
             batch_row = {int(r): int(s) - lo for r, s in zip(local, self.samples[local])}
             in_batch = np.flatnonzero(np.isin(rows, local))
-            if len(in_batch):
-                selected_bins = np.unique(bins[in_batch])
-                built, _flags, _informative = builder.build_at(
-                    evidence.likelihoods, evidence.observed, columns, batch, site.alt, site.background, starts, stops,
-                    data.parameters, bins=selected_bins, robustness_epsilon=data.robustness_epsilon, site_correlation=data.site_correlation,
-                )
-                emission = np.ascontiguousarray(np.asarray(built.raw)[:, upper, :], dtype=np.float64)
-                read = np.require(built.read, dtype=np.float32, requirements=["C", "W", "A"])
-                read_log = np.require(built.read_log, dtype=np.float64, requirements=["C", "W", "A"])
-                perm = painting_hmm.swap_classes(int(built.minor)).astype(np.int64)
-                C = read.shape[3]
-                row_bypassed = np.asarray([bool(bypassed[batch_row[int(r)]]) for r in rows[in_batch]], dtype=bool)
-                for deep in (False, True):
-                    pick = in_batch[row_bypassed == deep]
-                    if not len(pick):
-                        continue
-                    request_row = np.asarray([batch_row[int(r)] for r in rows[pick]], dtype=np.int64)
-                    width = 1 if deep else C
-                    out = np.zeros((len(pick), FRAME_COLUMNS, width, width))
-                    frame_matrices(emission, read_log, read, first, second, pair_index, perm, bool(deep), request_row,
-                                   np.searchsorted(selected_bins, bins[pick]), np.ascontiguousarray(canonical[pick]), out)
-                    blocks.append((self._keys(index, rows[pick], bins[pick], canonical[pick]), out))
-                del built, emission, read, read_log
-            C = composed.shape[2]
             link_local = [int(r) for r in local if int(r) in link_set]
-            shared = [r for r in link_local if not bypassed[batch_row[r]]]
+            request_rows = np.asarray([batch_row[int(r)] for r in rows[in_batch]], dtype=np.int64)
+            # Match the builder's resolved depth, including samples it bypasses and QC A's corrected rows. A
+            # zero-depth row keeps its own-width frames and links even if later guard passes batch it with a
+            # covered row.
+            arrivals = np.zeros(len(bypassed), dtype=bool)
+            if builder.foreign_read_share:
+                depth = builder.foreign_depth(batch)
+                arrivals = ~bypassed & (depth != 0)
             for r in link_local:
                 if bypassed[batch_row[r]]:
                     links[(index, r)] = (None, np.ones((n_bins + 1, 1)))
-            if shared:
-                batch_rows = np.asarray([batch_row[r] for r in shared], dtype=np.int64)
-                operators = np.empty((len(shared), n_bins, C, C))
+
+            structured = arrivals[request_rows]
+            deep = bypassed[request_rows]
+            structured_links = [r for r in link_local if arrivals[batch_row[r]]]
+            if structured.any() or structured_links:
+                built, _, _ = builder(
+                    evidence.likelihoods, evidence.observed, columns, batch, site.alt, site.background, starts, stops,
+                    data.parameters, robustness_epsilon=data.robustness_epsilon, site_correlation=data.site_correlation,
+                )
+                read, correction, initial, perm, tape, exponent = built.chain_inputs()
+                if len(in_batch):
+                    emission = np.ascontiguousarray(built.raw[:, upper, :])
+                if structured.any():
+                    source = FrameSource(read, tape, exponent, perm)
+                    chosen = in_batch[structured]
+                    request_row = request_rows[structured]
+                    request_bins = np.ascontiguousarray(bins[chosen])
+                    request_labels = np.ascontiguousarray(canonical[chosen])
+                    weight = np.empty((len(chosen), len(first)))
+                    frame_weights(source.bin_inputs(), emission, correction, request_row, request_bins, request_labels,
+                                  pair_index, weight)
+                    refs = np.column_stack((np.zeros(len(chosen), np.int64), request_row, request_bins,
+                                            np.full(len(chosen), -1, np.int64)))
+                    values = FrameOperators((source,), refs, request_labels, weight, np.empty((len(chosen), 0, 0)),
+                                            np.empty((0, FRAME_COLUMNS, 1, 1)))
+                    blocks.append((self._keys(index, rows[chosen], request_bins, request_labels), values))
+                if deep.any():
+                    chosen = in_batch[deep]
+                    values = _scalar_matrices(emission, request_rows[deep], bins[chosen], canonical[chosen], S)
+                    blocks.append((self._keys(index, rows[chosen], bins[chosen], canonical[chosen]), values))
+                if structured_links:
+                    foreign = foreign_reads(builder, columns, batch)
+                    width = len(perm)
+                    own = laws.shape[2]
+                    batch_rows = np.asarray([batch_row[r] for r in structured_links], dtype=np.int64)
+                    operators = np.empty((len(structured_links), n_bins, own + 1, own + 2))
+                    entering = np.empty((len(structured_links), n_bins + 1, width))
+                    bin_gaps(composed, laws, foreign.survival, foreign.absent, initial, batch_rows, starts, stops,
+                             operators, entering)
+                    for slot, r in enumerate(structured_links):
+                        links[(index, r)] = (operators[slot], entering[slot])
+                compact = ~(structured | deep)
+            else:
+                compact = np.ones(len(in_batch), dtype=bool)
+
+            if compact.any():
+                chosen = in_batch[compact]
+                selected_bins = np.unique(bins[chosen])
+                built, _, _ = builder.build_at(
+                    evidence.likelihoods, evidence.observed, columns, batch, site.alt, site.background, starts,
+                    stops, data.parameters, bins=selected_bins, robustness_epsilon=data.robustness_epsilon,
+                    site_correlation=data.site_correlation,
+                )
+                emission = np.ascontiguousarray(built.raw[:, upper, :])
+                read, read_log, _, perm, _, _ = built.chain_inputs()
+                local_requests = request_rows[compact]
+                row_bypassed = bypassed[local_requests]
+                for deep in (False, True):
+                    pick = chosen[row_bypassed == deep]
+                    if not len(pick):
+                        continue
+                    width = 1 if deep else read.shape[3]
+                    out = np.zeros((len(pick), FRAME_COLUMNS, width, width))
+                    frame_matrices(emission, np.require(read_log, requirements=["C", "W"]),
+                                   np.require(read, requirements=["C", "W"]), first, second, pair_index, perm, bool(deep),
+                                   local_requests[row_bypassed == deep],
+                                   np.searchsorted(selected_bins, bins[pick]),
+                                   np.ascontiguousarray(canonical[pick]), out)
+                    blocks.append((self._keys(index, rows[pick], bins[pick], canonical[pick]), out))
+            own_links = [r for r in link_local if not bypassed[batch_row[r]] and not arrivals[batch_row[r]]]
+            if own_links:
+                C = composed.shape[2]
+                batch_rows = np.asarray([batch_row[r] for r in own_links], dtype=np.int64)
+                operators = np.empty((len(own_links), n_bins, C, C))
                 bin_operators(np.require(composed, dtype=np.float64, requirements=["C", "W", "A"]), batch_rows,
                               starts, stops, operators)
                 enter_site = np.concatenate([np.maximum(starts - 1, 0), stops[-1:] - 1])
-                laws = np.asarray(laws)
-                for slot, r in enumerate(shared):
+                for slot, r in enumerate(own_links):
                     entering = np.ascontiguousarray(laws[enter_site, batch_row[r]], dtype=np.float64)
                     links[(index, r)] = (operators[slot], entering)
             del composed, laws
@@ -540,16 +613,27 @@ class ReadFrames:
         bins = np.asarray(bins, dtype=np.int64)
         canonical, column_map = canonical_split(labels)
         located = np.asarray([self._index[k] for k in self._keys(index, rows, bins, canonical)], dtype=np.int64)
-        em = np.zeros((len(rows), FRAME_COLUMNS, classes, classes))
+        parts, indices = [], []
         for block in np.unique(located[:, 0]):
             pick = np.flatnonzero(located[:, 0] == block)
-            values = self._blocks[block][located[pick, 1]]
-            if values.shape[-1] == classes:
-                em[pick] = values
-            elif values.shape[-1] == 1:
-                em[pick, :, 0, 0] = values[:, :, 0, 0]
-            else:
-                raise InputError("frame emissions with different read-class counts")
+            parts.append(self._blocks[block][located[pick, 1]])
+            indices.append(pick)
+        first = np.asarray(first, dtype=np.bool_)
+        if any(isinstance(part, FrameOperators) for part in parts):
+            return self._structured_emissions(index, rows, bins, labels, first, classes, parts, indices, column_map)
+        em, entry = self._compact_emissions(index, rows, bins, first, parts, indices, column_map)
+        width = entry.shape[1]
+        if width != classes:
+            em = np.pad(em, ((0, 0), (0, 0), (0, classes - width), (0, classes - width)))
+            entry = np.pad(entry, ((0, 0), (0, classes - width)))
+        return em, entry
+
+    def _compact_emissions(self, index, rows, bins, first, parts, indices, column_map):
+        classes = max(part.shape[-1] for part in parts)
+        em = np.zeros((len(rows), FRAME_COLUMNS, classes, classes))
+        for pick, values in zip(indices, parts, strict=True):
+            width = values.shape[-1]
+            em[pick, :, :width, :width] = values
         em = np.ascontiguousarray(np.take_along_axis(em, column_map[:, :, None, None], axis=1))
         if classes == 1:
             return em, np.ones((len(rows), 1))
@@ -567,5 +651,46 @@ class ReadFrames:
                 operators[k] = ops
                 entering[k] = enter
         entry = np.empty((len(rows), classes))
-        link_frames(operators, entering, slot.astype(np.int64), bins, np.asarray(first, dtype=np.bool_), em, entry)
+        link_frames(operators, entering, slot.astype(np.int64), bins, first, em, entry)
         return em, entry
+
+    def _structured_emissions(self, index, rows, bins, labels, first, classes, parts, indices, column_map):
+        from dataclasses import replace
+
+        structured, structured_indices, compact, compact_indices = [], [], [], []
+        for part, pick in zip(parts, indices, strict=True):
+            if isinstance(part, FrameOperators):
+                structured.append(part)
+                structured_indices.append(pick)
+            else:
+                compact.append(part)
+                compact_indices.append(pick)
+
+        site = self.sites[index]
+        local_width = len(structured[0].sources[0].permutation)
+        own = local_width - site.n_states
+        picked = np.sort(np.concatenate(structured_indices))
+        unique, slot = np.unique(rows[picked], return_inverse=True)
+        batch = np.empty((len(unique), len(site.starts), own + 1, own + 2))
+        entering = np.empty((len(unique), len(site.starts) + 1, local_width))
+        for k, row in enumerate(unique):
+            batch[k], entering[k] = self._links[index, int(row)]
+        gap = np.empty((len(picked), own + 1, own + 2))
+        local_entry = np.empty((len(picked), local_width))
+        # A sequence belongs to one row and uses one representation, so subsetting preserves its links.
+        frame_gaps(batch, entering, slot.astype(np.int64), bins[picked], first[picked], gap, local_entry)
+        entry = np.zeros((len(rows), classes))
+        entry[picked, :local_width] = local_entry
+        order = np.argsort(np.concatenate(structured_indices))
+        operators = replace(join_emissions(structured)[order],
+                            labels=np.ascontiguousarray(labels[picked], dtype=np.int64), gap=gap)
+        if compact:
+            dense_rows = np.sort(np.concatenate(compact_indices))
+            dense, dense_entry = self._compact_emissions(
+                index, rows[dense_rows], bins[dense_rows], first[dense_rows], compact,
+                [np.searchsorted(dense_rows, pick) for pick in compact_indices], column_map[dense_rows],
+            )
+            entry[dense_rows, :dense_entry.shape[1]] = dense_entry
+            order = np.argsort(np.concatenate((picked, dense_rows)))
+            operators = join_emissions([operators, dense])[order]
+        return dense_frames(operators, classes), entry

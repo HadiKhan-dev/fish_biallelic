@@ -1,8 +1,10 @@
 """Agree both convention solves and release meiosis chains (FP20, FP21)."""
 
 import numpy as np
+from numba import types
 
 from ...contracts.phase import AgreedRelease, SampleRelease
+from ...core.kernels import kernel
 from .parameters import MEIOSIS_RESET_TOLERANCE
 
 
@@ -88,28 +90,61 @@ def agreement(first: SampleRelease, second: SampleRelease, site_bin: np.ndarray)
     calls_b, und_b, breaks_b = second.calls, second.undetermined, second.set_breaks
     scores_a, scores_b = first.scores, second.scores
     m = len(site_bin)
-    gt_a = np.where((calls_a >= 0).all(axis=1), calls_a.sum(axis=1, dtype=np.int64), -1)
-    gt_b = np.where((calls_b >= 0).all(axis=1), calls_b.sum(axis=1, dtype=np.int64), -1)
-    agree = gt_a == gt_b
-    calls = np.where(agree[:, None], calls_a, np.int8(-1)).astype(np.int8)
-    het = agree & (gt_a == 1)
-    phased = het & ~und_a & ~und_b
     starts = np.zeros(m, dtype=bool)
     cut_bins = np.asarray(sorted(set(breaks_a) | set(breaks_b)), dtype=np.int64)
     first_sites = np.searchsorted(site_bin, cut_bins, side="left")
     starts[first_sites[first_sites < m]] = True
-    idx = np.flatnonzero(phased)
-    if len(idx) > 1:
-        flipped = (calls_a[idx, 0] != calls_b[idx, 0]).astype(np.int8)
-        same_set = np.diff(np.cumsum(starts)[idx]) == 0
-        starts[idx[1:][(np.diff(flipped) != 0) & same_set]] = True
+    scores = np.minimum(scores_a, scores_b) if scores_a is not None and scores_b is not None else None
+    calls, undetermined = _agree_sites(calls_a, und_a, calls_b, und_b, starts, scores)
+    return AgreedRelease(calls, undetermined, np.flatnonzero(starts), scores)
+
+
+@kernel(
+    overloads=tuple(
+        (
+            types.Array(types.int8, 2, "C", readonly=readonly),
+            types.Array(types.boolean, 1, "C", readonly=readonly),
+            types.Array(types.int8, 2, "C", readonly=readonly),
+            types.Array(types.boolean, 1, "C", readonly=readonly),
+            types.Array(types.boolean, 1, "C"),
+            score_type,
+        )
+        for readonly in (False, True)
+        for score_type in (types.none, types.Array(types.float32, 2, "C"))
+    ),
+    cache=True,
+    nogil=True,
+)
+def _agree_sites(calls_a, und_a, calls_b, und_b, starts, scores):
+    """Scan the fixed cuts and agreed heterozygotes in site order, once per sample."""
+    calls = np.empty_like(calls_a)
+    undetermined = np.empty(len(starts), dtype=np.bool_)
+    previous_flip = -1
+    for site in range(len(starts)):
+        if starts[site]:
+            previous_flip = -1
+        a0, a1 = calls_a[site]
+        b0, b1 = calls_b[site]
+        gt_a = int(a0) + int(a1) if a0 >= 0 and a1 >= 0 else -1
+        gt_b = int(b0) + int(b1) if b0 >= 0 and b1 >= 0 else -1
+        agree = gt_a == gt_b
+        calls[site, 0] = a0 if agree else -1
+        calls[site, 1] = a1 if agree else -1
+        het = agree and gt_a == 1
+        phased = het and not und_a[site] and not und_b[site]
+        undetermined[site] = het and not phased
+        if phased:
+            flip = int(a0 != b0)
+            if previous_flip >= 0 and flip != previous_flip:
+                starts[site] = True
+            previous_flip = flip
+        if scores is not None:
+            if not agree or gt_a < 0:
+                scores[0, site] = -1.0
+            if not phased:
+                scores[1, site] = -1.0
     starts[:1] = False
-    if scores_a is not None and scores_b is not None:
-        scores = np.minimum(scores_a, scores_b)
-        scores[0, ~agree | (gt_a < 0)] = -1.0  # no genotype released
-        scores[1, ~phased] = -1.0  # no phased heterozygote released
-        return AgreedRelease(calls, het & ~phased, np.flatnonzero(starts), scores)
-    return AgreedRelease(calls, het & ~phased, np.flatnonzero(starts), None)
+    return calls, undetermined
 
 
 __all__ = ["agreement", "edge_chains", "set_start_bins"]
