@@ -33,7 +33,8 @@ the active item's own work, never by opening another front.
 4. Never delete checkpoints, results or other files without explicit approval, except the provisional outputs of your
    own authorized attempt. Never overwrite accepted results (§5.1, §7.3).
 5. Never test on real AulStu (astcal) data (§3.1).
-6. Use every node already allocated to the owner, whatever its service level [22 Nov]. Request new allocations on
+6. Use every node already allocated to the owner, whatever its service level or job type (interactive jobs
+   included), unless the owner has explicitly said to leave that node alone [22, 27 Nov]. Request new allocations on
    SL4-CPU; request SL3-CPU, SL2-CPU or SL3-GPU only when the owner asks at the time, in the size the owner asks for
    [24 Nov]. Running SL4 allocations are kept until they expire (§6.2-§6.4).
 7. Whole-genome runs, validation, resume checks and canaries included, use at least one full node (§6.5).
@@ -515,7 +516,12 @@ not ask again and insert no separate benchmark unless a new material risk appear
   name order (`--priority`): critical work first, and a short ready queue for nodes about to start. `nodeq status` shows
   idle nodes and why tasks wait; `claude_lab/nodeq/nodeq_remind.py` prints a reminder after 10 idle minutes. Start
   workers with `nodeq/sbatch/nodeq_<partition>.sbatch`; `nodeq/attach.sh JOBID` gives an existing job a worker: the
-  hosting allocation, or a node whose superseded `pool_worker.sh` pool has emptied.
+  hosting allocation, any other running job of the owner's (interactive ones included) whose CPUs nothing else uses,
+  or a node whose superseded `pool_worker.sh` pool has emptied.
+- Every node assigned to the owner carries a nodeq worker [27 Nov] unless the owner has explicitly said to leave that
+  node alone. At the start of every session and at every capacity pass (below), compare the owner's running jobs
+  (`squeue -u "$USER" -t RUNNING`) with the live workers in `nodeq status`, and attach a worker to any job that lacks
+  one. Never assume a job is the owner's private one: only the owner's explicit word exempts a node.
 - The hosting allocation is a nodeq node too [29-30 Oct]: attach a worker (no `--shared`, no `--cpus` subset) while no
   work started outside nodeq uses its CPUs; it takes whole-node tasks when the hosting job holds the whole node. Its
   tasks fit its free CPUs, memory and walltime, or checkpoint for another worker.
@@ -606,9 +612,10 @@ unrequested full pipeline, anyone else's jobs.
   When SL4 requests wait on the shared budget, leave them pending and say how long the work may slip. Never SL2-GPU or
   any other GPU level. Accounts are normally DURBIN-SL4-CPU, DURBIN-SL3-CPU, DURBIN-SL2-CPU and DURBIN-SL3-GPU; verify
   access.
-- Use every node already allocated to the owner, whatever its service level [22 Nov]: the restriction is on requesting,
-  never on using. Scripts and wrappers check that they run in a Slurm job with the full node or lease they declare,
-  never the account; never refuse, reroute or guard work away from an assigned SL2 or SL3 node.
+- Use every node already allocated to the owner, whatever its service level or job type, unless the owner has
+  explicitly said to leave that node alone [22, 27 Nov]: the restriction is on requesting, never on using. Scripts
+  and wrappers check that they run in a Slurm job with the full node or lease they declare, never the account; never
+  refuse, reroute or guard work away from an assigned SL2 or SL3 node.
 - Before requesting more: reuse capacity already assigned (coordinating with tasks that share it); optimize useful
   progress per credit and hour (a window too short to finish or checkpoint saves nothing); inspect the user's jobs,
   `hpcstat` (or `sinfo`), the relevant `scontrol` partition, job and QoS records and `mybalance`, reusing recent shared

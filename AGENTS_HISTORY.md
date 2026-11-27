@@ -169,3 +169,9 @@ need not load this file every session. Rules live only in `AGENTS.md`; nothing h
   The owner: "vectorise everything properly, even for your tests", "why are you submitting over 8 cores when we have
   whole massive nodes idle???", and "Add something to agents.md that all tests must be properly parallelized as well
   for the future".
+- **27 Nov** (§1.6, §5.4, §6.2, every assigned node carries a worker). The owner's 112-core sapphire SL2 interactive
+  job 41920432 (cpu-r-24) had run since 11:07 on 26 Nov with no nodeq worker and zero load, about 13 hours, through
+  the 4.23 release and the 4.24 campaign, because the coordinator had recorded it as "the owner's interactive job, not
+  mine" and never attached a worker; the session's own new host was also found without one. The owner: "this is a paid
+  node for usage for our stuff, don't leave it alone", and "Add something to agents.md about how you should use all
+  available nodes assigned to me unless I have explicitly told you to leave a node alone".
