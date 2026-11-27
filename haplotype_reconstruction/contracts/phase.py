@@ -98,6 +98,10 @@ class PhasePainting:
     sample_ids: tuple[str, ...] = field(
         kw_only=True, metadata={"role": "obs", "axes": ("N",), "units": "1", "dtype": "str"}
     )
+    # Original painting panel, on the same site and founder row axes as the refit panel.
+    panel_inference: np.ndarray = field(
+        kw_only=True, metadata={"role": "state", "axes": ("K", "Lr"), "units": "1", "dtype": "int8"}
+    )
     states: PhaseStates = field(metadata={"role": "state", "axes": (), "units": "1", "dtype": "PhaseStates"})
     bins: PhaseBins = field(metadata={"role": "state", "axes": (), "units": "1", "dtype": "PhaseBins"})
     transitions: PhaseTransitions = field(

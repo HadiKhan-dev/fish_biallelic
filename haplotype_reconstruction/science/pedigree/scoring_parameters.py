@@ -101,16 +101,35 @@ class PanelParameters:
             ),
         },
     )
-    # The retention band and the chromosome softmax temperature T = units ** information_tempering_power
-    # (m1.temperature), units the chromosome's selected markers with an empty bin as one (the genome's for the genome
-    # band): the band keeps every candidate within 60 T nats of the child's best M1, a compute budget with the pair cap.
+    # The retention band and the chromosome softmax temperature T = blocks ** information_tempering_power
+    # (m1.temperature, 4.20's band), blocks = ceil(selected markers / markers_per_retention_block), at least one: per
+    # chromosome its selected markers, for the genome band the genome's. The band keeps every candidate within 60 T
+    # nats of the child's best M1 (LOG_FLOOR) and, with the pair cap, bounds the M2 panel.
     information_tempering_power: float = field(
         default=0.5,
         metadata={
             "provenance": (
-                "PS07; dimensionless exponent 0.5 on the selected-marker count sets the retention band's and the "
-                "chromosome softmax temperature (4.21 B2 at r_T = 0; 4.22 R4: a compute budget of the latent-order "
-                "decision, wide band and no cap giving the same decisions on every measured root)."
+                "PS07; dimensionless exponent 0.5 on the retention-block count sets the retention band's and the "
+                "chromosome softmax temperature (4.20's band, restored in 4.24: see markers_per_retention_block)."
+            ),
+        },
+    )
+    # Selected markers per retention block of the temperature above. A block of 100 selected markers (at least 10 bins
+    # at markers_per_bin = 10) counts as one unit of the band, so T grows as the square root of the blocks, not of the
+    # markers: 4.20's band. 4.21 (B2) took T = markers ** 0.5 (every selected marker a unit), a band about ten times
+    # wider; R6 (26 Nov 2026) measured its median M2 panel above twice 4.20's on 13 of 15 simulated designs (std 3 ->
+    # 256 pairs). This block size brings every design's panel back to 4.20's size, adds true Tier B edges (backcross
+    # and longbc +6 each) and no false edge, and drops true parents from the panels of tl (28) and zero_stress (13)
+    # with their released edges unchanged (owner, 26 Nov 2026). It is a marker count, not a map length: T depends on
+    # the marker density per Morgan.
+    markers_per_retention_block: int = field(
+        default=100,
+        metadata={
+            "units": "selected markers",
+            "provenance": (
+                "PS07; 100 selected markers per retention block (4.20's band; restored in 4.24 by the owner, "
+                "26 Nov 2026, after R6: 4.21's per-marker band made median M2 panels more than twice 4.20's on 13 "
+                "of 15 designs, while 4.20's band adds true Tier B edges and no false edge)."
             ),
         },
     )

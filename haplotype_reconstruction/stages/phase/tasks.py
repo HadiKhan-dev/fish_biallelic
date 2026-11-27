@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ...contracts.evidence import ReadModelFit
     from ...contracts.genetic_map import GeneticMapSet
     from ...contracts.painting import ComponentPainting
     from ...science.painting.parameters import PaintingParameters
@@ -40,7 +41,7 @@ from ...store.container import CheckpointFile
 from ...store.protocol import Derivation
 from ..context import StageRun, default_scratch
 from ..framework import RecordKey, ResourceRequest, Task, TaskKey
-from ..inputs.products import required_dense_evidence, required_product, task_inputs
+from ..inputs.products import required_product, task_inputs
 from .boundaries import validate_parent_edges, validate_sample_order
 
 T = TypeVar("T")
@@ -161,6 +162,7 @@ def execute_contig(
     memo: PhaseMemo | None = None,
     read_builder: Callable[[], ReadEmissionBuilder] | None = None,
     corrected_rows: tuple[int, ...] = (),
+    read_model: ReadModelFit | None = None,
 ) -> PhasedSamples:
     """Check canonical boundaries, then compute every component and assemble a complete contig."""
     import numpy as np
@@ -168,6 +170,7 @@ def execute_contig(
     from ...core.errors import InvariantError
     from ...engine.cpu import claim_threads, current_budget
     from ...science.phase.component import phase_contig
+    from ...science.phase.site_error import adjust_likelihoods, fit_site_error
     from ...science.phase.window import site_windows
     from ...store.mapped import discard_pages, mapped_array
     from .parameters import PHASE_RELEASE_BATCH
@@ -196,28 +199,54 @@ def execute_contig(
 
     budget = current_budget()
 
+    def map_work(function: Callable[[T], R], items: Iterable[T]) -> list[R]:
+        return budget.thread_map(function, items, label="family-phase independent work")
+
+    site_error = None
+    if read_model is not None and evidence.counts is not None:
+        eligible = ~evidence.founder_excluded
+        eligible[list(corrected_rows)] = False
+        site_error = fit_site_error(
+            painting, evidence.positions, evidence.counts, evidence.cohort_frequencies,
+            eligible, read_model, parameters, map_work,
+        )
+        error, balance = read_model.error_and_heterozygote()
+        inverse = read_model.heterozygote_inverse_concentration
+    corrected = frozenset(corrected_rows)
+
     def prepare_likelihoods(observations: PhaseObservations, indices: np.ndarray, site_bins: np.ndarray) -> np.ndarray:
         shape = (len(observations.sample_ids), len(indices), 3)
         likelihoods = observations.likelihoods
         if windowed:
             output = mapped_array(shape, np.float32, root=root)
             windows = tuple(site_windows(site_bins))
-
-            def row(sample: int) -> None:
-                for left, right in windows:
-                    output[sample, left:right] = likelihoods[sample, indices[left:right]]
-                discard_pages(output[sample])
         else:
             output = np.empty(shape, dtype=np.float32)
+            windows = ((0, shape[1]),)
+        updates = []
+        if site_error is not None and site_error.prevalence:
+            columns = observations.absolute_site_indices[indices]
+            direction = site_error.direction[columns]
+            for left, right in windows:
+                active = left + np.flatnonzero(direction[left:right] >= 0)
+                if active.size:
+                    sites = columns[active]
+                    updates.append((active, sites, direction[active], site_error.rate[sites]))
 
-            def row(sample: int) -> None:
-                output[sample] = likelihoods[sample, indices]
+        def row(sample: int) -> None:
+            for left, right in windows:
+                output[sample, left:right] = likelihoods[sample, indices[left:right]]
+            if sample not in corrected:
+                for active, sites, direction, rate in updates:
+                    adjust_likelihoods(
+                        output[sample], evidence.counts[sample, sites], active, direction, rate,
+                        error[sample], balance[sample], inverse,
+                    )
+            if windowed:
+                discard_pages(output[sample])
 
         budget.thread_map(row, range(shape[0]), label="family-phase likelihood rows")
         return output
-
-    def map_work(function: Callable[[T], R], items: Iterable[T]) -> list[R]:
-        return budget.thread_map(function, items, label="family-phase independent work")
 
     def concurrent(functions: list[Callable[[Callable[..., list[Any]]], R]]) -> list[R]:
         """Each function(map) on a live share; map runs its independent blocks or
@@ -300,6 +329,7 @@ def publish_contig(
     *,
     read_builder: Callable[[], ReadEmissionBuilder] | None = None,
     corrected_rows: tuple[int, ...] = (),
+    read_model: ReadModelFit | None = None,
     storage: str = "auto",
     root: str | Path | None = None,
 ) -> PhasedSamples:
@@ -331,7 +361,7 @@ def publish_contig(
         return saved
     product = execute_contig(
         evidence, painting, refit, edges, genetic_map, parameters, identities, storage=storage, root=root, memo=memo,
-        read_builder=read_builder, corrected_rows=corrected_rows,
+        read_builder=read_builder, corrected_rows=corrected_rows, read_model=read_model,
     )
     records.write(file, expected, product)
     mark_complete(file, records.KEY, {records.KEY: expected.identity})
@@ -340,6 +370,19 @@ def publish_contig(
     memo.remove()
     record_diagnostic(f"{evidence.contig}: family phase reused {memo.reused} intermediate units")
     return product
+
+
+def _phase_evidence(reader, contig):
+    """Open checked counts and GLs together so paired evidence can share their dictionary."""
+    from ...science.evidence.read_model.fit import fixed_model
+    from ..evidence import records
+
+    evidence = reader.require(reader.request(records, "evidence", contig, counts=True), contig)
+    decisions = required_product(reader, records, "summary", contig).read_model
+    if decisions.applied:
+        return evidence, decisions.candidates[decisions.selected]
+    fixed_error = reader.manifest["parameters"]["evidence"]["read_model"]["fixed_error"]
+    return evidence, fixed_model(fixed_error, len(evidence.sample_ids))
 
 
 def _load_phase_inputs(loaders):
@@ -378,8 +421,8 @@ def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMa
         records.PhaseMemo(file, expected).remove()
         record_diagnostic(f"{contig}: family phase reused 0 intermediate units; final record resumed")
         return expected.identity
-    evidence, painting, refit, pedigree = _load_phase_inputs((
-        partial(required_dense_evidence, reader, contig),
+    (evidence, read_model), painting, refit, pedigree = _load_phase_inputs((
+        partial(_phase_evidence, reader, contig),
         partial(required_product, reader, painting_records, "painting", contig),
         partial(required_product, reader, refit_records, "refit", contig),
         partial(required_product, reader, pedigree_records, "pedigree", None),
@@ -408,6 +451,7 @@ def run(root: str, contig: str, resolved: ResolvedConfiguration, maps: GeneticMa
             read_setup=partial(_calibrated_read_setup, store, reader.manifest, contig), corrected_rows=corrected_rows,
         ),
         corrected_rows=corrected_rows,
+        read_model=read_model,
         root=default_scratch(Path(root)) / "phase" / json_digest(contig)[:16]
         if scratch is None
         else Path(scratch) / "phase" / json_digest(contig)[:16],

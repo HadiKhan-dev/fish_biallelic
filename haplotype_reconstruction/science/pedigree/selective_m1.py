@@ -54,7 +54,7 @@ def search_batch(
     upper: np.ndarray,
     children: np.ndarray,
     eligible: np.ndarray,
-    units: np.ndarray,
+    markers: np.ndarray,
     config: PedigreeParameters,
     score: Callable[[np.ndarray], np.ndarray],
 ) -> SearchBatch:
@@ -74,8 +74,8 @@ def search_batch(
     cutoff = best.copy()
     local = np.full((contigs, batch), -np.inf)
     total_upper = outward_sum(upper)
-    # the genome floor's band: T of the whole genome (m1.temperature of the summed retention units)
-    shift = m1.LOG_FLOOR * float(m1.temperature(np.sum(units), config))
+    # the genome floor's band: T of the whole genome (m1.temperature of the summed selected markers)
+    shift = m1.LOG_FLOOR * float(m1.temperature(np.sum(markers), config))
     counts = dict(global_queries=0, local_max_queries=0, rounds=0)
 
     def query(mask, kind):
@@ -156,7 +156,7 @@ def search_batch(
                 missing = parents[~known[j, c, parents]]
                 if not np.all(upper[j, c, missing] < local[j, c]):
                     raise InvariantError("selected M1 local maximum is not certified")
-    temp = m1.temperature(units, config)
+    temp = m1.temperature(markers, config)
     floors = np.full_like(local, -np.inf)
     for c in range(batch):
         if np.isfinite(best[c]):

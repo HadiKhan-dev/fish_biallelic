@@ -1,6 +1,8 @@
 """Derivations and readers of the run-level painting calibration."""
 
+import threading
 from dataclasses import dataclass
+from typing import Any
 
 from ...contracts.contigs import AnalysisContigs
 from ...core.concurrency import threaded_each
@@ -42,10 +44,20 @@ def fit_key(fold, divisor):
     return f"{KEYS['divisor_fit']}/{fit_round(fold, divisor)}"
 
 
+# The run calibration's derived requests per process: (records.run_binding, code identity) -> (manifest, the
+# contigs' bound upstream identities, {request: Reader}). A request's identity is a pure function of
+# the manifest, those upstream identities (records.bound_upstream, bound once per process) and the code identity, so
+# a hit checks the manifest and the upstream identities equal and returns the same value. Every painting reader
+# derives the run calibration's identity, and each derivation digests about four identities per analysed contig over
+# all contigs: uncached, one TroMau pedigree preparation derived 12,558 calibration identities (19 s of digests).
+_EXPECTED: dict[tuple, tuple[Any, dict[str, str], dict[tuple, Reader]]] = {}
+_EXPECTED_GUARD = threading.Lock()
+
+
 def expected(store, manifest, *, product="calibration", contig=None, fold=None, divisor=None):
     # Pooled over the analysed contigs (the reconstruction axis), like the pedigree.
     contigs = tuple(AnalysisContigs.from_manifest(manifest).included)
-    from .records import bound_upstream
+    from .records import bound_upstream, run_binding
 
     inputs = {}
     # each contig's chain (header reads and decodes back to discovery) is independent of the others, and is bound
@@ -54,6 +66,28 @@ def expected(store, manifest, *, product="calibration", contig=None, fold=None, 
         if bound is None:
             raise InvariantError("painting calibration requires every final assembly and evidence product")
         inputs[c + "/assembly"], inputs[c + "/evidence"], inputs[c + "/map"] = bound[1], bound[3], bound[4]
+    code = code_dependency_identity(
+        ("science.painting.calibration", "stages.painting.calibration_tasks", "stages.painting.calibration_records")
+    )
+    binding = (*run_binding(store), code.digest)
+    request = (product, contig, fold, None if divisor is None else float(divisor))
+    with _EXPECTED_GUARD:
+        entry = _EXPECTED.get(binding)
+        if entry is not None and (entry[0] is manifest or entry[0] == manifest) and entry[1] == inputs:
+            found = entry[2].get(request)
+            if found is not None:
+                return found
+    result = _derive(manifest, contigs, inputs, code, product, contig, fold, divisor)
+    with _EXPECTED_GUARD:
+        entry = _EXPECTED.get(binding)
+        if entry is None or not (entry[0] is manifest or entry[0] == manifest) or entry[1] != inputs:
+            entry = _EXPECTED[binding] = (manifest, inputs, {})
+        entry[2][request] = result
+    return result
+
+
+def _derive(manifest, contigs, inputs, code, product, contig, fold, divisor):
+    """The calibration request ``product`` (expected), derived afresh."""
     params = from_payload(PaintingParameters, manifest["parameters"]["painting"])
     auto = manifest["parameters"].get("estimate_foreign_read_share", False)
     # The outlier profile's clusters are the pedigree's material units (its MaterialParameters, read as the run's
@@ -61,9 +95,6 @@ def expected(store, manifest, *, product="calibration", contig=None, fold=None, 
     # the rate, fits nothing and reads no material.
     material = manifest["parameters"]["pedigree"]["material"] if len(set(params.robustness_grid)) > 1 else None
     policy = NumericalPolicy(**manifest["numerical_policy"])
-    code = code_dependency_identity(
-        ("science.painting.calibration", "stages.painting.calibration_tasks", "stages.painting.calibration_records")
-    )
 
     def identity(which, scope=None, upstream=None):
         return Derivation(

@@ -7,6 +7,7 @@ the evidence's published identities; the decision binds every analysed contig's 
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -72,9 +73,34 @@ class Reader:
         return {name: value for name, value in payload.items() if name != "schema"}
 
 
+# Contamination requests this process derived: records.run_binding + (product, contig) -> (manifest, Reader). Pure
+# functions of the manifest and the published painting and evidence identities (which never change); a failed check
+# raises and is never remembered. Every pedigree contig task reads the run's decision, which binds every contig's
+# cells: re-derived per call, one TroMau preparation re-read every contig's painting and evidence headers each time.
+_EXPECTED: dict[tuple, tuple[Any, Reader]] = {}
+_EXPECTED_GUARD = threading.Lock()
+
+
 def expected(store: CheckpointStore, manifest: Mapping[str, Any], *, product: str, contig: str | None = None) -> Reader:
     """Rebuild the identity from the checked published painting and evidence requests (cells) or every analysed
-    contig's cells (the decision); never read it from the product's own envelope."""
+    contig's cells (the decision); never read it from the product's own envelope. Derived once per process and run
+    folder (_EXPECTED)."""
+    from .records import run_binding
+
+    key = (*run_binding(store), product, contig)
+    with _EXPECTED_GUARD:
+        cached = _EXPECTED.get(key)
+    if cached is not None and (cached[0] is manifest or cached[0] == manifest):
+        return cached[1]
+    request = _derive_expected(store, manifest, product=product, contig=contig)
+    with _EXPECTED_GUARD:
+        _EXPECTED[key] = (manifest, request)
+    return request
+
+
+def _derive_expected(store: CheckpointStore, manifest: Mapping[str, Any], *, product: str,
+                     contig: str | None = None) -> Reader:
+    """expected, derived afresh."""
     from ..evidence import records as evidence_records
     from . import records as painting_records
 

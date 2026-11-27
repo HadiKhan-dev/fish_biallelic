@@ -41,6 +41,9 @@ READ_DIVISOR_CONCURRENT_FITS = 5
 # four or 19 workers; four used 85 CPU s against 99 with 19.
 READ_SHARE_CORES = 4
 READ_SHARE_SAMPLE_BATCH = 19
+# A record identity's upstream binding maps over the analysed contigs, mostly holding the GIL: the 4.23 TroMau robustness
+# root used 7.6 CPU-s in 5.6 s with ten threads.
+BINDING_THREADS = 4
 
 
 def _fit(root, contig, resolved, maps, cores, function, *, read_state=None, foreign_read_share=0.0, **options):
@@ -138,14 +141,18 @@ def fit_share(root, contig, resolved, maps, **options):
 
 def _pooled_rows(store, manifest, product, grid):
     """{rate: the analysed contigs' summed values} of one per-contig calibration product (math.fsum: the same sum in
-    any contig order)."""
-    values = {float(e): [] for e in grid}
-    for c in AnalysisContigs.from_manifest(manifest).included:
+    any contig order). The contigs' records are read concurrently."""
+
+    def rows(c):
         q = records.expected(store, manifest, product=product, contig=c)
         saved = resume(store.contig(c), q.key, q.identity)
         if saved is None:
             raise RuntimeError(f"calibration prerequisite missing: {product}/{c}")
-        for e, v in saved.payload["rows"]:
+        return saved.payload["rows"]
+
+    values = {float(e): [] for e in grid}
+    for found in threaded_each(rows, AnalysisContigs.from_manifest(manifest).included):
+        for e, v in found:
             values[float(e)].append(v)
     return {e: fsum(v) for e, v in values.items()}
 
@@ -331,8 +338,10 @@ def gather_divisor(root, contig, grid, folds, read, morgans):
 
 def _divisor_task(key, root, resolved, maps, ties, outlier, read, fold, grid, cores):
     width = min(cores, _divisor_cores(grid, read))
-    # Two 38-core folds can share a 76-core node, and an isolated fold can use all 40.
-    minimum = min(width, max(READ_DIVISOR_CORES, cores // 2))
+    # A fold starts on one candidate's team (its sample batch) and takes its fair share of free CPUs up to its width,
+    # so a node runs several folds at once. A minimum of half the node (4.23) let one fold widen to 40 of 76 CPUs and
+    # keep every other fold waiting for 38: a single-node calibration ran its folds one at a time.
+    minimum = min(width, READ_DIVISOR_CORES)
     return Task(
         key, publish_divisor_fits,
         (root, key.scope, resolved, maps, ties, outlier["robustness_epsilon"],
@@ -416,11 +425,31 @@ def _read_sharing(store, manifest, contig):
                 read_sharing=any(row["status"] == "fitted" for row in libraries), read_setup=setup)
 
 
-def fits_publish(root, product, contig, fits):
-    """Publish a contig's record from its fits' rows in ascending order (the order of calibration.outlier_scores
-    and calibration.divisor_scores); ``seconds`` is the fits' summed time."""
+def read_sharing(root, contig):
+    """Graph task: the contig's read-sharing fields of its robustness record (_read_sharing). They read only the
+    evidence, so the robustness expansion runs this beside the rate fits instead of after them in its gather."""
     reader, store = task_inputs(root)
-    request = records.expected(store, reader.manifest, product=product, contig=contig)
+    return _read_sharing(store, reader.manifest, contig)
+
+
+def record_identity(root, product, contig):
+    """Graph task: the identity of a contig's calibration record (calibration_records.expected). It binds every
+    analysed contig's upstream chain (5.5 s in a fresh process of a TroMau step command), so a robustness expansion
+    with no record to resume derives it beside its fits."""
+    reader, store = task_inputs(root)
+    return records.expected(store, reader.manifest, product=product, contig=contig).identity
+
+
+def fits_publish(root, product, contig, fits, sharing=None, identity=None):
+    """Publish a contig's record from its fits' rows in ascending order (the order of calibration.outlier_scores
+    and calibration.divisor_scores); ``seconds`` is the fits' summed time. A robustness record also carries the
+    contig's read-sharing fields: ``sharing`` (the read_sharing task's value), computed here when not given.
+    ``identity``: the record's identity (the record_identity task's value), derived here when not given."""
+    reader, store = task_inputs(root)
+    if identity is None:
+        request = records.expected(store, reader.manifest, product=product, contig=contig)
+    else:
+        request = records.Reader(identity, records.KEYS[product])
     file = store.contig(contig)
     with claim(file, request.key, request.identity, blocking=False) as needed:
         if needed:
@@ -443,7 +472,7 @@ def fits_publish(root, product, contig, fits):
             payload = dict(schema=1, contig=contig, rows=rows, sample_rows=sample_rows, regime_rows=regime_rows,
                            material_coordinates=coordinates, bin_rows=bin_rows, seconds=seconds, skipped=False)
             if product == "robustness":
-                payload.update(_read_sharing(store, reader.manifest, contig))
+                payload.update(_read_sharing(store, reader.manifest, contig) if sharing is None else sharing)
             publish(file, request.key, request.identity, payload)
     return request.identity
 
@@ -467,17 +496,32 @@ def material_curves(records, grid):
     return components
 
 
-def _expansion(root, product, contig, fits):
-    """Independent one-CPU fits and the gather that publishes the contig's record."""
+def _expansion(root, product, contig, fits, *, derive_identity=False):
+    """Independent rate fits and the gather that publishes the contig's record; a robustness expansion also runs the
+    contig's read-sharing task (read_sharing) beside its fits, and with ``derive_identity`` the record's identity
+    (record_identity). A fit's kernels are parallel over the samples of its batch (``cores``): it starts on one CPU
+    and takes its fair share of free CPUs at each emission-batch boundary (stages.painting.tasks._at_batch_boundary),
+    so one contig's few fits use a whole node while many contigs' fits run one CPU each. On TroMau chr2 a fit took
+    30.0 s on one thread, 5.0 s on eight and 1.9 s on 76, with the same value (thread counts never change a
+    result)."""
     stage = "calibration_" + product
     width = len(str(len(fits)))
+    extra, kwargs = (), {}
+    if product == "robustness":
+        sharing = Task(TaskKey(stage, "read_sharing", contig), read_sharing, (root, contig),
+                       resources=ResourceRequest(1, 1))
+        extra, kwargs = (sharing,), dict(sharing=ResultRef(sharing.key))
+    if derive_identity:
+        identity = Task(TaskKey(stage, "identity", contig), record_identity, (root, product, contig),
+                        resources=ResourceRequest(1, BINDING_THREADS))
+        extra, kwargs = (identity, *extra), dict(kwargs, identity=ResultRef(identity.key))
     tasks = tuple(
         Task(
             TaskKey(stage, "fit", contig, f"{index:0{width}d}"),
             function,
             arguments,
             kwargs=options,
-            resources=ResourceRequest(1, 1),
+            resources=ResourceRequest(1, max(1, int(options.get("cores", 1)))),
         )
         for index, (function, arguments, options) in enumerate(fits)
     )
@@ -485,19 +529,27 @@ def _expansion(root, product, contig, fits):
         TaskKey(stage, "gather", contig),
         fits_publish,
         (root, product, contig, tuple(ResultRef(task.key) for task in tasks)),
-        depends_on=tuple(task.key for task in tasks),
+        kwargs=kwargs,
+        depends_on=tuple(task.key for task in extra + tasks),
         resources=ResourceRequest(1, 1),
     )
-    return Expansion(tasks, gather)
+    return Expansion(extra + tasks, gather)
 
 
 def run(root, product, contig, resolved, maps, ties, *, cores=1):
     reader, store = task_inputs(root)
     manifest = reader.manifest
-    request = records.expected(store, manifest, product=product, contig=contig)
     file = store.run if contig is None else store.contig(contig)
     config = resolved.parameters.painting
     grid = sorted(set(config.robustness_grid))
+
+    def fits(values):
+        return [(outlier_fit, (root, contig, resolved, maps, value), dict(cores=cores)) for value in values]
+
+    if product == "robustness" and len(grid) > 1 and not file.has(records.KEYS[product]):
+        # No record to resume: the fits start at once and the record's identity is derived beside them.
+        return _expansion(root, product, contig, fits(grid), derive_identity=True)
+    request = records.expected(store, manifest, product=product, contig=contig)
     if product in ("robustness", "refine") and len(grid) > 1:
         if resume(file, request.key, request.identity) is not None:
             return request.identity
@@ -505,10 +557,7 @@ def run(root, product, contig, resolved, maps, ties, *, cores=1):
         if product == "refine":
             values = _pooled_rows(store, manifest, "robustness", grid)
             grid = science.midpoints(grid, [values[e] for e in grid])
-        return _expansion(
-            root, product, contig,
-            [(outlier_fit, (root, contig, resolved, maps, value), dict(cores=cores)) for value in grid],
-        )
+        return _expansion(root, product, contig, fits(grid))
     with claim(file, request.key, request.identity, blocking=False) as needed:
         if needed:
             began = perf_counter()
@@ -527,11 +576,15 @@ def run(root, product, contig, resolved, maps, ties, *, cores=1):
                 if product == "robustness":
                     payload.update(_read_sharing(store, manifest, contig))
             elif product == "outlier":
+                # every contig's robustness and refine records, each read once and the contigs concurrently (their
+                # decodes and identity checks dominated this serial round: up to six reads of each record)
+                pairs = [(which, c) for c in analysed for which in ("robustness", "refine")]
+                saved = dict(zip(pairs, threaded_each(lambda pair: get(*pair), pairs), strict=True))
                 # each contig's rows: the literal grid and the two midpoints around the pooled grid maximum (the
                 # per-bin fields stay in the contig records: the run record keeps the material units they make)
                 contigs, fitted = [], []
                 for c in analysed:
-                    coarse, refine = get("robustness", c), get("refine", c)
+                    coarse, refine = saved["robustness", c], saved["refine", c]
                     fitted.append((coarse, refine))
                     contigs.append(dict(
                         {k: v for k, v in coarse.items() if k not in BIN_FIELDS and k != "read_setup"},
@@ -583,7 +636,7 @@ def run(root, product, contig, resolved, maps, ties, *, cores=1):
                     per_sample = {}
                     for c in analysed:
                         for which in ("robustness", "refine"):
-                            for e, values in get(which, c).get("sample_rows", ()):
+                            for e, values in saved[which, c].get("sample_rows", ()):
                                 total = per_sample.setdefault(float(e), np.zeros(len(values)))
                                 total += np.asarray(values, dtype=np.float64)
                     if per_sample and all(e in per_sample for e in grid):
@@ -593,7 +646,7 @@ def run(root, product, contig, resolved, maps, ties, *, cores=1):
                 # model's exact limit is one read class, and the run takes the route without read state throughout
                 from .read_state import read_state_route
 
-                read_state = read_state_route(config, [get("robustness", c).get("read_sharing") for c in analysed])
+                read_state = read_state_route(config, [saved["robustness", c].get("read_sharing") for c in analysed])
                 from .read_state import run_detection
 
                 # the family-wise detection the contigs' read_sharing used (alpha, tests M, z*): recorded for the run
@@ -604,7 +657,7 @@ def run(root, product, contig, resolved, maps, ties, *, cores=1):
 
                     # each library's largest excess / SE and each candidate split's contrast against z* (signed
                     # margins); a warning line for any decision within a factor of two of z*
-                    found = [(c, get("robustness", c).get("read_libraries") or {}) for c in analysed]
+                    found = [(c, saved["robustness", c].get("read_libraries") or {}) for c in analysed]
                     libraries, splits, warnings = detection_margins(
                         [(c, v.get("libraries"), v.get("splits")) for c, v in found], detection, read_state,
                         config.read_state.library_survival_tolerance)

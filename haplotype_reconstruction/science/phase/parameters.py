@@ -12,6 +12,13 @@ from dataclasses import dataclass, field
 from ...core.errors import SettingsError
 
 
+# Independent site blocks bound scoring scratch per worker. The prevalence solver uses
+# a fixed double-precision bracket and snaps its numerical endpoints to exact 0 and 1.
+SITE_ERROR_BATCH = 384  # sites
+SITE_ERROR_BISECTIONS = 54  # iterations to resolve the unit interval in float64
+SITE_ERROR_PREVALENCE_BOUNDARY = 1e-15  # probability, within rounding of a bracket endpoint
+
+
 @dataclass(frozen=True)
 class PhaseParameters:
     """Pedigree founder-mosaic phase of one chromosome (docs/methods/family_phase.md).
@@ -43,13 +50,16 @@ class PhaseParameters:
         a uniform genotype, chosen on the validation simulations (0.01 unphased 12-13% of phased joins; 3e-4 kept more
         genotype errors).
       genotype_posterior: a genotype is called where its posterior reaches this value (the painting's tau).
-      phase_posterior: a heterozygous call is released phased where its ordered allele posterior reaches this
-        value.
+      phase_posterior: a heterozygous call is eligible for phased release where its ordered allele posterior
+        reaches this value. The same threshold defines high propagated noncopy support for the local agreement
+        mask, requiring as strong support for uncertain origin as for calling a copy source.
       set_posterior: a gauge sample's phase set continues while the orientation of its alleles, given the set's
-        anchor, stays at or above this value at its heterozygous bins (the median over a bin's confidently
-        heterozygous sites of max(P01, P10) / (P01 + P10)); uncertainty about which labels it carries does not
-        break a set. Stricter than phase_posterior because a wrong continuation misphases the rest of the set,
-        whereas a wrong site call misphases one site. A working value chosen on the validation simulations: at 0.99,
+        anchor, stays at or above this value at its heterozygous bins (the median over a bin's witness sites, those
+        confidently heterozygous under the set statistic's site model that the labels alone do not make confidently
+        homozygous, of max(P01, P10) / (P01 + P10), release.py); uncertainty about which labels it carries does not
+        break a set. Stricter than
+        phase_posterior because a wrong continuation misphases the rest of the set, whereas a wrong site call
+        misphases one site. A working value chosen on the validation simulations: at 0.99,
         near-ties decided only by the label-switch prior added released long switches in partial-genome designs,
         which 0.999 avoided. Not an estimate of an error rate, nor a calibrated confidence for a whole set; longer
         sets still carry an upstream identity error over more sites. The orientation certainty of a fully
@@ -59,7 +69,9 @@ class PhaseParameters:
       set_site_deviation: the set statistic's site departure against a uniform genotype (ordered weights 1/3, 1/6,
         1/6, 1/3), 4.20's working value. It has two jobs: a label pair whose panel alleles cannot produce the reads
         keeps a 50/50 orientation instead of dropping out of the statistic (with no departure, label uncertainty
-        vanishes exactly where the reads contradict it, and such near-ties released long switches), and the ceiling
+        vanishes exactly where the reads contradict it, and such near-ties released long switches; a site that the
+        labels alone make confidently homozygous is heterozygous only through the departure and is not a witness,
+        release.py), and the ceiling
         it gives a fully determined heterozygous site,
         (1 - 5d/6) / (1 - 2d/3) = 0.99983, must lie above set_posterior, so such a site never ends a set by itself,
         while near-ties decided by the label prior still do. With the run's outlier rate instead, every confidently
@@ -67,8 +79,8 @@ class PhaseParameters:
         3.1 M; validation replays lab421/r11/f1).
         Phase sets also break at junction candidates for samples carrying both labels unless a parental homologue
         pins them, and, for samples without a linked parent, at painting tie boundaries (release.py); a sample with
-        children keeps a tie break only where its children-anchored orientation certainty at the nearest
-        confidently heterozygous bin on either side is below this value. Its odds, log(set_posterior /
+        children keeps a tie break only where its children-anchored orientation certainty (the same statistic) at
+        the nearest bin with a witness site on either side is below this value. Its odds, log(set_posterior /
         (1 - set_posterior)) = 6.9 nats, also decide a parent's pairing at a double label change (model.py): a joint
         move to the other pairing is kept only when it raises the objective by more than that, and a pairing whose
         alternative is closer breaks the parent's and its children's sets there (a working margin against one
@@ -149,7 +161,10 @@ class PhaseParameters:
     phase_posterior: float = field(
         default=0.99,
         metadata={
-            "provenance": "FP17-FP18/FP21; probability cutoff 0.99 for ordered heterozygote and meiosis-chain release.",
+            "provenance": (
+                "FP17-FP21; probability cutoff 0.99 for ordered heterozygotes and meiosis-chain release, also "
+                "requiring equivalently strong propagated noncopy support in both solves for a local phase mask."
+            ),
             "units": "probability",
         },
     )
@@ -171,6 +186,29 @@ class PhaseParameters:
                 "(4.21 D3: the run's outlier rate capped every common heterozygote below set_posterior)."
             ),
             "units": "probability",
+        },
+    )
+    site_error_rates: tuple[float, ...] = field(
+        default=(2.0**-10, 2.0**-9, 2.0**-8, 2.0**-7, 2.0**-6, 2.0**-5, 2.0**-4, 2.0**-3),
+        metadata={
+            "units": "probability",
+            "provenance": "D1 round 2; dyadic slab spans sparse to substantial recurrent wrong-allele reads in "
+                          "either homozygote, with equal weight per direction and rate.",
+        },
+    )
+    site_error_bic_penalty: float = field(
+        default=0.5,
+        metadata={
+            "units": "nats per log site count",
+            "provenance": "D1 round 2; marginal gain must exceed the BIC charge for one fitted contig prevalence.",
+        },
+    )
+    site_error_direction_posterior: float = field(
+        default=0.5,
+        metadata={
+            "units": "probability",
+            "provenance": "D1 round 2; use a strict posterior majority for one homozygote after marginalising the "
+                          "rate and including the no-excess state.",
         },
     )
     protected_intervals: tuple[tuple[str, int, int], ...] = field(
@@ -228,6 +266,8 @@ IMPOSSIBLE_LOG_WEIGHT = -1e300
 # FP14/FP22: fixed chunks preserve carrier accumulation and complete-bin medians.
 EVIDENCE_CHUNK = 4096
 SITE_WINDOW = 4096
+# FP20: independent bin batches for the two noncopy scans. Bound each worker's scratch to 512 bins per track.
+ORIGIN_BIN_BATCH = 512
 # Whole-bin site windows of the per-sample release loops: a workspace size (windows are whole bins, so every site
 # posterior, call and bin orientation is the same at any size). It is large because each window costs one Python step
 # per sample: with 4096-site windows most of 112 release threads waited for the interpreter (chr3, 0.5x).

@@ -77,8 +77,8 @@ def outlier_unit(
     switch_clip=None,
 ):
     """The log-likelihood of the copying model at its returned fit (reference resolution, weight one), at one outlier
-    rate, summed over components. The rates of the grid are independent: the stage runs each as its own one-CPU
-    task; outlier_scores computes them in sequence, with the same values.
+    rate, summed over components. The rates of the grid are independent: the stage runs each as its own task, whose
+    kernels take the task's CPU share; outlier_scores computes them in sequence, with the same values.
 
     With ``per_sample`` (the stage's fits) also each sample's summed terms, the returned fits' regime counts and, per
     informative component (a fit with at least one eligible sample: the components whose likelihood enters the sum,

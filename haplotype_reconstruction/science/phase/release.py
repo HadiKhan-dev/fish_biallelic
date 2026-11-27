@@ -17,14 +17,20 @@ the alternatives.
   A sample without a linked parent but with children is anchored by its children's chains. A sample with neither is a
   gauge sample: its chromosome is partitioned at hard cuts (forced breaks, below) and at every heterozygous bin where,
   given the current partition's anchor, the orientation of its alleles is uncertain: the median over the bin's
-  confidently heterozygous sites (P(heterozygous) >= ``genotype_posterior``) of max(P01, P10) / (P01 + P10) falls
-  below ``set_posterior`` (stricter than ``phase_posterior``: a wrong continuation misphases the rest of the set).
+  witness sites of max(P01, P10) / (P01 + P10) falls below ``set_posterior`` (stricter than ``phase_posterior``: a
+  wrong continuation misphases the rest of the set).
   This set statistic uses its own site model, ``set_site_deviation`` against a uniform genotype, not the run's outlier
-  rate, which would cap every common heterozygote below ``set_posterior`` (parameters.py).
+  rate, which would cap every common heterozygote below ``set_posterior`` (parameters.py). A witness is a site
+  confidently heterozygous (P(heterozygous) >= ``genotype_posterior``) under that model that the labels alone (the
+  same site model with no departure) do not make confidently homozygous; its certainty is the set model's
+  (``set_orientation``). A site heterozygous only through the departure has P01 = P10 under every frame and is no
+  evidence about the frame.
   Uncertainty about which labels a sample carries does not break its phase where the
   candidate labels carry the same alleles at its sites (the orientation is then still determined). Each partition is
   anchored at its first confidently heterozygous bin (P(heterozygous) >= ``phase_posterior``) by the gauge "homologue
-  0 carries the smaller label" (no decoded label is assumed); a partition without such a bin releases no phase.
+  0 carries the label ranked first", labels ranked by how closely their panel alleles at the bin match homologue 0 of
+  the bin's most probable pair (``anchor_mask``; no decoded label is assumed; where that pair's alleles never differ
+  in the bin, by label index); a partition without such a bin releases no phase.
 - Forced breaks (``break_bins``, chosen by the stage): a sample without a linked parent breaks its phase sets at its
   painting tie boundaries (the painting's track order there is a convention), and every sample breaks at the junction
   candidates where it carries both junction labels, unless the parental homologue it copies there is pinned by the
@@ -32,8 +38,10 @@ the alternatives.
   and no phase is released across it. A sample anchored by its children takes its orientation from their chains on
   both sides of a painting tie, so it keeps a tie break (one that is not also a withheld join) only where that
   orientation is uncertain beside it: where the orientation certainty above, under its children-anchored posterior,
-  is below ``set_posterior`` at the nearest bin with a confidently heterozygous site on either side
-  (``_bridged_ties``). Each solve decides for itself, and the agreement keeps a break that either solve keeps.
+  is below ``set_posterior`` at the nearest bin with a witness site on either side (``_bridged_ties``). Each solve
+  decides for itself, and the agreement keeps a break that either solve keeps.
+- A child with two fitted incoming parents breaks at the right anchor of a tied transmission passage when the
+  relative-order odds fall below the usual set-continuation odds (FP20). The test only adds break bins.
 - A heterozygous call is released phased where its ordered posterior reaches ``phase_posterior``; otherwise it is
   released unphased (frame_undetermined bits 0 and 1).
 """
@@ -50,6 +58,7 @@ from . import release_kernels as kernels
 from .allele_evidence import own_terms
 from .model import LabelModel
 from .parameters import RELEASE_ADVANCE_TERMS, RELEASE_WINDOW, PhaseParameters
+from .transmission_passages import transmission_breaks
 from .window import site_windows
 
 
@@ -127,6 +136,58 @@ def bin_orientation(ordered, site_bin, tau_g, B):
     return kernels.orientation(ordered, site_bin, float(tau_g), int(B))
 
 
+def set_orientation(ordered, label_only, site_bin, tau_g, B):
+    """The set statistic per bin: bin_orientation over the bin's witness sites, float64 [B] (NaN without one).
+
+    ordered float64 [4, m]: the sites' ordered allele posteriors under the set statistic's site model
+    (``set_site_deviation`` against a uniform genotype); label_only [4, m]: the same posteriors with no departure
+    (epsilon 0), under which a site is heterozygous only where a candidate label pair, or a flip of a panel allele,
+    makes it so. A confidently heterozygous site (P(heterozygous) >= tau_g under the set model) is a witness unless
+    the labels alone make it confidently homozygous (P(00) + P(11) >= tau_g at epsilon 0): then it is heterozygous
+    only through the departure, has P01 = P10 under every frame, carries no evidence about the frame, and in a bin
+    with one or two confident sites would decide the median. Every other confident site stays, with its set-model
+    certainty, so a label pair whose alleles cannot produce the reads still enters at 50/50 wherever some candidate
+    pair explains part of the heterozygote. Where no confident site is label-homozygous this is
+    bin_orientation(ordered). ``ordered`` is overwritten (both callers own it).
+    """
+    homozygous = label_only[0] + label_only[3] >= tau_g
+    ordered[1, homozygous] = 0.0
+    ordered[2, homozygous] = 0.0
+    return bin_orientation(ordered, site_bin, tau_g, B)
+
+
+def anchor_mask(pair_posterior, labels0, labels1, alleles):
+    """The anchor mask bool [n0, n1] of a gauge partition: homologue 0 carries the label ranked first.
+
+    pair_posterior float64 [S, S]: the anchor bin's unanchored ordered label-pair posterior; labels0 [n0], labels1
+    [n1]: the block states' labels there; alleles int8 [S, k]: the panel alleles at the bin's k sites (-1 unknown).
+    Labels are ranked by how closely their alleles match homologue 0 of the bin's most probable pair (x, y) taken in
+    label order (x < y): over the bin's sites where a_x and a_y are known and differ, the number of sites at which a
+    label carries a_x minus the number at which it carries a_y (an unknown allele counts for neither). Equal scores
+    keep x first among the labels that score as x and y last among those that score as y (a label carrying a_x at
+    every such site is not put before x, which would split x across homologues), otherwise label index. The ranking
+    is a strict total order, so the mask keeps one ordering of every unordered pair of distinct labels: a gauge, which
+    leaves unordered posteriors and genotype calls unchanged, and (x, y) keeps its label order. Ranking by the panel
+    alleles fixes the allele frame where the bin's posterior splits between pairs that share a label in swapped
+    sorted positions, which label order would put on opposite homologues. Where a_x and a_y never differ in the bin
+    the alleles give no frame and the mask is label order, "homologue 0 carries the smaller label"; where no
+    posterior mass sits on pairs that the ranking orders against label order, it selects the same mass as that mask.
+    """
+    S = pair_posterior.shape[0]
+    x, y = divmod(int(np.argmax(np.triu(pair_posterior, 1))), S)
+    first, second = alleles[x], alleles[y]
+    informative = (first >= 0) & (second >= 0) & (first != second)
+    if not informative.any():
+        return labels0[:, None] < labels1[None, :]
+    panel = alleles[:, informative]
+    resemblance = (panel == first[informative]).sum(axis=1) - (panel == second[informative]).sum(axis=1)
+    tie = np.arange(S)
+    tie[x], tie[y] = -1, S  # x scores the most and y the least possible: first and last within their scores
+    rank = np.empty(S, dtype=np.int64)
+    rank[np.lexsort((tie, -resemblance))] = np.arange(S)
+    return rank[labels0][:, None] < rank[labels1][None, :]
+
+
 def _site_posteriors(post, site_bin, alleles, gl, cohort, epsilon, flips, lo=0, hi=None, shared=None):
     """kernels.site_posteriors over the sites [lo, hi) with the sample's flip arrays ``flips`` (flips [S, m],
     own_state [2, m], own_flip [2, m]); ``shared``: the solve's window copies of alleles and flips[0]."""
@@ -161,8 +222,9 @@ def sample_flips(model, n, ctx):
 
 
 def _piece_orientation(lp, site_bin, alleles, gl, cohort, epsilon, flips, tau_g, lo_bin, hi_bin, windowed=True):
-    """bin_orientation of the bins [lo_bin, hi_bin), float64 [hi_bin - lo_bin], under their label-pair posteriors
-    ``lp`` [hi_bin - lo_bin, S, S], using whole-bin site windows as the workspace bound."""
+    """set_orientation of the bins [lo_bin, hi_bin), float64 [hi_bin - lo_bin], under their label-pair posteriors
+    ``lp`` [hi_bin - lo_bin, S, S] (site model: departure ``epsilon`` against ``cohort``), using whole-bin site
+    windows as the workspace bound."""
     bins = hi_bin - lo_bin
     lo = int(np.searchsorted(site_bin, lo_bin, side="left"))
     hi = int(np.searchsorted(site_bin, hi_bin, side="left"))
@@ -171,25 +233,22 @@ def _piece_orientation(lp, site_bin, alleles, gl, cohort, epsilon, flips, tau_g,
         return orientation
     for left, right in site_windows(site_bin, lo, hi, window=RELEASE_WINDOW) if windowed else ((lo, hi),):
         local = site_bin[left:right] - lo_bin
-        ordered = kernels.site_posteriors(
-            lp,
-            local,
-            np.ascontiguousarray(alleles[:, left:right]),
-            gl[left:right],
-            np.ascontiguousarray(cohort[left:right]),
-            epsilon,
-            *(np.ascontiguousarray(a[:, left:right]) for a in flips),
-        )
-        values = bin_orientation(ordered, local, tau_g, bins)
+        window_alleles = np.ascontiguousarray(alleles[:, left:right])
+        window_cohort = np.ascontiguousarray(cohort[left:right])
+        window_flips = tuple(np.ascontiguousarray(a[:, left:right]) for a in flips)
+        window_gl = gl[left:right]
+        ordered = kernels.site_posteriors(lp, local, window_alleles, window_gl, window_cohort, epsilon, *window_flips)
+        label_only = kernels.site_posteriors(lp, local, window_alleles, window_gl, window_cohort, 0.0, *window_flips)
+        values = set_orientation(ordered, label_only, local, tau_g, bins)
         orientation[local[0] : local[-1] + 1] = values[local[0] : local[-1] + 1]
     return orientation
 
 
 def _bridged_ties(ties, orientation, tau_s):
     """The painting-tie cuts (bins) that a sample anchored by its children bridges: those where the orientation
-    certainty (``orientation``, bin_orientation under its children-anchored posterior) at the nearest bin with a
-    confidently heterozygous site on each side (before the cut's bin, and at or after it) reaches tau_s. A cut without
-    such a bin on one side is kept."""
+    certainty (``orientation``, set_orientation under its children-anchored posterior) at the nearest bin with a
+    witness site on each side (before the cut's bin, and at or after it) reaches tau_s. A cut without such a bin on one
+    side is kept."""
     informative = np.flatnonzero(~np.isnan(orientation))
     out = set()
     for c in ties:
@@ -274,7 +333,8 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
                 if following == len(candidates) or candidates[following] >= hard:
                     break
                 anchor = int(candidates[following])
-                mask = labs0[anchor][:, None] < labs1[anchor][None, :]
+                first_site, end_site = np.searchsorted(site_bin, (anchor, anchor + 1))
+                mask = anchor_mask(gposts[anchor], labs0[anchor], labs1[anchor], alleles[:, first_site:end_site])
                 if anchor > start:
                     before = kernels.backward_to(beta[anchor], em, T0, T1, TG, start, anchor, mask)
                     posts[start:anchor] = anchored(alpha[start:anchor], before, start, anchor)
@@ -338,11 +398,12 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
         if orientation is not None and right > left:
             bins = site_bin[left:right]
             first, last = int(bins[0]), int(bins[-1]) + 1
-            # Tie bridging uses the gauge set statistic's site model.
+            # Tie bridging uses the gauge set statistic: its site model and its witnesses.
             oriented = _site_posteriors(
                 posts, site_bin, alleles, gl, uniform, config.set_site_deviation, flips, left, right, shared=shared
             )
-            orientation[first:last] = bin_orientation(oriented, bins - first, tau_g, last - first)
+            label_only = _site_posteriors(posts, site_bin, alleles, gl, uniform, 0.0, flips, left, right, shared=shared)
+            orientation[first:last] = set_orientation(oriented, label_only, bins - first, tau_g, last - first)
         kernels.site_calls(
             genotype, ordered, tau_g, tau_p, calls[left:right], undetermined[left:right],
             None if scores is None else scores[:, left:right],
@@ -362,6 +423,12 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
     if orientation is not None:
         bridged = _bridged_ties(ties, orientation, tau_s)
         set_breaks = [c for c in cuts if c not in bridged]
+    passage_cuts = transmission_breaks(model, n, ctx, flips)
+    if passage_cuts:
+        cut_bins = np.zeros(B, dtype=bool)
+        cut_bins[set_breaks] = True
+        cut_bins[list(passage_cuts)] = True
+        set_breaks = np.flatnonzero(cut_bins).tolist()
     chain = None
     if ctx.chain:
         chain = np.full((2, 2, B), np.nan, dtype=np.float64)
@@ -373,4 +440,13 @@ def release_sample(model: LabelModel, n: int, ctx: ReleaseInputs, *, map_work=No
     return SampleRelease(calls, undetermined, tuple(set_breaks), scores, chain)
 
 
-__all__ = ["ReleaseInputs", "release_tables", "label_pair_posterior", "sample_flips", "release_sample", "bin_orientation"]
+__all__ = [
+    "ReleaseInputs",
+    "release_tables",
+    "label_pair_posterior",
+    "sample_flips",
+    "release_sample",
+    "bin_orientation",
+    "set_orientation",
+    "anchor_mask",
+]

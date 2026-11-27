@@ -2957,7 +2957,6 @@ Source: [haplotype_reconstruction/contracts/pedigree.py](../../haplotype_reconst
 | `floors` | `np.ndarray` | state | ('C', 'N') | nats | float64 | True | `required` |
 | `markers` | `np.ndarray` | obs | ('C',) | 1 | float64 | True | `required` |
 | `eligible_counts` | `np.ndarray` | state | ('N',) | 1 | int64 | True | `required` |
-| `units` | `np.ndarray` | state | ('C',) | 1 | float64 | True | `required` |
 
 ## pedigree.ScreenBatchCounts
 
@@ -3124,6 +3123,7 @@ Source: [haplotype_reconstruction/contracts/phase.py](../../haplotype_reconstruc
 | Field | Type | Role | Axes | Units | Dtype | Stored | Default/schema |
 |---|---|---|---|---|---|---|---|
 | `sample_ids` | `tuple[str, ...]` | obs | ('N',) | 1 | str | True | `required` |
+| `panel_inference` | `np.ndarray` | state | ('K', 'Lr') | 1 | int8 | True | `required` |
 | `states` | `PhaseStates` | state | () | 1 | PhaseStates | True | `required` |
 | `bins` | `PhaseBins` | state | () | 1 | PhaseBins | True | `required` |
 | `transitions` | `PhaseTransitions` | state | () | 1 | PhaseTransitions | True | `required` |

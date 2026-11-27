@@ -1867,8 +1867,6 @@ class CompactM1:
     floors: np.ndarray = record_field("state", axes=("C", "N"), units="nats", dtype="float64")
     markers: np.ndarray = record_field("obs", axes=("C",), dtype="float64")
     eligible_counts: np.ndarray = record_field("state", axes=("N",), dtype="int64")
-    # per chromosome the retention band's units (m1.retention_units: every selected marker, an empty bin as one)
-    units: np.ndarray = record_field("state", axes=("C",), dtype="float64", kw_only=True)
 
     @property
     def n_samples(self) -> int:

@@ -254,3 +254,13 @@ OVERLOADS["read_score._dyads"] = tuple(
 OVERLOADS["read_score._m2_kernel"] = tuple(
     (signature[0], _I64_1, _I64_1) + signature[1:] for signature in OVERLOADS["read_score._m2_kernel"]
 )
+
+# The child-major M1 route (read_score._m1_children): unit child, start and stop, the units' candidates, the scalar
+# model and child terms as _dyads (with or without the scalar product cache), the read terms and the output.
+_UNITS = (types.Array(types.int64, 1, "C", readonly=False, aligned=True),) * 4
+OVERLOADS["read_score._m1_children"] = tuple(
+    (*_UNITS, *signature[1:23], products, types.int64, *_READ_TERMS[:1], types.Array(types.float64, 2, "C", readonly=False, aligned=True),
+     _reset, _width, *_READ_TERMS[2:], types.Array(types.float64, 1, "C", readonly=False, aligned=True))
+    for signature in OVERLOADS["read_score._dyads"][:1]
+    for products in (types.Array(types.float64, 4, "C", readonly=False, aligned=True), types.none)
+)

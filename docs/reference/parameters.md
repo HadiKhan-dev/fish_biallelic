@@ -1017,7 +1017,8 @@ Source: [haplotype_reconstruction/science/pedigree/scoring_parameters.py](../../
 |---|---|---|---|
 | `max_pairs_per_child` | `256` | See model | PS07; nominal cap of 256 M2 pairs per child, every retained eligible pair below it (no relevance screen, DESIGN_417 S8, owner 14 Nov 2026), the largest full-data bounds above it; boundary ties and unknown bounds remain, and binding is flagged. |
 | `pair_bound_high_mass` | `0.01` | See model | PS07; probability-mass cutoff 0.01 for separate named-state groups; controls bound tightness and cost. |
-| `information_tempering_power` | `0.5` | See model | PS07; dimensionless exponent 0.5 on the selected-marker count sets the retention band's and the chromosome softmax temperature (4.21 B2 at r_T = 0; 4.22 R4: a compute budget of the latent-order decision, wide band and no cap giving the same decisions on every measured root). |
+| `information_tempering_power` | `0.5` | See model | PS07; dimensionless exponent 0.5 on the retention-block count sets the retention band's and the chromosome softmax temperature (4.20's band, restored in 4.24: see markers_per_retention_block). |
+| `markers_per_retention_block` | `100` | selected markers | PS07; 100 selected markers per retention block (4.20's band; restored in 4.24 by the owner, 26 Nov 2026, after R6: 4.21's per-marker band made median M2 panels more than twice 4.20's on 13 of 15 designs, while 4.20's band adds true Tier B edges and no false edge). |
 | `maximum_contig_weight_ratio` | `4.0` | See model | PS07; dimensionless ratio 4 clips sqrt(marker count) relative to its median before normalizing weights. |
 | `rank_weight` | `0.35` | See model | PS07; probability weight 0.35 for tied-rank evidence in diagnostic utility; the remainder uses contaminated softmax. |
 | `chromosome_contamination` | `0.02` | See model | PS07; probability weight 0.02 of the uniform eligible-parent distribution in chromosome diagnostic utility. |
@@ -1049,6 +1050,15 @@ Source: [haplotype_reconstruction/science/pedigree/workspace_parameters.py](../.
 | `EMISSION_SAMPLE_BLOCK` | `PEDIGREE_WORKSPACE.emission_sample_block` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 | `SELECTIVE_BOUND_GROUP_BINS` | `PEDIGREE_WORKSPACE.selective_bound_group_bins` | See model | Workspace limits for pedigree scoring, screening and family inference. |
 | `EXCLUSION_DYAD_BATCH` | `PEDIGREE_WORKSPACE.exclusion_dyad_batch` | See model | Workspace limits for pedigree scoring, screening and family inference. |
+## science.phase.parameters
+
+Source: [haplotype_reconstruction/science/phase/parameters.py](../../haplotype_reconstruction/science/phase/parameters.py).
+
+| Name | Default expression | Units | Provenance |
+|---|---|---|---|
+| `SITE_ERROR_BATCH` | `384` | See model | Independent site blocks bound scoring scratch per worker. The prevalence solver uses a fixed double-precision bracket and snaps its numerical endpoints to exact 0 and 1. sites |
+| `SITE_ERROR_BISECTIONS` | `54` | See model | iterations to resolve the unit interval in float64 |
+| `SITE_ERROR_PREVALENCE_BOUNDARY` | `1e-15` | See model | probability, within rounding of a bracket endpoint |
 ## science.phase.parameters — PhaseParameters
 
 Source: [haplotype_reconstruction/science/phase/parameters.py](../../haplotype_reconstruction/science/phase/parameters.py).
@@ -1064,9 +1074,12 @@ Source: [haplotype_reconstruction/science/phase/parameters.py](../../haplotype_r
 | `junction_pin_nats` | `10.0` | nats | FP10; require 10 nats of parental own-read evidence per flank to pin a homologue. |
 | `junction_pin_reference_bins` | `10` | reference windows | FP10; inspect up to 10 painting reference windows per flank, stopping at parental label changes. |
 | `genotype_posterior` | `0.9` | probability | FP17-FP19; probability cutoff 0.9 for genotype calls and informative heterozygosity. |
-| `phase_posterior` | `0.99` | probability | FP17-FP18/FP21; probability cutoff 0.99 for ordered heterozygote and meiosis-chain release. |
+| `phase_posterior` | `0.99` | probability | FP17-FP21; probability cutoff 0.99 for ordered heterozygotes and meiosis-chain release, also requiring equivalently strong propagated noncopy support in both solves for a local phase mask. |
 | `set_posterior` | `0.999` | probability | FP08/FP18-FP19; probability cutoff 0.999 for phase-set continuation; its log odds also gate parental pairing moves. |
 | `set_site_deviation` | `0.001` | probability | 4.20's working site departure against a uniform genotype, kept for the phase-set statistic only (4.21 D3: the run's outlier rate capped every common heterozygote below set_posterior). |
+| `site_error_rates` | `(2.0 ** (-10), 2.0 ** (-9), 2.0 ** (-8), 2.0 ** (-7), 2.0 ** (-6), 2.0 ** (-5), 2.0 ** (-4), 2.0 ** (-3))` | probability | D1 round 2; dyadic slab spans sparse to substantial recurrent wrong-allele reads in either homozygote, with equal weight per direction and rate. |
+| `site_error_bic_penalty` | `0.5` | nats per log site count | D1 round 2; marginal gain must exceed the BIC charge for one fitted contig prevalence. |
+| `site_error_direction_posterior` | `0.5` | probability | D1 round 2; use a strict posterior majority for one homozygote after marginalising the rate and including the no-excess state. |
 | `protected_intervals` | `()` | bp | FP02; supplied closed reference-order breakpoint intervals in bp; empty means no protected intervals. |
 ## science.phase.parameters
 
@@ -1087,6 +1100,7 @@ Source: [haplotype_reconstruction/science/phase/parameters.py](../../haplotype_r
 | `IMPOSSIBLE_LOG_WEIGHT` | `-1e+300` | See model | Family-phase model, solver and release constants. |
 | `EVIDENCE_CHUNK` | `4096` | See model | FP14/FP22: fixed chunks preserve carrier accumulation and complete-bin medians. |
 | `SITE_WINDOW` | `4096` | See model | Family-phase model, solver and release constants. |
+| `ORIGIN_BIN_BATCH` | `512` | See model | FP20: independent bin batches for the two noncopy scans. Bound each worker's scratch to 512 bins per track. |
 | `RELEASE_WINDOW` | `1 << 16` | See model | Whole-bin site windows of the per-sample release loops: a workspace size (windows are whole bins, so every site posterior, call and bin orientation is the same at any size). It is large because each window costs one Python step per sample: with 4096-site windows most of 112 release threads waited for the interpreter (chr3, 0.5x). |
 | `RELEASE_ADVANCE_TERMS` | `1 << 22` | See model | Forward steps of an anchored gauge release are taken in pieces of about this many transition terms (bins x block states x predecessor states), and the continuation test is applied after each piece: a workspace size (the released values do not depend on it). One piece is one Python step of the sample's thread, so it is kept large enough that release threads do not queue for the interpreter, and small enough that a phase set that ends early wastes little. |
 | `EMPTY_COMPONENT_BIN_SITES` | `100` | See model | Family-phase model, solver and release constants. |

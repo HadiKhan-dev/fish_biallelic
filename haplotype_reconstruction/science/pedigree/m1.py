@@ -19,22 +19,14 @@ from .numerical_parameters import LOG_FLOOR
 MODEL = "genome-relative-m1-floor-retained-m2-v1"
 
 
-def retention_units(prepared) -> np.ndarray:
-    """float64 [C]: the retention band's units of each prepared chromosome, every selected marker with an empty bin
-    counted as one (4.21's effective units at r_T = 0). The band is a compute budget of the latent-order decision
-    (4.22 R4): with the pair cap, it bounds the panel without deciding calls (wide band and no cap gave the same
-    decisions on every measured root)."""
-    return np.asarray(
-        [float(sum(int(np.maximum(np.asarray(c.bin_sizes, dtype=np.int64), 1).sum()) for c in p.components))
-         for p in prepared],
-        dtype=np.float64,
+def temperature(markers, config):
+    """The retention temperature T = blocks ** information_tempering_power (4.20's band), blocks =
+    ceil(markers / markers_per_retention_block) and at least one, markers a chromosome's selected markers
+    (PreparedChromosome.informative_markers), or their genome sum for the genome band."""
+    blocks = np.maximum(
+        np.ceil(np.asarray(markers, dtype=np.float64) / config.panel.markers_per_retention_block), 1.0
     )
-
-
-def temperature(units, config):
-    """The retention temperature T = units ** information_tempering_power, minimum 1 (units: retention_units, or
-    their genome sum for the genome band)."""
-    return np.maximum(np.asarray(units, dtype=np.float64), 1.0) ** config.panel.information_tempering_power
+    return blocks**config.panel.information_tempering_power
 
 
 def identity(config) -> dict:
@@ -44,6 +36,6 @@ def identity(config) -> dict:
         chromosome_score_storage="raw",
         m2_panel="all-retained-eligible-pairs",
         centered_log_floor=LOG_FLOOR,
-        retention_units="selected-markers",
+        markers_per_retention_block=config.panel.markers_per_retention_block,
         information_tempering_power=config.panel.information_tempering_power,
     )

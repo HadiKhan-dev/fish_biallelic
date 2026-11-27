@@ -276,9 +276,7 @@ def run(
         raise InputError("screen contig axis contains duplicates")
     n = len(eligibility.children)
     markers = np.asarray([p.informative_markers for p in informative], dtype=np.float64)
-    # the retention band's units of each chromosome (m1.retention_units)
-    units = m1.retention_units(informative)
-    builder = CompactBuilder(n, markers, eligibility.parents.sum(1), units)
+    builder = CompactBuilder(n, markers, eligibility.parents.sum(1))
     batch_counts = []
     tasks = tuple(
         Task(
@@ -339,7 +337,7 @@ def run(
                     values[ix] = answers[t.key]
                 return values
 
-            batch_result = selective_m1.search_batch(upper, children, allowed, units, parameters, exact)
+            batch_result = selective_m1.search_batch(upper, children, allowed, markers, parameters, exact)
             builder.add(batch_result)
             batch_counts.append(ScreenBatchCounts(**batch_result["counts"]))
         session.run(
@@ -508,8 +506,7 @@ def panel_run(
         if previous is not None:
             return previous
     c = screen.compact
-    utility = panel.robust_screen_values(c.values, c.n_contigs, c.n_samples, c.markers, eligibility, parameters,
-                                         c.units)
+    utility = panel.robust_screen_values(c.values, c.n_contigs, c.n_samples, c.markers, eligibility, parameters)
     product, _ = panel.bounded_panel(c, bounds, utility, eligibility, parameters)
     if file is not None:
         assert identity is not None

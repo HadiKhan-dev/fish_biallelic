@@ -49,7 +49,7 @@ def _track_changes(before, after, local_keys, bin_index, n_classes, class_of):
     return 1, 1
 
 
-def tie_boundaries(painting, positions, samples):
+def tie_boundaries(painting, positions, samples, *, map_work=map):
     """{sample: int64 marker boundaries (i = between sites i and i + 1) where a painting tie set the track order}.
 
     Diploid painting emissions are symmetric in track order and the label transitions after a boundary are
@@ -69,7 +69,8 @@ def tie_boundaries(painting, positions, samples):
         classes = painted.states.classes
         n_classes = len(classes)
         class_of = {int(row): index for index, members in enumerate(classes) for row in members}
-        for sample, boundaries in found.items():
+        def sample_boundaries(sample):
+            boundaries = []
             chunks = (
                 coalesce_chunks(
                     painted.bins.edges,
@@ -111,16 +112,23 @@ def tie_boundaries(painting, positions, samples):
                 index = int(np.searchsorted(pos, right.start, side="left"))
                 if 0 < index < len(pos):
                     boundaries.append(index - 1)
+            return boundaries
+
+        for sample, boundaries in zip(found, map_work(sample_boundaries, found), strict=True):
+            found[sample].extend(boundaries)
     return {sample: np.unique(np.asarray(values, dtype=np.int64)) for sample, values in found.items()}
 
 
-def tie_break_bins(painting, positions: np.ndarray, parents: np.ndarray, bin_edges: np.ndarray) -> tuple[set[int], ...]:
+def tie_break_bins(
+    painting, positions: np.ndarray, parents: np.ndarray, bin_edges: np.ndarray, *, boundaries=None
+) -> tuple[set[int], ...]:
     """Internal phase bins at painting ties, only for samples without a linked parent."""
-    ties = tie_boundaries(painting, positions, np.arange(len(parents)))
+    if boundaries is None:
+        boundaries = tie_boundaries(painting, positions, range(len(parents)))
     n_bins = len(bin_edges) - 1
     result = []
     for sample in range(len(parents)):
-        bins = {int(np.searchsorted(bin_edges, positions[index + 1], side="right") - 1) for index in ties[sample]}
+        bins = {int(np.searchsorted(bin_edges, positions[index + 1], side="right") - 1) for index in boundaries[sample]}
         result.append({b for b in bins if 0 < b < n_bins} if np.all(parents[sample] < 0) else set())
     return tuple(result)
 

@@ -259,7 +259,8 @@ Cost and scope: O(N² B) per contig in NumPy row passes over pairs, O(P + N B) m
 ## Run-level painting calibration
 
 After the final assembly of every analysed contig is published, reference-resolution
-calibration fits each component for each `robustness_grid` value with r = 0 (independent one-CPU tasks).
+calibration fits each component for each `robustness_grid` value with r = 0 (one task per contig and value; a
+task's kernels take its fair share of the free CPUs, so one contig's fits can use a whole node).
 Each fit's score is its log-likelihood at the returned (rounded) values, one forward-backward pass after its last
 update: the support curve of the eight-update fit (4.21, ADVICE2 14.1 item 6). Once every contig's grid fits exist,
 each contig also fits the two rates at the geometric midpoints around the pooled grid maximum (a refinement step of

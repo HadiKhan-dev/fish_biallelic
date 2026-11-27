@@ -64,3 +64,11 @@ OVERLOADS["read_transfer._carry_background"] = tuple(
 # Every pair of an uncached structured bin in class planes: the background carrier's arguments without its factor.
 OVERLOADS["read_transfer._carry_lanes"] = tuple(
     sig[:2] + sig[3:] for sig in OVERLOADS["read_transfer._carry_background"])
+
+# One child bin's transfers of the named-first state pairs (the child-major M1 route): transfers [C, C, S, S], bank
+# [S, S, C, C], word, factor, moved, child, block, the panel's alleles, the child's likelihoods (read-only or not) and
+# the read layout.
+OVERLOADS["read_transfer.named_transfers"] = tuple(
+    (_F64_4, _F64_4, _I64_1, _F64_1, _F64_1, types.int64, types.int64, _F64_2, gl, _I64_1, _I64_2, _I64_2, _I64_1,
+     _reset, _width, _F32_3, _F32_3)
+    for gl in (types.Array(types.float64, 3, "C", readonly=True), _F64_3))

@@ -10,6 +10,33 @@ See [FP02](./phase.md#fp02) for the model, decision order, parameters and limits
 
 See [FP23](./phase.md#fp23) for durable solve, canonical sample-batch release and component units, identity binding and stage-owned cleanup. No checkpoint is taken inside a solve.
 
+## Gauge-sample anchors and set witnesses
+
+A sample with neither a linked parent nor children has no family frame, so each of its phase sets is anchored by a
+gauge. Homologue 0 carries the label whose panel alleles at the anchor bin best match homologue 0 of the bin's most
+probable label pair; ties keep that pair's labels at the ends of their score groups, then follow label index, and a
+bin where the pair's alleles never differ uses label order. The set continues while the median orientation certainty
+over each heterozygous bin's witness sites stays above `set_posterior`. A witness is a confidently heterozygous site
+that the candidate label pairs, with their panel-allele flips, do not make confidently homozygous. A site
+heterozygous only through the set statistic's site departure is not one. A sample without a linked parent but with
+children uses the same statistic to decide whether to bridge its painting-tie breaks. See [FP18](./phase.md#fp18) and
+[FP19](./phase.md#fp19).
+
+## Recurrent wrong-allele reads
+
+The site release fits a [painting-informed wrong-read rate](phase.md#site-specific-wrong-allele-reads)
+on each contig before computing carrier support and release posteriors.
+
+## Local phase abstention
+
+A child can copy a parental homologue through a tract where both family solves
+choose the wrong diplotype for the parent. Family phase propagates noncopy
+support from observed ancestors and uses singleton tracks from the pre-refit
+painting to check the local allele order. Within an existing phase set and an
+untied painting frame, it withholds phase in high-support bins whose allele
+order disagrees with the painting relative to both flanks. Genotypes and
+phase-set joins are preserved. See [FP20](./phase.md#fp20).
+
 ## Read-class evidence
 
 Family phase uses painting's effective foreign-read share and its full bin action

@@ -5,7 +5,7 @@ from numba import types
 
 from ...contracts.phase import AgreedRelease, SampleRelease
 from ...core.kernels import kernel
-from .parameters import MEIOSIS_RESET_TOLERANCE
+from .parameters import MEIOSIS_RESET_TOLERANCE, ORIGIN_BIN_BATCH
 
 
 def set_start_bins(set_starts, site_bin, B):
@@ -99,6 +99,74 @@ def agreement(first: SampleRelease, second: SampleRelease, site_bin: np.ndarray)
     return AgreedRelease(calls, undetermined, np.flatnonzero(starts), scores)
 
 
+def high_noncopy(models, releases, threshold, *, map_work=map):
+    """Bins where each solve has at least one track with high propagated noncopy support."""
+
+    def scan_bins(start):
+        stop = min(start + ORIGIN_BIN_BATCH, models[0].B)
+        bins = slice(start, stop)
+        high = np.ones((models[0].N, stop - start), dtype=bool)
+        for model, solved in zip(models, releases, strict=True):
+            support = np.zeros((model.N, 2, stop - start), dtype=np.float64)
+            # A child's support depends on both parental tracks in this solve. Independent bin batches run together.
+            for child in model.order:
+                for slot, parent in enumerate(model.par[child]):
+                    if parent >= 0:
+                        q0, q1 = solved[child].chain[slot, :, bins]
+                        support[child, slot] = (1.0 - (q0 + q1)) + q0 * support[parent, 0] + q1 * support[parent, 1]
+            high &= (support >= threshold).any(axis=1)
+        return high
+
+    return np.concatenate(tuple(map_work(scan_bins, range(0, models[0].B, ORIGIN_BIN_BATCH))), axis=1)
+
+
+def _disputed_bins(high, frame_starts, site_bin, parity):
+    """Select the sites in determinate, opposing bins of a bounded high-support tract."""
+    # Number runs on the full bin axis so a missing whole run cannot connect two observed stretches.
+    run = np.cumsum(np.r_[False, high[1:] != high[:-1]])
+    new_group = np.r_[True, site_bin[1:] != site_bin[:-1], False]
+    new_group[frame_starts] = True
+    group_starts = np.flatnonzero(new_group[:-1])
+    group_bins = site_bin[group_starts]
+    group_runs = run[group_bins]
+    group_frames = np.searchsorted(frame_starts, group_starts, side="right")
+    zero = np.logical_or.reduceat(parity == 0, group_starts)
+    one = np.logical_or.reduceat(parity == 1, group_starts)
+    informative = zero ^ one
+    changes = (group_frames[1:] != group_frames[:-1]) | (group_runs[1:] != group_runs[:-1])
+    stretches = np.r_[0, 1 + np.flatnonzero(changes), len(group_starts)]
+    mask = np.zeros(len(group_starts), dtype=bool)
+    for preceding, start, stop, following in zip(stretches, stretches[1:], stretches[2:], stretches[3:]):
+        if not high[group_bins[start]] or group_frames[start - 1] != group_frames[stop]:
+            continue
+        if group_runs[start] - group_runs[start - 1] != 1 or group_runs[stop] - group_runs[start] != 1:
+            continue
+        left = np.flatnonzero(informative[preceding:start])
+        right = np.flatnonzero(informative[stop:following])
+        if len(left) and len(right):
+            flank_order = one[preceding + left[-1]]
+            if flank_order == one[stop + right[0]]:
+                mask[start:stop] = informative[start:stop] & (one[start:stop] != flank_order)
+    return np.repeat(mask, np.diff(np.r_[group_starts, len(site_bin)]))
+
+
+def withhold_local_phase(agreed, high, site_bin, tie_starts, paint_rows, paint_alleles, panel_cols):
+    """Update phase flags and scores of the newly agreed release in the native phase frames."""
+    if not len(site_bin) or not high.any():
+        return
+    g0, g1 = agreed.calls.T
+    phased = (g0 >= 0) & (g1 >= 0) & (g0 != g1) & ~agreed.undetermined
+    a, b = paint_rows[:, site_bin]
+    a0, a1 = paint_alleles[a, panel_cols], paint_alleles[b, panel_cols]
+    comparable = phased & (a >= 0) & (b >= 0) & (a0 >= 0) & (a1 >= 0) & (a0 != a1)
+    parity = np.where(comparable, (a0 != g0).astype(np.int8), np.int8(-1))
+    frame_starts = np.union1d(agreed.set_starts, tie_starts)
+    mask = _disputed_bins(high, frame_starts, site_bin, parity) & phased
+    agreed.undetermined[mask] = True
+    if agreed.scores is not None:
+        agreed.scores[1, mask] = -1.0
+
+
 @kernel(
     overloads=tuple(
         (
@@ -147,4 +215,4 @@ def _agree_sites(calls_a, und_a, calls_b, und_b, starts, scores):
     return calls, undetermined
 
 
-__all__ = ["agreement", "edge_chains", "set_start_bins"]
+__all__ = ["agreement", "edge_chains", "high_noncopy", "set_start_bins", "withhold_local_phase"]

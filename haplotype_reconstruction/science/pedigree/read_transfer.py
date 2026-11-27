@@ -661,3 +661,75 @@ def class_transfers(first_child, stop_child, state_alt, gl, site_index, site_sta
                 # A basis vector can overflow even when the live input does not. Reapply that bin directly.
                 out[local, block, 0, 0, 0, 0] = np.nan
     return out
+
+
+@kernel(overloads=OVERLOADS["read_transfer.named_transfers"], cache=True, nogil=True)
+def named_transfers(out, bank, word, factor, moved, child, block, state_alt, gl, site_index, site_start, site_stop,
+                    read_offset, read_reset, read_width, read_operator, read_ratio_table):
+    """class_transfers' structured transfers of one child's bin for the state pairs whose first state is named (x
+    below BACKGROUND; any second state y, both with the panel's alleles, state_alt): ``out`` [C, C, S, S] receives
+    the leading read_width[child, block] by read_width[child, block + 1] entries of x < S - 1, by the same per-row
+    recurrence (move_gap, then the read factor; a unit exit width sums class mass), with states of one allele word
+    computed once. BACKGROUND's first state is a candidate's own allele and is not transferred here. ``bank`` [S, S,
+    C, C], ``word`` [S], ``factor`` and ``moved`` [C] are workspaces. The child has read slots in the bin. Returns
+    False when a transfer is not finite (a basis vector can overflow even when the live input does not: the caller
+    then carries that bin directly)."""
+    states = state_alt.shape[0]
+    classes = read_ratio_table.shape[2]
+    named = states - 1
+    for x in range(named):
+        for y in range(states):
+            for i in range(classes):
+                for j in range(classes):
+                    bank[x, y, i, j] = 1.0 if i == j else 0.0
+    base = read_offset[child] - site_start[child, 0]
+    first_slot, stop_slot = site_start[child, block], site_stop[child, block]
+    for x in range(states):
+        word[x] = x
+        for z in range(x):
+            if word[z] != z:
+                continue
+            same = True
+            for slot in range(first_slot, stop_slot):
+                if state_alt[x, site_index[slot]] != state_alt[z, site_index[slot]]:
+                    same = False
+                    break
+            if same:
+                word[x] = z
+                break
+    rows = read_width[child, block]
+    for slot in range(first_slot, stop_slot):
+        k = base + slot
+        site = site_index[slot]
+        for x in range(named):
+            if word[x] != x:
+                continue
+            a = state_alt[x, site]
+            for y in range(states):
+                if word[y] != y:
+                    continue
+                read_ratio(factor, read_ratio_table, k, a, state_alt[y, site], gl[child, site])
+                matrix = bank[x, y]
+                width = rows if slot == first_slot else classes
+                for i in range(rows):
+                    move_gap(read_operator[k], matrix[i], moved, width, read_reset[k])
+                    for j in range(classes):
+                        matrix[i, j] = moved[j] * factor[j]
+    leave = read_width[child, block + 1]
+    if leave == 1:
+        for x in range(named):
+            for y in range(states):
+                if word[x] == x and word[y] == y:
+                    matrix = bank[x, y]
+                    for i in range(rows):
+                        matrix[i, 0] = np.sum(matrix[i])
+    finite = True
+    for x in range(named):
+        for y in range(states):
+            matrix = bank[word[x], word[y]]
+            for i in range(rows):
+                for j in range(leave):
+                    value = matrix[i, j]
+                    out[i, j, x, y] = value
+                    finite &= np.isfinite(value)
+    return finite

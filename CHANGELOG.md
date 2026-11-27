@@ -1,5 +1,59 @@
 # Changelog
 
+## 4.24.0 (27 November 2026)
+
+4.24 improves genotype calls and family phase on realistic simulations, restores 4.20's pedigree retention band, and
+speeds up the pedigree and calibration stages without changing their results. Clean designs are unchanged.
+
+- **Calls.** A painting-informed site error model fits each contig's recurrent wrong-allele reads at painted
+  homozygotes, and adjusts the genotype likelihoods of the sites it selects.
+  - Genotype error falls on the realistic simulations:
+
+    | Simulation | 4.23.0 | 4.24 |
+    |---|---|---|
+    | famhs_corrected | 0.147 % | 0.079 % |
+    | f3_corrected | 0.190 % | 0.160 % |
+    | tromau_corrected | 0.154 % | 0.131 % |
+    | cs_tl | 0.155 % | 0.129 % |
+    | long-read famhs | 0.205 % | 0.163 % |
+
+  - [Phase methods](docs/methods/phase.md#site-specific-wrong-allele-reads)
+- **Family phase.**
+  - Phase sets are cut at tied transmission passages, and joins the data cannot orient are masked.
+  - Joins break score ties by allele-ranked anchors and exclude homozygous witnesses.
+  - With the site error model, switches fall on the realistic simulations:
+
+    | Simulation | 4.23.0 | 4.24 |
+    |---|---|---|
+    | tromau_corrected | 242 | 66 |
+    | cs_tl | 130 | 36 |
+    | f3_corrected | 181 | 61 |
+    | famhs_corrected | 112 | 81 |
+
+  - On the foreign-read arms, switches fall by up to 71 (unchanged on fr_len3k), and long switches by up to 9.
+  - Phased share rises by up to 0.33 points.
+  - Two TroMau-like simulations gain 2 Tier B edges each. No simulation has a false edge.
+- **Pedigree.**
+  - The M2 retention band is 4.20's again: T = max(1, ceil(selected markers / 100))^0.5
+    (`PanelParameters.markers_per_retention_block = 100`).
+  - On TroMau the M2 panel falls from 8,712 to 393 pairs, and the released Tier A and Tier B edges are identical to
+    4.23.0 (48 and 57).
+- **Speed, identical results.**
+  - Pedigree: identity memo caches and a child-major M1 route. TroMau pedigree span 634 → 467 s, CPU 25.5 k → 20.8 k s.
+  - Calibration: rate fits widen into free cores, read sharing and record identities run as their own tasks, outlier
+    reads are read once, and the divisor fold minimum is 8. TroMau calibration 2,285 → 2,071 s; the scattered
+    per-contig robustness and refine rounds are 2–3× faster.
+- **Unchanged.** Clean designs are identical to 4.23.0 or better by at most two switches (std, famhs_d, hsrand, bc8).
+- **Known limitations.**
+  - On clean simulated controls, the site error model takes a few mispainted heterozygotes of one founder row for
+    site errors: 31 false sites over 3.3 M on the full axis, +42 genotype errors.
+  - On famhs designs the read-aware divisor criterion is a near-tie at share zero. It picks the better divisor there,
+    but by a small margin.
+  - On the foreign-read simulations ad_foreign and ad_foreign_qc, family phase is still below 4.22.0's. Switches are
+    175 and 150, against 125 and 105 in 4.22.0.
+
+Start a fresh checkpoint root from the original inputs when moving to 4.24.
+
 ## 4.23.0 (26 November 2026)
 
 4.23 adds a foreign-read class to the read state for reads from another sample of the cross that entered a sample's

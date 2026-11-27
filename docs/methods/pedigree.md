@@ -481,11 +481,11 @@ Cost and scope: O(batch B S² m); O(batch·G·B·S²). These terms describe the 
 
 Query the complete maximal-bound tie class first, then exhaust the best frontier and floor frontier in that order. Compute retention with the dimension-fixed contiguous chromosome reduction before completing every local maximum. Apply the resulting floor profile exactly once to nonretained eligible identities. Every query verifies finite exact scores below their bounds; every unknown local cell must lie strictly below the completed local maximum. Batch width and cache lifecycle cannot change retention or the floor.
 
-The retention band is 60 T nats with T = units ** power, minimum 1, units the chromosome's selected markers with an empty bin counted as one (4.21 B2's effective units at r_T = 0); the genome band uses the summed units. The band and the pair cap ([ps15](#ps15)) are a compute budget of the birth-order decision ([pd08](#pd08)): on every measured root the wide band with the cap and with no cap gave the same decisions (4.22 R4).
+The retention band is 60 T nats with T = blocks ** power, blocks = ceil(markers / `markers_per_retention_block`) and at least one, markers the chromosome's selected markers; the genome band counts the blocks of the genome's summed markers. This is 4.20's band, restored in 4.24 (owner, 26 Nov 2026). 4.21 (B2) had set T = markers ** power, a band about ten times wider, and treated it with the pair cap ([ps15](#ps15)) as a compute budget of the birth-order decision ([pd08](#pd08)). The R6 one-change replays on the same paintings showed that the band is not neutral to decisions. Under the wider band the median M2 panel was more than twice 4.20's on 13 of 15 simulated designs (std 3 against 256 pairs). The block band brings every design back to 4.20's panel size and adds true Tier B edges on backcross and longbc (+6 each), with no false edge. It also removes true parents from the M2 panels of tl (28 parent-child memberships) and zero_stress (13), and leaves their released edges unchanged. The block is a count of selected markers, not a map length: at a fixed map length T grows with marker density.
 
 Implementation: [science/pedigree/selective_screen.py](../../haplotype_reconstruction/science/pedigree/selective_screen.py), [science/pedigree/selective_m1.py](../../haplotype_reconstruction/science/pedigree/selective_m1.py), [science/pedigree/m1.py](../../haplotype_reconstruction/science/pedigree/m1.py).
 
-Parameters by name: `LOG_FLOOR`, `information_tempering_power`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `LOG_FLOOR`, `information_tempering_power`, `markers_per_retention_block`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(C·batch·N); O(C ΣR). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
@@ -498,7 +498,7 @@ Compute robust diagnostic utility from tied-rank evidence and a centred softmax 
 
 Implementation: [science/pedigree/panel.py](../../haplotype_reconstruction/science/pedigree/panel.py).
 
-Parameters by name: `rank_weight`, `chromosome_contamination`, `maximum_contig_weight_ratio`, `information_tempering_power`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+Parameters by name: `rank_weight`, `chromosome_contamination`, `maximum_contig_weight_ratio`, `information_tempering_power`, `markers_per_retention_block`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
 
 Cost and scope: O(C Σ_c n_c); O(C N²). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 

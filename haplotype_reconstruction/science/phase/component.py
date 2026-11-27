@@ -39,12 +39,12 @@ from ..painting.api import (
     state_alt_probabilities,
     unpack_emissions,
 )
-from .agreement import agreement, edge_chains, set_start_bins
+from .agreement import agreement, edge_chains, high_noncopy, set_start_bins, withhold_local_phase
 from .allele_evidence import allele_evidence, allele_prior, flip_probabilities
 from .inputs import _state_alleles, edge_rates
 from .junctions import JunctionInputs, junction_candidates, withheld_joins
 from .model import LabelModel
-from .painting_inputs import component_bin_edges, tie_break_bins
+from .painting_inputs import component_bin_edges, tie_boundaries, tie_break_bins
 from .parameters import SITE_WINDOW, PhaseParameters
 from .release import ReleaseInputs, release_sample, shared_windows
 
@@ -232,7 +232,7 @@ def _solve_models(inputs, parameters, emissions, rates, map_work=None, concurren
     return models, parents
 
 
-def _forced_breaks(inputs, models, parents, bin_edges):
+def _forced_breaks(inputs, models, parents, bin_edges, painting_ties):
     """Union junctions, parental-pairing ambiguity and painting ties; only isolated ties may bridge (FP10-FP12)."""
     model, mirror = models
     final = [JunctionInputs(m.X, m.V, m.E, m.par, m.config, inputs.painting.bins_per_reference_window) for m in models]
@@ -246,7 +246,7 @@ def _forced_breaks(inputs, models, parents, bin_edges):
             for child in [parent] + solved.children_of(parent):
                 pairing.setdefault(child, set()).add(int(edge))
     positions = inputs.observations.positions
-    ties = tie_break_bins((inputs.painting,), positions, parents, bin_edges)
+    ties = tie_break_bins((inputs.painting,), positions, parents, bin_edges, boundaries=painting_ties)
     break_bins, tie_cuts = [], []
     for sample in range(len(parents)):
         tie_bins = ties[sample]
@@ -266,7 +266,8 @@ def _release_sites(inputs, bin_edges, bins):
     site_bins = np.searchsorted(bin_edges, positions, side="right") - 1
     indices = np.flatnonzero(valid & (site_bins >= 0) & (site_bins < bins))
     alleles = _state_alleles(inputs.painting.states, inputs.refit.inference, inputs.painting.states.n_states)
-    return indices, site_bins[indices], alleles[:, columns[indices]]
+    panel_columns = columns[indices]
+    return indices, site_bins[indices], alleles[:, panel_columns], panel_columns
 
 
 def _uncertainty(model, inputs, site_bins, site_alleles, site_gl, site_cohort, map_work=None):
@@ -429,8 +430,11 @@ def _phase_component(inputs, parameters, workspace):
     emissions = models[0].E
     model, mirror = models
     bin_edges = component_bin_edges(inputs.painting, inputs.refit.positions)
-    junctions, withheld, pairing, break_bins, tie_cuts = _forced_breaks(inputs, models, parents, bin_edges)
-    site_indices, site_bins, site_alleles = _release_sites(inputs, bin_edges, model.B)
+    map_work = workspace.map_work or map
+    painting = inputs.painting
+    painting_ties = tie_boundaries((painting,), inputs.observations.positions, range(model.N), map_work=map_work)
+    junctions, withheld, pairing, break_bins, tie_cuts = _forced_breaks(inputs, models, parents, bin_edges, painting_ties)
+    site_indices, site_bins, site_alleles, panel_columns = _release_sites(inputs, bin_edges, model.B)
     site_gl = (
         np.ascontiguousarray(inputs.observations.likelihoods[:, site_indices], dtype=np.float32)
         if workspace.prepare_likelihoods is None
@@ -453,16 +457,22 @@ def _phase_component(inputs, parameters, workspace):
         parameters,
         workspace,
     )
-    pairs = list(zip(*releases, strict=False))
-    if workspace.map_work is not None:
-        # Samples' agreements are independent of one another.
-        agreed = workspace.map_work(lambda pair: agreement(pair[0], pair[1], site_bins), pairs)
-    else:
-        agreed = [agreement(first, second, site_bins) for first, second in pairs]
-    if workspace.map_work is not None:
-        starts = tuple(workspace.map_work(lambda value: set_start_bins(value.set_starts, site_bins, model.B), agreed))
-    else:
-        starts = tuple(set_start_bins(value.set_starts, site_bins, model.B) for value in agreed)
+    high = high_noncopy(models, releases, parameters.phase_posterior, map_work=map_work)
+    singleton = np.asarray([rows[0] if len(rows) == 1 else -1 for rows in painting.member_sets], dtype=np.intp)
+
+    def agree_sample(sample):
+        agreed = agreement(releases[0][sample], releases[1][sample], site_bins)
+        if painting.eligible[sample] and high[sample].any():
+            tie_starts = np.searchsorted(site_indices, painting_ties[sample], side="right")
+            withhold_local_phase(
+                agreed, high[sample], site_bins, tie_starts, singleton[painting.member_ids[sample]],
+                painting.panel_inference, panel_columns,
+            )
+        return agreed
+
+    # Samples' agreements and local masks are independent after the origin scan.
+    agreed = tuple(map_work(agree_sample, range(model.N)))
+    starts = tuple(map_work(lambda value: set_start_bins(value.set_starts, site_bins, model.B), agreed))
     chains = edge_chains(
         model,
         mirror,
@@ -496,7 +506,7 @@ def _phase_component(inputs, parameters, workspace):
             tuple[tuple[SampleRelease, ...], tuple[SampleRelease, ...]],
             tuple(tuple(per_solve) for per_solve in releases),
         ),
-        tuple(agreed),
+        agreed,
         tuple(
             MeiosisChain(*chains[(int(p), int(c), int(k))])
             for p, c, k in zip(inputs.pedigree.parents, inputs.pedigree.children, inputs.pedigree.slots, strict=False)
@@ -584,7 +594,9 @@ def phase_contig(
         mirror_row, pairing_row = solve_diagnostics(state, parameters)
         mirrored.append(mirror_row)
         pairing_rows.append(pairing_row)
-        ties = tie_break_bins((painted,), component.observations.positions, state.parents, bin_edges)
+        positions_local = component.observations.positions
+        painting_ties = tie_boundaries((painted,), positions_local, range(n), map_work=workspace.map_work or map)
+        ties = tie_break_bins((painted,), positions_local, state.parents, bin_edges, boundaries=painting_ties)
         indices = lo + state.result.site_indices
 
         def write_sample(sample, state=state, ties=ties, indices=indices, lo=lo):

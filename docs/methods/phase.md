@@ -150,6 +150,43 @@ Parameters: supplied typed inputs and the stage’s [parameter record](../refere
 
 Cost and scope: O(L + S m). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
 
+### Site-specific wrong-allele reads
+
+Family phase estimates a recurrent wrong-read rate at each QC-kept site, using the
+published painting and the original founder panel. The two named tracks and their
+called panel alleles supply a projected genotype. Only painted homozygotes with
+reads contribute to the fit. Libraries excluded by sample QC or fitted with a
+separate contamination correction supply no fitting evidence.
+
+The likelihood for a contributing cell averages its genotype likelihoods against
+a working prior. The prior assigns weight `1 − b` to the painted homozygote and
+weight `b` to the existing cohort genotype distribution, where
+`b = 1 − (1 − ε)(1 − u)`. Here `ε` is the painting's outlier rate, and `u` is
+the finite released-pair error in that bin, or zero when unavailable. This
+allows uncertainty in the painting to explain recurrent minor reads.
+
+Each alternative changes one homozygote's wrong-read probability from the fitted
+library rate `e` to `e + (1 − 2e)h`. The opposite homozygote and the native
+heterozygote balance and dispersion retain their original laws. The slab gives
+equal weight to both directions and the eight dyadic values of `h` from
+`1/1024` to `1/8`. Family phase sums the log likelihood ratios over eligible
+libraries and fits the slab prevalence by maximizing the contig's marginal
+likelihood. The slab is retained only when its gain exceeds half the log of the
+number of kept sites. A direction needs a strict posterior majority and uses
+its conditional posterior mean rate.
+
+Family phase uses the resulting site likelihood for carrier allele evidence,
+own-read subtraction, flips, and the ordered posterior in both solve orders,
+including whole-bin and anchored orientation calculations. Sites without a
+selected direction and libraries under a separate contamination correction
+retain their native likelihoods. The binned emissions and solves use their
+original observation model. The fitted rates are conditional on the painting
+and cohort frequencies, which can themselves use the focal reads.
+
+Implementation: [science/phase/site_error.py](../../haplotype_reconstruction/science/phase/site_error.py), [stages/phase/tasks.py](../../haplotype_reconstruction/stages/phase/tasks.py).
+
+Parameters by name: `site_error_rates`, `site_error_bic_penalty`, `site_error_direction_posterior`, `SITE_ERROR_BATCH`, `SITE_ERROR_BISECTIONS`, `SITE_ERROR_PREVALENCE_BOUNDARY`. Values and provenance are in the [generated parameter reference](../reference/parameters.md).
+
 <a id="fp14"></a>
 ## fp14 Panel-allele uncertainty (prior, carrier evidence, flips, own terms)
 
@@ -198,7 +235,7 @@ Cost and scope: O(m). These terms describe the unit’s work/storage dimensions;
 <a id="fp18"></a>
 ## fp18 Gauge-sample anchor partitions and orientation-certainty set ends
 
-For an unlinked sample without child tracks, partition at hard cuts and choose the first confident heterozygous anchor in each interval. Anchor by strict label order and recompute the conditional posterior. End the set at the first later sufficiently heterozygous bin losing orientation certainty; NaN certainty does not trigger that stop. Include pre-anchor bins in the anchored partition and compute orientation medians over whole bins. The orientation certainty uses the set statistic's own site model, a departure `set_site_deviation` against a uniform genotype, rather than the run's outlier rate: under that rate a fully determined common heterozygote caps below `set_posterior`, and every heterozygous bin ended a set on real data. The parameters refuse a `set_posterior` at or above the ceiling (1 − 5d/6)/(1 − 2d/3). A partition without an anchor releases no phase. After each anchor, forward lookahead starts at one bin and doubles after a piece passes the continuation test, up to the bounded work per piece. Each bin uses the same posterior recursion.
+For an unlinked sample without child tracks, partition at hard cuts and choose the first confident heterozygous anchor in each interval. Anchor so that homologue 0 carries the label ranked first, and recompute the conditional posterior. Labels are ranked by how closely their panel alleles at the anchor bin match homologue 0 of the bin's most probable label pair taken in label order: over the bin's sites where that pair's two alleles are known and differ, sites matching its first allele minus sites matching its second, with unknown alleles counting for neither. Equal scores keep the pair's first label first and its second label last among the labels that score as they do, so a label carrying the same alleles never splits a pair label across homologues; other ties go by label index. Where the pair's alleles never differ in the bin, the alleles give no frame and labels are ranked by index. The ranking is a strict total order, so the anchor is still a gauge: unordered posteriors, genotype calls and missingness are unchanged, and the most probable pair keeps its label order. The ranking fixes the allele frame where the anchor's posterior splits between pairs that share a label in swapped sorted positions. Ranking by label index alone would put that label on opposite homologues there, and the mixed frame would end the set at the next tested bin and at every re-anchor after it. Where no posterior mass sits on pairs that the ranking orders against label order, the anchor selects the same mass as ranking by label index. End the set at the first later sufficiently heterozygous bin losing orientation certainty; NaN certainty does not trigger that stop. Include pre-anchor bins in the anchored partition and compute orientation medians over whole bins. The orientation certainty uses the set statistic's own site model, a departure `set_site_deviation` against a uniform genotype, rather than the run's outlier rate: under that rate a fully determined common heterozygote caps below `set_posterior`, and every heterozygous bin ended a set on real data. The parameters refuse a `set_posterior` at or above the ceiling (1 − 5d/6)/(1 − 2d/3). The median runs over the bin's witness sites: the sites confidently heterozygous under that model, except those that the labels alone (the same site model with no departure) make confidently homozygous, each with its certainty under the set model. A site the labels alone make homozygous is heterozygous only through the departure: it has equal probability of either allele order under every frame and is no evidence about the frame, and in a bin with one or two confident sites it would otherwise decide the median. Every other confident site stays, so a label pair whose alleles cannot produce the reads still enters at 50/50 wherever another candidate pair explains part of the heterozygote, which keeps the departure's guard against near-ties at read-incompatible label pairs. A bin without a witness is untested. A partition without an anchor releases no phase. After each anchor, forward lookahead starts at one bin and doubles after a piece passes the continuation test, up to the bounded work per piece. Each bin uses the same posterior recursion.
 
 Implementation: [science/phase/release.py](../../haplotype_reconstruction/science/phase/release.py).
 
@@ -209,7 +246,7 @@ Cost and scope: O(m_partition S^2). These terms describe the unit’s work/stora
 <a id="fp19"></a>
 ## fp19 Children-anchored painting-tie gate (B)
 
-For an unlinked sample with children, inspect finite orientation bins immediately before and at/after each tie-only cut. Bridge only when both sides reach the set-posterior threshold, with the same set statistic as fp18. Each solve decides separately and agreement keeps any break either retains. Linked samples and gauge-only samples do not use this gate.
+For an unlinked sample with children, inspect finite orientation bins immediately before and at/after each tie-only cut. Bridge only when both sides reach the set-posterior threshold, with the same set statistic as fp18: its site model and its witness sites. Each solve decides separately and agreement keeps any break either retains. Linked samples and gauge-only samples do not use this gate.
 
 Implementation: [science/phase/release.py](../../haplotype_reconstruction/science/phase/release.py).
 
@@ -220,13 +257,30 @@ Cost and scope: O(m S^2). These terms describe the unit’s work/storage dimensi
 <a id="fp20"></a>
 ## fp20 Agreement of the two solves and phase-break encoding
 
-Require genotype agreement across the two solves and retain the default solve’s calls where they agree. A heterozygote is phased only when neither solve leaves its frame undetermined. Union break bins, then split again wherever the relative flip between consecutive phased sites changes within a set. The first site is not an explicit break. Release preserves orientation only up to a single flip per resulting phase set.
+For a child with two fitted incoming parents, test consecutive fully copied bins with different child labels when
+at least one intervening bin has equal child labels. The passage is eligible when complementing both source indices
+at either anchor reverses the ordered label pair there. In each solve, fix the parental diplotypes and the child's
+copy/noncopy skeleton. Sum over four source pairs from uniform initial indices using the existing meiosis switch
+rates. A transition touching a noncopy bin resets that slot to uniform and its fitted label is used in that bin.
+Multiply the child's per-site genotype likelihoods, using the refit alleles, own-term-corrected flip probabilities
+and cohort outlier mixture. A site with any uncalled candidate allele contributes neutral evidence to every state.
+Forward and backward messages include both flanks. At the anchors restrict states to the fitted unordered pairs
+and compare path mass for matching versus differing endpoint reversal bits. Add a break at the right anchor if the
+log odds fall below the logit of `set_posterior`. The calculation uses independent site factors conditional on the
+fixed tracks and skeleton. Per child and solve it uses O(B + m) work and O(B) additional storage with the existing
+own-term correction. Independent releases use the stage's thread map.
 
-Implementation: [science/phase/agreement.py](../../haplotype_reconstruction/science/phase/agreement.py), [stages/phase/tasks.py](../../haplotype_reconstruction/stages/phase/tasks.py).
+Require genotype agreement across the two solves and retain the default solve’s calls where they agree. A heterozygote is eligible for phase when both solves determine its frame. Union break bins, then split wherever the relative flip between consecutive phased sites changes within a set. The first site is implicit. The native set preserves orientation up to one global flip.
 
-Parameters: supplied typed inputs and the stage’s [parameter record](../reference/parameters.md); any convention is an explicit [tie policy](../developer/ties.md). This unit has no additional independent setting.
+Propagate noncopy support \(U\) separately for each solve, homologue and bin. Unlinked slots have zero support. In parent-before-child order, let \(q_0,q_1\) be the linked slot’s two conditional copy probabilities and \(U_{p0}, U_{p1}\) the corresponding parental supports. Compute \(U = (1 - (q_0+q_1)) + q_0 U_{p0} + q_1 U_{p1}\). The products of conditional marginals approximate support along the observed ancestry. A bin has high support where each solve has at least one track with \(U\) at or above `phase_posterior`, the same confidence required to release a copy source.
 
-Cost and scope: O(m). These terms describe the unit’s work/storage dimensions; iteration and candidate limits are the named parameters above.
+Within each native set and uninterrupted painting frame, a bin votes on the relative allele order only if all comparable phased heterozygotes agree. Comparable sites have two distinct, known alleles on singleton rows from the original painting panel. A high-support tract needs flanks in both immediately adjoining low-support stretches, within the same frame and set. Use the nearest determinate bin on each side. If both flanks vote alike, withhold heterozygous phase in determinate interior bins that vote oppositely. Unobserved bins still contribute to the high- and low-support runs. Painting supplies a competing interpretation of shared observations. The mask preserves ordered call arrays, genotypes, phase-set boundaries and meiosis-chain inputs.
+
+Implementation: [science/phase/transmission_passages.py](../../haplotype_reconstruction/science/phase/transmission_passages.py), [science/phase/agreement.py](../../haplotype_reconstruction/science/phase/agreement.py), [science/phase/component.py](../../haplotype_reconstruction/science/phase/component.py).
+
+Parameters by name: `set_posterior`, `phase_posterior`, `ORIGIN_BIN_BATCH`. The second controls only the scratch size of the parallel origin scan. See the [generated parameter reference](../reference/parameters.md).
+
+Cost and scope: O((N + E)B) for N samples, E observed edges and B bins, plus marker scans for painting-eligible samples with high support. The mask reuses painting tie comparisons of at most O(K) per track boundary. Independent bin batches and sample releases use the stage’s budgeted thread map.
 
 <a id="fp21"></a>
 ## fp21 Meiosis-chain release (set-start resets, cross-solve alignment, chain arrays)

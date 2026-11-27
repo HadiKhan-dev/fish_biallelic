@@ -51,15 +51,13 @@ def robust_screen_values(
     markers: np.ndarray,
     eligibility: ParentEligibility,
     config: PedigreeParameters,
-    units: np.ndarray,
 ) -> np.ndarray:
     """robust_screen with each child's per-chromosome M1 scores [C, P] of its eligible parents from
-    ``values_of(child, parents)`` (e.g. CompactM1.values), never a dense [C, N, N] array. ``units``: the retention
-    band's units per chromosome (m1.retention_units)."""
+    ``values_of(child, parents)`` (e.g. CompactM1.values), never a dense [C, N, N] array."""
     panel = config.panel
     output = np.full((n_samples, n_samples), -np.inf, dtype=np.float64)
     weights = chromosome_weights(markers, config)
-    tempering = m1.temperature(units, config)
+    tempering = m1.temperature(markers, config)
     # Caller supplies the fixed genome-floor values; retained entries stay raw.
     for child in np.flatnonzero(eligibility.children):
         parents = np.flatnonzero(eligibility.parents[child])

@@ -257,6 +257,23 @@ def bound_upstream(
         return bound
 
 
+def run_binding(store: CheckpointStore) -> tuple[str, int, int]:
+    """The per-process cache key of a run folder's derived identities: (run directory, its run container's inode,
+    record-reuse pin generation). Published records never change and the pin generation fixes the code identities the
+    derivations bind; the inode separates a run folder made again at the same path. Callers also check the manifest."""
+    run = store.run.path
+    return os.path.realpath(store.root), os.stat(run).st_ino if os.path.exists(run) else -1, pin_generation()
+
+
+# Painting requests this process derived: run_binding + (contig, product) -> (manifest, Reader). The identity is a
+# pure function of the manifest, the checked upstream headers (bound_upstream, and the assembly, evidence and run
+# calibration publications, which never change once published) and the contig's bound payload; a failed check
+# raises and is never remembered. The contamination decision, the refit priors and the run calibration bind every
+# contig's painting, so a pedigree task derived these requests 138 times on TroMau (each re-reading headers).
+_EXPECTED: dict[tuple, tuple[Any, Reader]] = {}
+_EXPECTED_GUARD = threading.Lock()
+
+
 def expected(
     store: CheckpointStore,
     manifest: Mapping[str, Any],
@@ -267,8 +284,28 @@ def expected(
     """Rebuild painting identity from checked assembly/evidence requests and run settings.
 
     Never read an expected identity from this product's own envelope. Physical
-    cache presence is independent of the scientific identity and its schema.
-    """
+    cache presence is independent of the scientific identity and its schema. Derived once per process and run
+    folder (_EXPECTED)."""
+    key = (*run_binding(store), contig, product)
+    with _EXPECTED_GUARD:
+        cached = _EXPECTED.get(key)
+    if cached is not None and (cached[0] is manifest or cached[0] == manifest):
+        return cached[1]
+    request = _derive_expected(store, manifest, product=product, contig=contig)
+    if request is not None:
+        with _EXPECTED_GUARD:
+            _EXPECTED[key] = (manifest, request)
+    return request
+
+
+def _derive_expected(
+    store: CheckpointStore,
+    manifest: Mapping[str, Any],
+    *,
+    product: str,
+    contig: str | None = None,
+) -> Reader | None:
+    """expected, derived afresh."""
     from ...science.painting.parameters import PaintingParameters
 
     if contig is None or contig not in manifest["contigs"]:
@@ -343,10 +380,10 @@ def result_reader(
             return None
     if product == "summary":
         return request
-    assembled = assembly_records.result_reader(store, manifest, product="assembly", contig=contig)
-    evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
     assembly = None
     if (panels and product in ("painting", "reference")) or product == "painting_report":
+        # expected checked the assembly and evidence headers; their readers are needed only for these views
+        assembled = assembly_records.result_reader(store, manifest, product="assembly", contig=contig)
         assembly_record = resume(file, assembled.key, assembled.identity)
         if assembly_record is None:
             raise InvariantError("painting upstream publication is incomplete")
@@ -359,6 +396,7 @@ def result_reader(
             require_schema(cache.payload, SCHEMA)
             packed = tuple(cache.payload["packed_emissions"])
     if product == "painting_report":
+        evidence = evidence_records.result_reader(store, manifest, product="evidence", contig=contig)
         arrays = evidence_records.load_arrays(file, ("positions", "observed"), expected_identity=evidence.identity)
         arrays["observed"].flags.writeable = False
         histories: list[tuple[tuple[int, int, int, JoinSummaryView], ...]] = []
